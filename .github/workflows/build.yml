@@ -1,0 +1,101 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One tree, three platforms. All with -Werror, all asserting the vector
+  # backend was picked over the scalar fallback.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     build_type: Release }
+          - { os: ubuntu-24.04,     build_type: Debug }
+          - { os: ubuntu-24.04,     build_type: Release, cxx: clang++ }
+          - { os: ubuntu-24.04-arm, build_type: Release }
+          - { os: ubuntu-24.04-arm, build_type: Debug }
+          - { os: macos-latest,     build_type: Release }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'macOS'
+        run: brew install libomp
+      - name: configure
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+      # The ISA flags once lived in CMAKE_CXX_FLAGS_RELEASE, so other build types
+      # compiled the HAL without them and src/hal/arch.h fell back to the scalar
+      # kernels. Assert they reach the actual compile line, in every build type.
+      - name: the ISA flags reach the HAL compile line
+        run: |
+          python3 - <<'EOF'
+          import json, platform, sys
+          db = json.load(open("build/compile_commands.json"))
+          tu = next(e for e in db if e["file"].endswith("src/hal/common/gemm.cpp"))
+          cmd = e_cmd = tu.get("command") or " ".join(tu["arguments"])
+          mach = platform.machine()
+          want = ["-mavx2", "-mfma"] if mach == "x86_64" else (
+              ["-mcpu=native"] if sys.platform == "darwin" else ["-march=armv8-a+simd"])
+          missing = [f for f in want if f not in cmd]
+          if missing:
+              sys.exit(f"{mach}: {missing} absent from the HAL compile line:\n{e_cmd}")
+          print(f"{mach}: {want} present")
+          EOF
+
+  # The Zen-tuned attention backend has no other job that compiles it.
+  amd-backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DVLA_HAL=amd -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - run: cmake --build build -j$(nproc)
+
+  # Installs, exports, and links from an out-of-tree consumer.
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake --preset release && cmake --build --preset release -j$(nproc)
+      - run: cmake --install build --prefix "$PWD/stage"
+      - name: find_package + link
+        run: |
+          mkdir -p /tmp/c && cd /tmp/c
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.21)
+          project(consumer C)
+          find_package(vla_simd REQUIRED)
+          add_executable(use use.c)
+          target_link_libraries(use PRIVATE vla::vla_simd_smolvla)
+          EOF
+          cat > use.c <<'EOF'
+          #include <vla_simd.h>
+          int main(void){ return vla_abi_version() == VLA_ABI_VERSION ? 0 : 1; }
+          EOF
+          cmake -S . -B b -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/stage"
+          cmake --build b
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/stage/lib" ./b/use
+      # vla_abi_version lived in act_capi.cpp only, so the other libraries
+      # did not export the symbol their own header declares.
+      - name: every library exports the ABI symbol
+        run: |
+          for l in act smolvla octo turbovla impact diffusion; do
+            nm -D --defined-only "stage/lib/libvla_simd_$l.so" | grep -q vla_abi_version \
+              || { echo "libvla_simd_$l.so is missing vla_abi_version"; exit 1; }
+          done

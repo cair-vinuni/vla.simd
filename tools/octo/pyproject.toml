@@ -1,0 +1,52 @@
+# Reference environment for the Octo checkpoint conversion tools.
+#
+# A deliberately frozen stack. convert_octo.py drives the authoritative JAX
+# model, so the versions are the ones octo-small-1.5 was released with. Bumping
+# jax/flax does not modernize the tool, it changes what the conversion reads:
+# `octo` is written against jax 0.4.x. None of this is needed to run or serve.
+#
+# It runs once per checkpoint, offline, in its own venv:
+#
+#   git clone https://github.com/octo-models/octo third_party/octo
+#   uv venv --python 3.10 .venv-octo && . .venv-octo/bin/activate
+#   uv pip install -e ./tools/octo
+#   uv pip install -e third_party/octo --no-deps      # NOT a dependency below:
+#                                                    # it must not pull its own pins
+#   python tools/octo/convert_octo.py build/octo
+#
+# The `third_party/octo` checkout is required and is not vendored here (separate
+# Apache-2.0 project, kept out by .gitignore). convert_octo.py sys.path-inserts
+# it and exits with instructions if it is missing.
+#
+# convert_t5_tokenizer.py runs here too: it needs transformers + sentencepiece,
+# and transformers 4.x caps huggingface-hub below what the torch-free convert
+# environment requires, so the two cannot share a venv.
+
+[project]
+name = "octo-convert"
+version = "1.1.0"
+description = "Checkpoint conversion for the vla.simd octo port"
+requires-python = ">=3.10,<3.11"   # jax 0.4.20 ships no wheels past 3.10
+dependencies = [
+    "jax==0.4.20",                 # the version octo-small-1.5 was released against
+    "flax==0.7.5",                 # jax 0.4.20-compatible
+    "tensorflow-cpu==2.15.0",      # only for tf.io.gfile, which orbax uses to read the checkpoint
+    "distrax==0.1.5",              # octo's action head imports it
+    "chex==0.1.85",                # distrax/optax dependency, pinned with them
+    "optax==0.1.5",
+    "tensorflow-probability==0.23.0",
+    "numpy==1.24.3",               # jax 0.4.20 predates the numpy 2 ABI
+    "ml_dtypes==0.2.0",            # must match jax 0.4.20's expectation
+    "scipy==1.11.4",               # must stay <1.13 for jax 0.4.20
+    "einops==0.7.0",               # last release before the 0.8 API churn
+    "transformers==4.36.2",        # the T5 tokenizer octo's ids were produced with
+    "sentencepiece==0.1.99",       # what transformers 4.36 was released against
+    "huggingface_hub==0.20.3",     # transformers 4.36 predates the hub 1.0 rename
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []             # metadata-only: installs the pinned deps, no package

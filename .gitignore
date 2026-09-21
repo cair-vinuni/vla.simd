@@ -1,0 +1,15 @@
+# build
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# converted checkpoints
+*.bin
+*.meta
+!CMakeLists.txt
+
+# python
+.venv*/
+__pycache__/
+*.py[cod]
