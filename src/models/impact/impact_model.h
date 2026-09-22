@@ -16,7 +16,7 @@
 // chunk x action_dim. Everything the lerobot processor pipeline does around the
 // network lives here: image rescale + per-channel normalization, state
 // normalization, tokenization, and the un-normalization of the predicted actions
-// (MEAN_STD, eps 1e-8). Weights + stats from tools/impact/convert_impact.py.
+// (MEAN_STD, eps 1e-8). Weights + stats from tools/convert_impact.py.
 //
 // The instruction is an EPISODE constant, and this class is built around that.
 // set_instruction() runs the whole language pathway once - tokenize, remap,

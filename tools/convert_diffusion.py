@@ -3,12 +3,12 @@
 convert_diffusion.py -- convert a lerobot Diffusion Policy checkpoint into the
 flat .meta/.bin arenas the vla.simd engine loads.
 
-    python3 tools/diffusion/convert_diffusion.py \
-        --checkpoint ~/work/lerobot/outputs/train/dp_so101/checkpoints/last/pretrained_model \
+    python3 tools/convert_diffusion.py \
+        --ckpt ~/work/lerobot/outputs/train/dp_so101/checkpoints/last/pretrained_model \
         --out build/diffusion_so101
 
     # structural export with no trained weights, for bringing a port up:
-    python3 tools/diffusion/convert_diffusion.py --random-init --out build/diffusion_rand
+    python3 tools/convert_diffusion.py --random-init --out build/diffusion_rand
 
 Writes, into --out:
 
@@ -393,13 +393,13 @@ def _checkpoint_stats(path, cfg):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint")
+    ap.add_argument("--ckpt")
     ap.add_argument("--random-init", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("--scheduler", default=None, choices=["DDPM", "DDIM"])
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
-    # random-init shape knobs; ignored with --checkpoint
+    # random-init shape knobs; ignored with --ckpt
     ap.add_argument("--n-obs-steps", type=int, default=2)
     ap.add_argument("--n-cams", type=int, default=2)
     ap.add_argument("--img-h", type=int, default=480)
@@ -417,8 +417,8 @@ def main():
                     help="comma-separated UNet channel widths, e.g. 64,128,256")
     args = ap.parse_args()
 
-    if bool(args.checkpoint) == bool(args.random_init):
-        sys.exit("give exactly one of --checkpoint or --random-init")
+    if bool(args.ckpt) == bool(args.random_init):
+        sys.exit("give exactly one of --ckpt or --random-init")
 
     torch.manual_seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
@@ -427,8 +427,8 @@ def main():
         log("building a random-init DiffusionPolicy (port validation only)")
         policy, cfg, cams, img_hw, stats = build_random(args)
     else:
-        log(f"loading {args.checkpoint}")
-        policy, cfg, cams, img_hw, stats = load_checkpoint(args.checkpoint)
+        log(f"loading {args.ckpt}")
+        policy, cfg, cams, img_hw, stats = load_checkpoint(args.ckpt)
 
     scheduler = args.scheduler or ("DDIM" if cfg.noise_scheduler_type == "DDIM" else "DDPM")
     steps = args.steps or cfg.num_inference_steps or cfg.num_train_timesteps

@@ -13,7 +13,7 @@
 // Octo SmallStem16 image tokenizer: 4x (3x3 stride-2 conv + GroupNorm + ReLU), then
 // a 1x1 "embedding" conv to embed_dim. Input is the observation RGB stacked with the
 // goal RGB channel-wise (6ch); weight standardization is folded into the dumped conv
-// weights. Weights: stem_{primary,wrist}.meta/.bin from tools/octo/convert_octo.py.
+// weights. Weights: stem_{primary,wrist}.meta/.bin from tools/convert_octo.py.
 
 namespace tcpu {
 

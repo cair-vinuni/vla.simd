@@ -3,7 +3,7 @@
 convert_act.py -- convert a lerobot ACT checkpoint into the flat .meta/.bin
 arena the vla.simd engine loads.
 
-    python tools/act/convert_act.py khanhnd61/act_so101_tape build/act
+    python tools/convert_act.py khanhnd61/act_so101_tape build/act
 
 Run it in a venv that has lerobot: the checkpoint is read through ACTPolicy so the
 config, the processor pipeline and the dataset stats come from the same source the
@@ -286,10 +286,24 @@ def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("ckpt", help="lerobot ACT checkpoint (hub id or local dir)")
-    p.add_argument("out", nargs="?", default="build/act", help="output dir (default: build/act)")
+    # Accepts both shapes: the positional pair this script has always taken, and
+    # the --ckpt/--out of the other converters. The flags win if both are
+    # given.
+    p.add_argument("ckpt", nargs="?", default=None,
+                   help="lerobot ACT checkpoint (hub id or local dir)")
+    p.add_argument("out", nargs="?", default=None,
+                   help="output dir (default: build/act)")
+    p.add_argument("--ckpt", dest="ckpt_flag", default=None,
+                   help="same as the positional checkpoint")
+    p.add_argument("--out", dest="out_flag", default=None,
+                   help="same as the positional out dir")
     p.add_argument("--task", default=None, help="instruction to record in config.txt")
     args = p.parse_args()
+
+    args.ckpt = args.ckpt_flag or args.ckpt
+    args.out = args.out_flag or args.out or "build/act"
+    if not args.ckpt:
+        p.error("a checkpoint is required, positionally or with --ckpt")
 
     from lerobot.policies.act.modeling_act import ACTPolicy
     from lerobot.policies.factory import make_pre_post_processors

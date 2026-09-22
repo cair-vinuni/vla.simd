@@ -5,8 +5,8 @@ convert_lerobot_octo.py
 Convert a finetuned lerobot Octo checkpoint into the flat .meta/.bin weight format
 of the vla.simd engine.
 
-    python3 tools/octo/convert_lerobot_octo.py \
-        --checkpoint khanhnd61/octo_so101_tape \
+    python3 tools/convert_lerobot_octo.py \
+        --ckpt khanhnd61/octo_so101_tape \
         --t5-from build/octo --out build/octo_so101
 
 Why this exists alongside convert_octo.py: that script converts the authoritative
@@ -196,7 +196,7 @@ def stats_of(pipeline, key):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", required=True, help="hub id or local dir")
+    ap.add_argument("--ckpt", required=True, help="hub id or local dir")
     ap.add_argument("--out", required=True)
     ap.add_argument("--t5-from", default="build/octo",
                     help="existing dump to copy the frozen t5 tower + tokenizer from")
@@ -204,7 +204,7 @@ def main():
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
-    ckpt = args.checkpoint
+    ckpt = args.ckpt
     if not os.path.isdir(ckpt):
         from huggingface_hub import snapshot_download
         ckpt = snapshot_download(ckpt)
@@ -255,7 +255,7 @@ def main():
     with open(f"{out}/config.txt", "w") as f:
         f.write(f"instruction {args.task}\nwindow {window}\n")
         f.write(f"steps {cfg.num_diffusion_steps}\n")
-        f.write(f"checkpoint {args.checkpoint}\n")
+        f.write(f"checkpoint {args.ckpt}\n")
         f.write(f"action_dim {action_dim}\nhorizon {cfg.chunk_size}\n")
 
     total = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out)

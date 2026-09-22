@@ -12,8 +12,8 @@
 // it into the initialization), ReLU FFN, no linear biases, final RMSNorm.
 //
 // Every dimension is a config field, so the same code is T5-base (Octo:
-// t5.meta/t5.bin from tools/octo/convert_octo.py) and T5-small (IMPACT:
-// text.meta/text.bin from tools/impact/convert_impact.py) - hence the
+// t5.meta/t5.bin from tools/convert_octo.py) and T5-small (IMPACT:
+// text.meta/text.bin from tools/convert_impact.py) - hence the
 // `stem` argument to load().
 //
 // `vocab` is whatever the embedding table in the arena has. A checkpoint may

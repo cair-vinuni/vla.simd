@@ -5,7 +5,7 @@
 
 #pragma once
 
-// ACT (Action Chunking Transformer) dims, from tools/act/convert_act.py.
+// ACT (Action Chunking Transformer) dims, from tools/convert_act.py.
 // See docs/10-act-design.md for the architecture these describe.
 
 namespace tcpu {

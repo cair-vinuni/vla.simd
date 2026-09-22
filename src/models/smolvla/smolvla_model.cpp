@@ -36,7 +36,7 @@ namespace tcpu {
 //
 // The vision tower is 88% of a query on a Pi 5 and 77% of the tower is these
 // GEMMs, so 7 is where nearly all of the win is. Measured on a Pi 5 against
-// tools/smolvla/ref_smolvla.py, RMS over 8 observations, in the arm's own units
+// tools/ref_smolvla.py, RMS over 8 observations, in the arm's own units
 // (mean |action| 64.6 deg): 8 -> 0.091, 32 -> 0.104, 16 -> 0.148, 1 -> 0.227,
 // 2 -> 0.238, 4 -> 0.907. **fc2 (bit 4) carries most of the error** - its input
 // is the GELU output, whose long positive tail drags the per-token absmax and

@@ -6,10 +6,10 @@ Convert the authoritative Octo-Small-1.5 JAX checkpoint into the flat fp32
 arenas the C++ engine loads. Setup env according to README.md, then run at the
 top of the repo:
 
-  python tools/octo/convert_octo.py [OUT_DIR] [--inspect]
+  python tools/convert_octo.py [OUT_DIR] [--ckpt ID_OR_DIR] [--inspect]
 
 Checkpoint: rail-berkeley/octo-small-1.5, fetched from the HF hub on first run;
-set OCTO_CKPT=/path/to/checkpoint to use a local copy instead.
+pass --ckpt, or set OCTO_CKPT, to use a local copy instead.
 
 Outputs (default build/octo/):
   config.txt                 text KV: all dims
@@ -21,17 +21,26 @@ Outputs (default build/octo/):
   head.meta / head.bin       diffusion score net + beta schedule
   stats_action_{mean,std,mask}.bin   bridge_dataset action stats [7]
 """
+import argparse
 import os
 import sys
 
 import numpy as np
 
-CKPT = os.environ.get("OCTO_CKPT", "hf://rail-berkeley/octo-small-1.5")
-OUT = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "build/octo"
-INSPECT = "--inspect" in sys.argv
+_p = argparse.ArgumentParser(description=__doc__,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+_p.add_argument("out", nargs="?", default="build/octo", help="output dir (default: build/octo)")
+_p.add_argument("--ckpt", default=os.environ.get("OCTO_CKPT", "hf://rail-berkeley/octo-small-1.5"),
+                help="hub id or local dir (default: $OCTO_CKPT, else the released octo-small-1.5)")
+_p.add_argument("--inspect", action="store_true", help="print the param tree and exit")
+_a = _p.parse_args()
+
+CKPT = _a.ckpt
+OUT = _a.out
+INSPECT = _a.inspect
 os.makedirs(OUT, exist_ok=True)
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OCTO_SRC = os.path.join(REPO_ROOT, "third_party", "octo")
 if not os.path.isdir(OCTO_SRC):
     sys.exit(
@@ -39,7 +48,7 @@ if not os.path.isdir(OCTO_SRC):
         "which is a separate checkout:\n"
         "  git clone https://github.com/octo-models/octo third_party/octo\n"
         "  uv pip install -e third_party/octo --no-deps\n"
-        "See tools/octo/pyproject.toml for the rest of the frozen environment."
+        "See the `octo` extra in pyproject.toml for the rest of the frozen environment."
     )
 sys.path.insert(0, OCTO_SRC)
 

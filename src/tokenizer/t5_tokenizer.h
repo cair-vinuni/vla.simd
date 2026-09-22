@@ -9,7 +9,7 @@
 #include <vector>
 
 // SentencePiece unigram tokenizer (T5 family). Loads vocab.txt (piece<TAB>score per
-// line, line number = id) exported by tools/octo/convert_t5_tokenizer.py. Viterbi
+// line, line number = id) exported by tools/convert_t5_tokenizer.py. Viterbi
 // segmentation over the normalized text. Normalization covers the practical ASCII
 // subset of nmt_nfkc: whitespace collapse + dummy "meta symbol" prefix.
 

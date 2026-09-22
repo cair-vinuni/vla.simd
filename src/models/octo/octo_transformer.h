@@ -15,7 +15,7 @@
 //   [task_language(16) | per t: obs_primary(256) obs_wrist(64) obs_language(16) readout(1)]
 // Learned positional embeddings per group (obs groups indexed by timestep, truncated
 // from max_horizon). Block-causal attention (use_correct_attention=true semantics).
-// Weights: octo.meta/octo.bin from tools/octo/convert_octo.py.
+// Weights: octo.meta/octo.bin from tools/convert_octo.py.
 // Built from nn::EncoderLayer / nn::Linear - all kernel and layout choices live
 // in the HAL; this file only assembles tokens and drives the blocks.
 

@@ -33,7 +33,7 @@
 // bias. text_pad.txt carries the table; an instruction that is not in it falls
 // back to config.meta's text_pad, exactly as the reference's dict lookup does.
 //
-// Weights from tools/turbovla/convert_turbovla.py; see docs/12-turbovla-design.md.
+// Weights from tools/convert_turbovla.py; see docs/12-turbovla-design.md.
 
 namespace tcpu {
 

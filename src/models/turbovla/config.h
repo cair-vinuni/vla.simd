@@ -6,7 +6,7 @@
 #pragma once
 
 // TurboVLA dims, one struct per .meta file written by
-// tools/turbovla/convert_turbovla.py. Defaults are the released LIBERO
+// tools/convert_turbovla.py. Defaults are the released LIBERO
 // checkpoints (DINOv3 ViT-B/16 @256, BERT-base, 6 interaction layers, a 3-layer
 // ACT decoder over a 12-step chunk); load() overwrites every field from the meta
 // and then checks the shapes close, so nothing here is load-bearing.

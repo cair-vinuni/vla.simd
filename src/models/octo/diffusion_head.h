@@ -11,7 +11,7 @@
 
 // Octo DiffusionActionHead: MLPResNet score network + 20-step DDPM sampling with a
 // cosine beta schedule. Input embedding = the readout_action token of the last
-// timestep. Weights: head.meta/head.bin from tools/octo/convert_octo.py.
+// timestep. Weights: head.meta/head.bin from tools/convert_octo.py.
 
 namespace tcpu {
 

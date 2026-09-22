@@ -6,7 +6,7 @@
 #pragma once
 
 // IMPACT (Instruction-Modulated Perception + ACTion chunking) dims, one struct
-// per .meta file written by tools/impact/convert_impact.py. Defaults are the
+// per .meta file written by tools/convert_impact.py. Defaults are the
 // reference configuration (ResNet-18 + FiLM, a frozen T5-small text tower, a
 // 6-layer encoder over 634 tokens and a 4-layer decoder over a 50-step chunk);
 // load() overwrites every field from the meta and then checks the shapes close,

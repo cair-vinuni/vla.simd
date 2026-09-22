@@ -1,7 +1,7 @@
 """Export the SmolVLM2 (SmolLM2) byte-level BPE tokenizer to the shared flat format
 the engine's tokenizer loads.
 
-Run: python3 tools/smolvla/convert_tokenizer.py
+Run: python3 tools/convert_tokenizer.py
 Files -> build/smolvla_tok/: vocab.txt, merges.txt, specials.txt
 """
 import os, json

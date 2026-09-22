@@ -27,7 +27,7 @@
 // 8 basic blocks: 1, 3, 5, 7 - the end of each stage). gamma/beta arrive as one
 // flat buffer, the points concatenated in that order.
 //
-// Weights: vision.meta/.bin from tools/impact/convert_impact.py.
+// Weights: vision.meta/.bin from tools/convert_impact.py.
 
 namespace tcpu {
 

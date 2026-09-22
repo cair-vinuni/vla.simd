@@ -141,7 +141,7 @@ class ActEngine:
         self.model_dir = model_dir
         self.h = lib.vla_act_load(model_dir.encode())
         if not self.h:
-            sys.exit(f"vla_act_load failed for {model_dir} (run tools/act/convert_act.py)")
+            sys.exit(f"vla_act_load failed for {model_dir} (run tools/convert_act.py)")
 
         self.chunk = lib.vla_act_chunk(self.h)
         self.action_dim = lib.vla_act_action_dim(self.h)
@@ -207,7 +207,7 @@ class ImpactEngine:
 
     prefix = "vla_impact"
     lib_name = "vla_simd_impact"
-    converter = "tools/impact/convert_impact.py"
+    converter = "tools/convert_impact.py"
     extra_predict_args = ()
 
     def __init__(self, args):
@@ -331,7 +331,7 @@ class SmolvlaEngine:
         if not self.h:
             sys.exit(
                 f"vla_smolvla_load failed for {model_dir} + {tok_dir} "
-                "(run tools/smolvla/convert_hf_safetensors.py)"
+                "(run tools/convert_hf_safetensors.py)"
             )
 
         self.chunk = lib.vla_smolvla_chunk(self.h)
@@ -452,7 +452,7 @@ class OctoEngine:
         if not self.h:
             sys.exit(
                 f"vla_octo_load failed for {model_dir} + {tok_dir} "
-                "(run tools/octo/convert_octo.py)"
+                "(run tools/convert_octo.py)"
             )
 
         self.chunk = lib.vla_octo_horizon(self.h)
@@ -539,7 +539,7 @@ class TurboVlaEngine:
         self.h = lib.vla_turbovla_load(model_dir.encode())
         if not self.h:
             sys.exit(f"vla_turbovla_load failed for {model_dir} "
-                     "(run tools/turbovla/convert_turbovla.py)")
+                     "(run tools/convert_turbovla.py)")
 
         self.chunk = lib.vla_turbovla_chunk(self.h)
         self.action_dim = lib.vla_turbovla_action_dim(self.h)
@@ -624,7 +624,7 @@ class DiffusionEngine:
         self.h = lib.vla_diffusion_load(model_dir.encode())
         if not self.h:
             sys.exit(f"vla_diffusion_load failed for {model_dir} "
-                     "(run tools/diffusion/convert_diffusion.py)")
+                     "(run tools/convert_diffusion.py)")
 
         self.chunk = lib.vla_diffusion_chunk(self.h)
         self.horizon = lib.vla_diffusion_horizon(self.h)
@@ -1249,8 +1249,9 @@ def main(spec=None, doc=None):
     p.add_argument("--lib", default=spec.default_lib,
                    help=f"path to {os.path.basename(spec.default_lib)}")
     # Loopback by default: the payload codec is pickle over an unauthenticated
-    # port, in the control path of a physical arm (see the CVE note in
-    # serve/requirements.txt). Exposing it to the LAN is an explicit choice.
+    # port, in the control path of a physical arm (see the CVE note on the
+    # `serve` extra in pyproject.toml). Exposing it to the LAN is an explicit
+    # choice.
     p.add_argument("--host", default="127.0.0.1",
                    help="127.0.0.1 keeps it local; 0.0.0.0 serves the LAN (default: 127.0.0.1)")
     p.add_argument("--port", type=int, default=8080)
@@ -1314,7 +1315,8 @@ def main(spec=None, doc=None):
         except ImportError as e:
             sys.exit(
                 f"lerobot is required for the async-inference wire types ({e}).\n"
-                "Install it in this environment: pip install -r serve/requirements.txt"
+                "Install it in this environment:\n"
+                "  uv pip install --python .serve -e '.[serve]'"
             )
 
         server = grpc.server(

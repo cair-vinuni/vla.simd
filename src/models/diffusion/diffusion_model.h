@@ -12,7 +12,7 @@
 #include <vector>
 
 // Diffusion Policy end to end: n_obs_steps frames and states in, an executable
-// action chunk out. Weights + stats from tools/diffusion/convert_diffusion.py.
+// action chunk out. Weights + stats from tools/convert_diffusion.py.
 //
 // Two things separate this from every other policy in the engine and both are
 // load-bearing:

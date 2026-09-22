@@ -16,7 +16,7 @@
 // The positional embedding is added to the attention queries and keys, never to
 // the values or to the tokens themselves. Decoder queries start at zero and are
 // identified only by their learned position embedding.
-// Weights: act.meta/act.bin from tools/act/convert_act.py.
+// Weights: act.meta/act.bin from tools/convert_act.py.
 
 namespace tcpu {
 

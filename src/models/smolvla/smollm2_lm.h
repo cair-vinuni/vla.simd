@@ -36,7 +36,7 @@ struct SmollmVlm {
     std::vector<VlmLayerW> layers;
     const float* out_norm = nullptr;  // [hidden]
 
-    // Reads <dir>/vlm.meta and <dir>/vlm.bin (produced by tools/smolvla/convert_hf_safetensors.py).
+    // Reads <dir>/vlm.meta and <dir>/vlm.bin (produced by tools/convert_hf_safetensors.py).
     bool load(const std::string& dir);
 
     // Prefix forward. embs:[seq,hidden] row-major. mask:[seq,seq] additive (0 keep, -inf block).

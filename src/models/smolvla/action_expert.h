@@ -59,7 +59,7 @@ struct ActionExpert {
     FlowW flow{};
     mutable DenoiseScratch ds;        // one denoise at a time, like the rest of the engine
 
-    // Reads <dir>/aex.meta and <dir>/aex.bin (tools/smolvla/convert_hf_safetensors.py).
+    // Reads <dir>/aex.meta and <dir>/aex.bin (tools/convert_hf_safetensors.py).
     bool load(const std::string& dir);
 
     // action_in_proj + sinusoidal time emb + action_time_mlp. x_t:[chunk,max_action_dim]

@@ -14,7 +14,7 @@
 // Everything the lerobot processor pipeline does around the network lives here:
 // image rescale + per-channel normalization, state normalization, and the
 // un-normalization of the predicted actions (MEAN_STD, eps 1e-8).
-// Weights + stats from tools/act/convert_act.py.
+// Weights + stats from tools/convert_act.py.
 
 namespace tcpu {
 

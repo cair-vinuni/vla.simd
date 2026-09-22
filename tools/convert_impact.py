@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 Convert a lerobot IMPACT policy to the C++ engine's arenas.
 
     # from a trained checkpoint
-    python tools/impact/convert_impact.py \
-      --checkpoint ~/work/lerobot/outputs/train/impact_so101_tape/checkpoints/last/pretrained_model \
+    python tools/convert_impact.py \
+      --ckpt ~/work/lerobot/outputs/train/impact_so101_tape/checkpoints/last/pretrained_model \
       --out build/impact_so101
 
     # random weights, for benchmarking before training finishes
-    python tools/impact/convert_impact.py --random --out build/impact_rand
+    python tools/convert_impact.py --random --out build/impact_rand
 
 Needs the lerobot venv (torch, torchvision, transformers) and the IMPACT policy on
 the path; see lerobot/src/lerobot/policies/impact/.
@@ -38,7 +38,7 @@ import sys
 import numpy as np
 import torch
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def log(msg):
@@ -418,7 +418,7 @@ def dump_tokenizer(out_dir, vocab_full):
     pieces = spec.get("model", {}).get("vocab") or []
     if not pieces:
         sys.exit("could not read the unigram vocabulary from the T5 tokenizer; "
-                 "tools/octo/convert_t5_tokenizer.py has the sentencepiece path")
+                 "tools/convert_t5_tokenizer.py has the sentencepiece path")
 
     table = [None] * vocab_full
     for i, entry in enumerate(pieces):
@@ -491,7 +491,7 @@ def build_random_policy(img_h, img_w, cam_keys, state_dim, action_dim, seed, **o
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", help="lerobot pretrained_model directory")
+    ap.add_argument("--ckpt", help="lerobot pretrained_model directory")
     ap.add_argument("--random", action="store_true", help="random weights at --seed")
     ap.add_argument("--out", default="build/impact")
     ap.add_argument("--img", default="480x640", help="HxW of the camera frames")
@@ -502,17 +502,17 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    if not args.checkpoint and not args.random:
-        ap.error("pass --checkpoint DIR or --random")
+    if not args.ckpt and not args.random:
+        ap.error("pass --ckpt DIR or --random")
 
     img_h, img_w = (int(x) for x in args.img.lower().split("x"))
     cam_keys = args.cams.split(",")
     os.makedirs(args.out, exist_ok=True)
 
-    if args.checkpoint:
+    if args.ckpt:
         from lerobot.policies.impact.modeling_impact import IMPACTPolicy
-        log(f"loading {args.checkpoint}")
-        policy = IMPACTPolicy.from_pretrained(args.checkpoint)
+        log(f"loading {args.ckpt}")
+        policy = IMPACTPolicy.from_pretrained(args.ckpt)
         # A checkpoint trained on a GPU carries device="cuda" in its config and
         # lands there. Everything below is CPU arithmetic, so pull the whole
         # policy over rather than half-moving tensors.
@@ -537,7 +537,7 @@ def main():
 
     state_dim = policy.config.robot_state_feature.shape[0]
     action_dim = policy.config.action_feature.shape[0]
-    stats = load_dataset_stats(args.checkpoint)
+    stats = load_dataset_stats(args.ckpt)
     if stats:
         log(f"  stats           dataset statistics from the checkpoint's normalizer "
             f"({len(stats)} features)")

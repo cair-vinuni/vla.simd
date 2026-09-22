@@ -12,7 +12,7 @@
 // as ACT uses it): 7x7/s2 stem + 3x3/s2 maxpool, then 4 stages of 2 basic blocks.
 // Every BatchNorm is frozen in the checkpoint, so the converter folds it into the
 // conv in front of it - what runs here is conv + bias + relu only.
-// Weights: backbone.meta/.bin from tools/act/convert_act.py.
+// Weights: backbone.meta/.bin from tools/convert_act.py.
 
 namespace tcpu {
 

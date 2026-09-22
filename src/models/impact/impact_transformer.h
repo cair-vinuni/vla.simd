@@ -35,7 +35,7 @@
 // once per 16 queries instead of once per 4. Measured 75 ms of 1202 on a Pi 5 for
 // the campaign's 9-token instruction.
 //
-// Weights: impact.meta/impact.bin from tools/impact/convert_impact.py.
+// Weights: impact.meta/impact.bin from tools/convert_impact.py.
 
 namespace tcpu {
 

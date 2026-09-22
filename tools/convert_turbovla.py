@@ -3,7 +3,7 @@
 convert_turbovla.py -- convert a TurboVLA LIBERO checkpoint into the flat
 .meta/.bin arenas the vla.simd engine loads.
 
-    python tools/turbovla/convert_turbovla.py \
+    python tools/convert_turbovla.py \
         --ckpt build/turbovla_ckpt/object.pth \
         --out  build/turbovla_object
 
@@ -53,7 +53,7 @@ import types
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+ROOT = os.path.dirname(HERE)
 REF = os.path.join(ROOT, "third_party", "TurboVLA")
 
 

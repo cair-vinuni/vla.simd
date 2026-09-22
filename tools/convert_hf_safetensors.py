@@ -9,7 +9,7 @@ state files directly. Byte layouts are identical to
 reference; this one exists so a serving box (a Raspberry Pi, here) can convert a
 checkpoint it could never load through the training stack.
 
-    python3 tools/smolvla/convert_hf_safetensors.py khanhnd61/smolvla_so101_tape_prune6 \
+    python3 tools/convert_hf_safetensors.py khanhnd61/smolvla_so101_tape_prune6 \
         build/smolvla --task "pick up the tape"
 
 Accepts a Hub id (downloaded to ~/.cache/vla_simd) or a local directory holding
@@ -29,7 +29,7 @@ What it must reproduce, and cannot read off the checkpoint:
     captures the mapping from the installed transformers with a forward hook; with
     no transformers to ask, `--pos-ids` selects it and defaults to `shifted`
     (4.57+). Getting this wrong loads, runs, and is quietly wrong - the ViT alone
-    drops to cos=0.86. `tools/smolvla/check_dataset.py` discriminates the two
+    drops to cos=0.86. `tools/check_dataset.py` discriminates the two
     empirically against recorded actions.
 
 Everything else is structural and is asserted against the header rather than

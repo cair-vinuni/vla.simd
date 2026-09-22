@@ -6,22 +6,29 @@ Export the t5-base sentencepiece unigram tokenizer for the C++ engine.
 
 Run from the repo root with the reference venv (setup: see convert_octo.py;
 only transformers + sentencepiece are actually needed here):
-  python tools/octo/convert_t5_tokenizer.py [OUT_DIR]
+  python tools/convert_t5_tokenizer.py [OUT_DIR] [--ckpt ID_OR_DIR]
 
 Outputs (build/octo_tok/):
   vocab.txt    one line per id: piece<TAB>score  (32100: 32000 sp + 100 extra_ids)
 """
+import argparse
 import os
-import sys
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else "build/octo_tok"
+_p = argparse.ArgumentParser(description=__doc__,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+_p.add_argument("out", nargs="?", default="build/octo_tok",
+                help="output dir (default: build/octo_tok)")
+_p.add_argument("--ckpt", default="t5-base", help="tokenizer to export (default: t5-base)")
+_a = _p.parse_args()
+
+OUT = _a.out
 os.makedirs(OUT, exist_ok=True)
 
 from transformers import AutoTokenizer, T5Tokenizer
 
-slow = T5Tokenizer.from_pretrained("t5-base", legacy=True)
+slow = T5Tokenizer.from_pretrained(_a.ckpt, legacy=True)
 sp = slow.sp_model
-fast = AutoTokenizer.from_pretrained("t5-base")
+fast = AutoTokenizer.from_pretrained(_a.ckpt)
 
 with open(f"{OUT}/vocab.txt", "w") as f:
     for i in range(sp.get_piece_size()):

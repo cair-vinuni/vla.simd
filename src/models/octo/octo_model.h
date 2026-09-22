@@ -16,7 +16,7 @@
 #include <vector>
 
 // Octo-Small orchestration: instruction + image window -> 4x7 action chunk.
-// Weights from tools/octo/convert_octo.py, tokenizer from convert_t5_tokenizer.py.
+// Weights from tools/convert_octo.py, tokenizer from convert_t5_tokenizer.py.
 
 namespace tcpu {
 

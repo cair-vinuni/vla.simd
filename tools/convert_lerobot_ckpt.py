@@ -17,7 +17,7 @@ that means:
 
 Run in the venv the checkpoint was trained with (lerobot + torch + the pinned
 transformers; DEPLOY.md explains why the version matters), from the repo root:
-  ~/work/smolvla-sim/.venv/bin/python tools/smolvla/convert_lerobot_ckpt.py
+  ~/work/smolvla-sim/.venv/bin/python tools/convert_lerobot_ckpt.py
 """
 import argparse
 import json
@@ -253,7 +253,7 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT,
+    p.add_argument("--ckpt", default=DEFAULT_CHECKPOINT,
                    help=f"Run dir, step dir, or pretrained_model dir (default: {DEFAULT_CHECKPOINT})")
     p.add_argument("--out", default=None,
                    help="Output dir for the .meta/.bin weights (default: <checkpoint>/simd)")
@@ -261,7 +261,7 @@ def main():
                    help="Instruction written to config.txt")
     args = p.parse_args()
 
-    ckpt = resolve_checkpoint(args.checkpoint)
+    ckpt = resolve_checkpoint(args.ckpt)
     out = os.path.expanduser(args.out) if args.out else str(ckpt.parent / "simd")
     os.makedirs(out, exist_ok=True)
 

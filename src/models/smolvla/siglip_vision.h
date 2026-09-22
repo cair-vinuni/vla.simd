@@ -47,7 +47,7 @@ struct SiglipVision {
     nn::Linear mm_proj;               // [mm_out, shuffled_dim], no bias
     mutable nn::Scratch scratch;      // reused across layers and views
 
-    // Reads <dir>/vit.meta and <dir>/vit.bin (tools/smolvla/convert_hf_safetensors.py).
+    // Reads <dir>/vit.meta and <dir>/vit.bin (tools/convert_hf_safetensors.py).
     bool load(const std::string& dir);
 
     // pixels: [3, img, img] CHW, already normalized to [-1,1].

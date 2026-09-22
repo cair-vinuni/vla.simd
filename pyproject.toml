@@ -3,28 +3,141 @@ name = "vla-simd-tooling"
 version = "0.1.0"
 description = "Python tooling for vla.simd: checkpoint converters and the policy server."
 readme = "README.md"
+# The floor for the tooling as a whole. The extras disagree about the ceiling:
+# `serve` and `lerobot` pull lerobot 0.6.1 and need >=3.12, while `octo` is
+# frozen on a stack that stops resolving at 3.12. Each extra names its own
+# range below, and the README table repeats it.
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-dependencies = ["numpy>=2.1,<3"]
 
-# The two requirements files stay the canonical pins; these groups mirror them.
+# Empty on purpose. numpy cannot live here: `octo` pins numpy 1.24.3 while every
+# other extra wants >=2.1, and a base dependency applies to all of them, so a
+# numpy here makes `.[octo]` unsatisfiable. Each extra declares its own instead.
+dependencies = []
+
+# Five environments, one per purpose. They are NOT meant to be combined: each
+# gets its own venv, and `uv pip install -e '.[<name>]'` resolves one at a time.
+# See README "Environments" for the commands.
 [project.optional-dependencies]
-# tools/smolvla/convert_hf_safetensors.py. No torch: the whole SmolVLA convert
-# path is numpy and ctypes.
-convert = [
-    "numpy>=2.1,<3",
-    "safetensors>=0.6,<1",
-    "huggingface_hub>=1.0,<2",
-]
-# serve/policy_server.py. See the security note in serve/requirements.txt.
+
+# serve/policy_server.py. Needs Python >=3.12.
+#
+# lerobot is here for the wire types only: the async-inference payloads are
+# pickled lerobot dataclasses, and the reply carries a real torch.Tensor. No
+# policy is built and no device is touched - inference is entirely
+# libvla_simd_<model>.so.
+#
+# SECURITY: pickle over an unauthenticated gRPC port, in the control path of a
+# physical arm. Bind to 127.0.0.1 or a trusted LAN and tunnel over SSH/VPN.
+#
+# Two install gotchas:
+#  - protobuf is missing from lerobot's own dependency set; without it the
+#    server exits with `No module named 'google'`.
+#  - on aarch64 lerobot resolves torch to the CUDA build, pulling ~3.5 GB of
+#    nvidia-* wheels. Reinstall CPU torch afterwards, not before - lerobot
+#    overwrites it:
+#      uv pip install --index-url https://download.pytorch.org/whl/cpu torch
 serve = [
     "numpy>=2.1,<3",
-    "lerobot>=0.6.1,<0.7",
+    "lerobot>=0.6.1,<0.7",   # 0.6.0 fixes CVE-2026-25874 in lerobot's own server
     "grpcio>=1.68,<2",
     "protobuf>=5.29,<8",
     "torch>=2.8,<3",
 ]
 
-# Deps-only project: the code lives in tools/ and serve/, not an importable package.
-[tool.uv]
-package = false
+# The torch-free convert path, named for the whole of its stack:
+# tools/convert_hf_safetensors.py and convert_tokenizer.py read the
+# checkpoint in numpy and ctypes, so this is the one converter that runs on a Pi.
+#
+# It cannot also host Octo's convert_t5_tokenizer.py: that needs transformers
+# 4.x, which caps huggingface-hub below the 1.0 this path requires. That script
+# runs in .octo, which already pins a compatible pair.
+numpy = [
+    "numpy>=2.1,<3",
+    "huggingface_hub>=1.0,<2",   # convert_tokenizer.py; the safetensors package
+                                 # is NOT needed, convert_hf_safetensors.py
+                                 # parses the header itself with mmap + struct
+]
+
+# The lerobot-based converters: ACT, IMPACT, Diffusion, and the torch SmolVLA
+# and Octo paths. Needs Python >=3.12.
+#
+# FALLBACK ONLY. These converters should run in the environment their checkpoint
+# was TRAINED in - if you still have that venv, reuse it and ignore this extra.
+# The pin exists so that this path is at least reproducible: an unbounded
+# `lerobot` resolves by interpreter (0.4.4 on 3.11, 0.6.1 on 3.12), which is
+# precisely not "the version it was trained with".
+lerobot = [
+    # The [smolvla] marker is what pulls transformers; bare lerobot does not,
+    # and convert_lerobot_ckpt.py builds a SmolVLA policy through the lerobot
+    # factories, so without it that converter fails on import.
+    "lerobot[smolvla]>=0.6.1,<0.7",
+    "numpy>=2.1,<3",
+    "safetensors>=0.6,<1",       # imported directly by convert_impact.py and
+                                 # convert_diffusion.py, not just via lerobot
+]
+
+# tools/convert_turbovla.py. Deliberately not timm and not lerobot.
+#
+# transformers 4.x caps huggingface-hub <1.0, so this cannot share a venv with
+# `numpy` (which needs hub >=1.0) or `lerobot`. Unbounded, the pair resolves by
+# walking lerobot back to 0.3.3 instead of failing, so both bounds are load
+# bearing. torch is bounded to match `serve` rather than tracking latest.
+turbovla = [
+    "numpy>=2.1,<3",
+    "torch>=2.8,<3",
+    "transformers>=4.57,<5",
+]
+
+# tools/convert_octo.py and convert_t5_tokenizer.py. Python 3.10 or 3.11.
+#
+# A deliberately frozen stack. convert_octo.py drives the authoritative JAX
+# model, so the versions are the ones octo-small-1.5 was released with. Bumping
+# jax/flax does not modernize the tool, it changes what the conversion reads:
+# `octo` is written against jax 0.4.x. None of this is needed to run or serve.
+#
+# It also needs the octo checkout itself, which is a separate Apache-2.0 project
+# kept out by .gitignore and installed without its own pins:
+#   git clone https://github.com/octo-models/octo third_party/octo
+#   uv pip install --python .octo -e third_party/octo --no-deps
+# convert_octo.py sys.path-inserts it and exits with instructions if it is gone.
+#
+# convert_t5_tokenizer.py runs here too: it needs transformers + sentencepiece,
+# and transformers 4.x caps huggingface-hub below what `numpy` requires, so the
+# two cannot share a venv.
+octo = [
+    "jax==0.4.20",                 # the version octo-small-1.5 was released against
+    "flax==0.7.5",                 # jax 0.4.20-compatible
+    "tensorflow-cpu==2.15.0",      # only for tf.io.gfile, which orbax uses to read the checkpoint
+    "distrax==0.1.5",              # octo's action head imports it
+    "chex==0.1.85",                # distrax/optax dependency, pinned with them
+    "optax==0.1.5",
+    "tensorflow-probability==0.23.0",
+    "numpy==1.24.3",               # jax 0.4.20 predates the numpy 2 ABI
+    "ml_dtypes==0.2.0",            # must match jax 0.4.20's expectation
+    "scipy==1.11.4",               # must stay <1.13 for jax 0.4.20
+    "einops==0.7.0",               # last release before the 0.8 API churn
+    "transformers==4.36.2",        # the T5 tokenizer octo's ids were produced with
+    "sentencepiece==0.1.99",       # what transformers 4.36 was released against
+    "huggingface_hub==0.20.3",     # transformers 4.36 predates the hub 1.0 rename
+]
+
+# Metadata-only project: the code in tools/ and serve/ is run by path, never
+# imported, so nothing here installs a module - this exists to carry the extras.
+# Every environment, octo included, installs the same way, and with plain pip as
+# well as uv:
+#   uv pip install --python .serve -e '.[serve]'
+#
+# If you ever adopt `uv lock`, it resolves every extra together and would bake
+# in the lerobot 0.3.3 backsolve described above; declare the exclusions then:
+#   [tool.uv]
+#   conflicts = [
+#       [{ extra = "numpy" },   { extra = "turbovla" }],
+#       [{ extra = "lerobot" }, { extra = "turbovla" }],
+#   ]
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []             # metadata-only: installs the pinned deps, no package
