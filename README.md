@@ -6,7 +6,7 @@
 <p><b>Efficient CPU Inference for Language-Conditioned Manipulation</b></p>
 
 <p align="center">
-    <a href="#">📑 Paper</a> |
+    <a href="https://arxiv.org/abs/2609.24274">📑 Paper</a> |
     <a href="https://vla-simd.github.io/">🌐 Project Page</a>
 </p>
 
