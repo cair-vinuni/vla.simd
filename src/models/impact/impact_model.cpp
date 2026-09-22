@@ -141,25 +141,25 @@ int impact_int8_mask() {
 // take (N % 16 != 0) stay fp32 silently, and on a CPU with no int8 kernel every call
 // returns false - so a caller may set the mask unconditionally.
 void ImpactModel::apply_int8() {
-    const int mask = impact_int8_mask();
-    if (!mask) return;
+    const int sel = impact_int8_mask();
+    if (!sel) return;
 
     int n = 0;
     for (ImpactEncoderLayer& l : tf.enc) {
-        if (mask & I8_ENC_ATTN) {
+        if (sel & I8_ENC_ATTN) {
             n += l.attn.wq.init_int8();
             n += l.attn.wk.init_int8();
             n += l.attn.wv.init_int8();
             n += l.attn.wo.init_int8();
         }
-        if (mask & I8_ENC_W1) n += l.w1.init_int8();
-        if (mask & I8_ENC_W2) n += l.w2.init_int8();
+        if (sel & I8_ENC_W1) n += l.w1.init_int8();
+        if (sel & I8_ENC_W2) n += l.w2.init_int8();
     }
-    if (mask & I8_PROJ) {
+    if (sel & I8_PROJ) {
         n += tf.img_proj.init_int8();
         n += tf.state_proj.init_int8();
     }
-    if (mask & I8_DEC) {
+    if (sel & I8_DEC) {
         for (ImpactDecoderLayer& l : tf.dec) {
             n += l.self.wq.init_int8();
             n += l.self.wk.init_int8();
@@ -173,7 +173,7 @@ void ImpactModel::apply_int8() {
             n += l.w2.init_int8();
         }
     }
-    if (mask & I8_CONV) {
+    if (sel & I8_CONV) {
         n += backbone.stem.init_int8();
         for (ImpactBasicBlock& b : backbone.blocks) {
             n += b.conv1.init_int8();
@@ -181,7 +181,7 @@ void ImpactModel::apply_int8() {
             if (b.has_down) n += b.down.init_int8();
         }
     }
-    std::fprintf(stderr, "[impact] int8 GEMMs: %d (IMPACT_INT8=%d)%s\n", n, mask,
+    std::fprintf(stderr, "[impact] int8 GEMMs: %d (IMPACT_INT8=%d)%s\n", n, sel,
                  n ? "" : " - no int8 kernel on this CPU, staying fp32");
 }
 

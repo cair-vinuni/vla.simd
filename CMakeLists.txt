@@ -21,27 +21,21 @@ string(APPEND CMAKE_CXX_FLAGS_RELEASE " -funroll-loops")
 string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " -funroll-loops")
 
 # ---------------------------------------------------------------------------
-# vla_flags: the ISA the HAL is compiled for.
+# vla_flags: the ISA the HAL is compiled for. An INTERFACE target, not
+# CMAKE_CXX_FLAGS_RELEASE, because src/hal/arch.h picks its backend from the
+# macros these enable and Debug/RelWithDebInfo would otherwise fall through to
+# the scalar kernels.
 #
-# Not optimization flags, so they must not live in CMAKE_CXX_FLAGS_RELEASE:
-# src/hal/arch.h selects its backend from the macros they enable, and a build
-# type without them (RelWithDebInfo, Debug) falls through to the scalar kernels.
-# An INTERFACE target applies them to every build type.
+# x86-64 -> AVX2/FMA, backend by vendor (AuthenticAMD -> Zen, src/hal/amd;
+# -DVLA_HAL=amd|avx2 to force). Apple arm64 -> -mcpu. Other aarch64 -> baseline
+# ARMv8 NEON. Anything else -> scalar fallback.
 #
-# x86-64 -> AVX2/FMA; Apple arm64 -> -mcpu=native (NEON + dotprod/fp16/i8mm/bf16);
-# other aarch64 -> baseline ARMv8 NEON; anything else -> scalar fallback.
-#
-# Non-Apple aarch64 stays on the portable baseline *by choice*. Measured on a
-# Pi 5 (Cortex-A76, ACT, 4 threads): -march=armv8-a+simd 1031 ms,
-# +dotprod+fp16 1043 ms, -mtune=cortex-a76 1116 ms, -mcpu=native 1120 ms. The
-# ISA features are ~free; the 8% is GCC's A76 cost model pessimizing the
-# hand-written NEON kernels, which is all -mcpu=native adds here. Kernels wanting
-# a newer extension (SDOT on ARM, AVX-VNNI on x86) take it per-function via
-# __attribute__((target(...))) behind a runtime capability check.
-# -DVLA_ARM_NATIVE=ON opts back in; -DVLA_ARM_FLAGS="..." overrides entirely.
-#
-# Inside x86 the backend is picked by CPU vendor: an AuthenticAMD build host
-# selects the Zen-tuned backend (src/hal/amd). Override with -DVLA_HAL=amd|avx2.
+# Non-Apple aarch64 stays on the baseline by choice. Pi 5 (Cortex-A76, ACT, 4
+# threads): armv8-a+simd 1031 ms, +dotprod+fp16 1043, -mtune=cortex-a76 1116,
+# -mcpu=native 1120. The ISA features are ~free; the 8% is GCC's A76 cost model
+# pessimizing the hand-written NEON kernels. Kernels wanting a newer extension
+# (SDOT, AVX-VNNI) take it per-function via __attribute__((target(...))) behind
+# a runtime check. -DVLA_ARM_NATIVE=ON opts in, -DVLA_ARM_FLAGS overrides.
 # ---------------------------------------------------------------------------
 set(VLA_HAL "auto" CACHE STRING "x86 HAL backend: auto | avx2 (Intel tuning) | amd (Zen tuning)")
 set_property(CACHE VLA_HAL PROPERTY STRINGS auto avx2 amd)
@@ -57,11 +51,16 @@ if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   message(WARNING "vla.cpu: no ISA flags for ${CMAKE_CXX_COMPILER_ID}; "
                   "the HAL will fall back to the scalar backend")
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
-  target_compile_options(vla_flags INTERFACE -mcpu=native)
-  message(STATUS "vla.cpu arm64: -mcpu=native (apple)")
+  # Apple is the one target that takes +dotprod from -mcpu rather than from the
+  # pragma in src/hal/neon/gemm_i8.cpp, and native detects the real M-series
+  # part. The virtualized CI runners resolve native to a CPU without dotprod, so
+  # CI alone passes -DVLA_APPLE_MCPU=apple-m1.
+  set(VLA_APPLE_MCPU "native" CACHE STRING "-mcpu for Apple arm64 (CI overrides with apple-m1)")
+  target_compile_options(vla_flags INTERFACE -mcpu=${VLA_APPLE_MCPU})
+  message(STATUS "vla.cpu arm64: -mcpu=${VLA_APPLE_MCPU} (apple)")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
-  # Off by default: -mcpu=native measured 8% SLOWER than the baseline on a
-  # Cortex-A76 (see the note above). The knob exists so another part can A/B it.
+  # Off by default: 8% slower than the baseline on a Cortex-A76 (see above).
+  # The knob is here so another part can A/B it.
   option(VLA_ARM_NATIVE "Build aarch64 with -mcpu=native (build host only)" OFF)
   set(VLA_ARM_FLAGS "" CACHE STRING "override the aarch64 -march/-mcpu flags entirely")
   if(VLA_ARM_FLAGS)
@@ -93,10 +92,9 @@ else()
     endif()
   endif()
 
-  # AVX2 + FMA is the baseline ISA surface. AVX-VNNI is not a global flag: it
-  # would let the compiler emit vpdpbusd into any int8 loop and SIGILL on a
-  # pre-Alder-Lake / pre-Zen-4 target. src/hal/avx2/gemm_i8.cpp opts in
-  # per-function, behind a cpuid check.
+  # AVX-VNNI is deliberately not global: it would let the compiler emit vpdpbusd
+  # into any int8 loop and SIGILL pre-Alder-Lake / pre-Zen-4.
+  # src/hal/avx2/gemm_i8.cpp opts in per-function behind a cpuid check.
   target_compile_options(vla_flags INTERFACE -mavx2 -mfma -mf16c)
   if(VLA_X86_VENDOR STREQUAL "amd")
     target_compile_definitions(vla_flags INTERFACE TCPU_HAL_PREFER_AMD)
@@ -106,8 +104,8 @@ else()
   endif()
 endif()
 
-# GCC defaults to -ffp-contract=fast, Clang to =on. Pin both to the GCC
-# behaviour the parity numbers were measured against.
+# GCC defaults to fast, Clang to on. Pin both to what the parity numbers were
+# measured against.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   target_compile_options(vla_flags INTERFACE -ffp-contract=fast)
 endif()
@@ -143,8 +141,9 @@ else()
 endif()
 
 if(APPLE)
-  # Accelerate sgemm (AMX) as the default Apple GEMM backend (TCPU_ACCEL=0 to A/B)
-  # the legacy CBLAS entry points are deprecated since macOS 13.3
+  # Accelerate sgemm (AMX) is the default Apple GEMM backend; TCPU_ACCEL=0 to
+  # A/B it. NEW_LAPACK because the legacy CBLAS entry points are deprecated
+  # since macOS 13.3.
   target_compile_definitions(vla_flags INTERFACE TCPU_ACCELERATE ACCELERATE_NEW_LAPACK=1)
   target_link_libraries(vla_flags INTERFACE "-framework Accelerate")
 endif()
@@ -238,11 +237,10 @@ add_library(tcpu_diffusion
 target_link_libraries(tcpu_diffusion PUBLIC tcpu_act tcpu_ops tcpu_preprocess)
 
 # ---------------------------------------------------------------------------
-# Shared libs with the C ABI (include/vla_simd.h) for ctypes/FFI callers.
-#
-# Each is its capi translation unit over the static libs; the tree is PIC, so
-# there is no source list to keep in sync. --whole-archive is not
-# needed: every symbol is reachable from the exported entry points.
+# Shared libs with the C ABI (include/vla_simd.h) for ctypes/FFI callers. Each
+# is its capi translation unit over the static libs, so there is no source list
+# to keep in sync. No --whole-archive: every symbol is reachable from the
+# exported entry points.
 # ---------------------------------------------------------------------------
 function(vla_add_shared name capi_src)
   add_library(${name} SHARED ${capi_src} src/capi_version.cpp)
@@ -284,8 +282,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 # ---------------------------------------------------------------------------
-# Link-time optimization. Off by default: measured neutral here, and it slows
-# debug and sanitizer links.
+# Link-time optimization. Off: measured neutral, and it slows debug and
+# sanitizer links.
 # ---------------------------------------------------------------------------
 option(VLA_LTO "Link-time optimization in Release/RelWithDebInfo" OFF)
 if(VLA_LTO)
@@ -303,8 +301,8 @@ endif()
 
 
 # ---------------------------------------------------------------------------
-# Install / export, so a consumer can find_package(vla_simd) instead of
-# vendoring the tree. Only the shared libs and the C header are API.
+# Install / export for find_package(vla_simd). Only the shared libs and the C
+# header are API.
 # ---------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 

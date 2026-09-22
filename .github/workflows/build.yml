@@ -23,7 +23,12 @@ jobs:
           - { os: ubuntu-24.04,     build_type: Release, cxx: clang++ }
           - { os: ubuntu-24.04-arm, build_type: Release }
           - { os: ubuntu-24.04-arm, build_type: Debug }
-          - { os: macos-latest,     build_type: Release }
+          # cmake_extra is empty for every row but this one. The macOS runners are
+          # virtualized, and there AppleClang resolves -mcpu=native to a CPU
+          # without dotprod, so gemm_i8.cpp's vdotq_s32 kernels fail to compile.
+          # A real Mac detects its own part correctly, so CMakeLists keeps
+          # native as the default and only CI pins the floor.
+          - { os: macos-latest,     build_type: Release, cmake_extra: -DVLA_APPLE_MCPU=apple-m1 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -36,7 +41,8 @@ jobs:
         run: |
           cmake -S . -B build \
                 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                ${{ matrix.cmake_extra }}
       - run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
       # The ISA flags once lived in CMAKE_CXX_FLAGS_RELEASE, so other build types
       # compiled the HAL without them and src/hal/arch.h fell back to the scalar
@@ -50,7 +56,7 @@ jobs:
           cmd = e_cmd = tu.get("command") or " ".join(tu["arguments"])
           mach = platform.machine()
           want = ["-mavx2", "-mfma"] if mach == "x86_64" else (
-              ["-mcpu=native"] if sys.platform == "darwin" else ["-march=armv8-a+simd"])
+              ["-mcpu=apple-m1"] if sys.platform == "darwin" else ["-march=armv8-a+simd"])
           missing = [f for f in want if f not in cmd]
           if missing:
               sys.exit(f"{mach}: {missing} absent from the HAL compile line:\n{e_cmd}")
