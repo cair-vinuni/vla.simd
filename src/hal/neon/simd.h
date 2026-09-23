@@ -1,5 +1,6 @@
 /*
- * Copyright 2026 FAI. Licensed under the Apache License, Version 2.0.
+ * Copyright 2026 Khanh D. Nguyen, Hoang M. Truong, An T. Le.
+ * Licensed under the Apache License, Version 2.0.
  * SPDX-License-Identifier: Apache-2.0
  */
 

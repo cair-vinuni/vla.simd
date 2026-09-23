@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use vla.simd, please cite the paper."
+title: "vla.simd"
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/cair-vinuni/vla.simd"
+authors:
+  - family-names: Nguyen
+    given-names: Khanh D.
+  - family-names: Truong
+    given-names: Hoang M.
+  - family-names: Le
+    given-names: An T.
+preferred-citation:
+  type: article
+  title: "vla.simd: Efficient CPU Inference for Language-Conditioned Manipulation"
+  authors:
+    - family-names: Nguyen
+      given-names: Khanh D.
+    - family-names: Truong
+      given-names: Hoang M.
+    - family-names: Le
+      given-names: An T.
+  journal: "arXiv preprint arXiv:2609.24274"
+  year: 2026
+  doi: "10.48550/arXiv.2609.24274"
+  url: "https://arxiv.org/abs/2609.24274"
