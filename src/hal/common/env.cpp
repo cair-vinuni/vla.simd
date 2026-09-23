@@ -215,7 +215,7 @@ int gemm_mblock() {
 
 int i8_mr() {
     static const int v = [] {
-        const int m = int_env("TCPU_I8_MR", 4);
+        const int m = int_env("TCPU_I8_MR", TCPU_ISA_X86 ? 5 : 4);
         return m < 1 ? 1 : m > 6 ? 6 : m;   // the kernel is templated for 1..6
     }();
     return v;

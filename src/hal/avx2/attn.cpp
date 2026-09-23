@@ -60,12 +60,14 @@ static inline void attn_softmax_av_row(float* scores, const float* mrow, float* 
     // add the mask row; lanes past jmax (still < seq_k) -> -inf
     const int me = skq < seq_k ? skq : seq_k;
     int j;
-    for (j=0; j+8 <= me; j += 8)
-        _mm256_storeu_ps(scores+j,
-                         _mm256_add_ps(_mm256_loadu_ps(scores+j),
-                                       _mm256_loadu_ps(mrow+j)));
-    for (; j < me; j++)
-        scores[j] += mrow[j];
+    if (mrow) {
+        for (j=0; j+8 <= me; j += 8)
+            _mm256_storeu_ps(scores+j,
+                             _mm256_add_ps(_mm256_loadu_ps(scores+j),
+                                           _mm256_loadu_ps(mrow+j)));
+        for (; j < me; j++)
+            scores[j] += mrow[j];
+    }
     for (j=me; j<skq; j++)
         scores[j] = NINF;
 
@@ -131,12 +133,14 @@ static inline bool attn_softmax_row(float* scores, const float* mrow,
     // add the mask row; lanes past jmax (still < seq_k) -> -inf
     const int me = jmax < seq_k ? jmax : seq_k;
     int j;
-    for (j=0; j+8 <= me; j += 8)
-        _mm256_storeu_ps(scores+j,
-                         _mm256_add_ps(_mm256_loadu_ps(scores+j),
-                                       _mm256_loadu_ps(mrow+j)));
-    for (; j < me; j++)
-        scores[j] += mrow[j];
+    if (mrow) {
+        for (j=0; j+8 <= me; j += 8)
+            _mm256_storeu_ps(scores+j,
+                             _mm256_add_ps(_mm256_loadu_ps(scores+j),
+                                           _mm256_loadu_ps(mrow+j)));
+        for (; j < me; j++)
+            scores[j] += mrow[j];
+    }
     for (j=me; j<sbound; j++)
         scores[j] = NINF;
 
@@ -259,6 +263,7 @@ static inline void qk_rows16(float* scores, size_t lds, const float* q0, size_t 
             c0[i] = _mm256_setzero_ps();
             c1[i] = _mm256_setzero_ps();
         }
+#pragma GCC unroll 1
         for (int d=0; d<head_dim; d++) {
             const float* kr = kt+(size_t)d*ldk+j;
             const __m256 b0 = _mm256_loadu_ps(kr);
@@ -349,16 +354,18 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         const int ntiles = (seq_q+QR-1)/QR;
 
 
-        std::vector<int> jmaxv(seq_q);
+        std::vector<int> jmaxv(seq_q, seq_k);
+        if (mask) {
 #if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
+            #pragma omp parallel for schedule(static)
 #endif
-        for (int t1=0; t1<seq_q; t1++) {
-            const float* mrow = mask+(size_t)t1*seq_k;
-            int jm = seq_k;
-            while (jm > 0 && mrow[jm-1] == std::numeric_limits<float>::lowest())
-                jm--;
-            jmaxv[t1] = jm;
+            for (int t1=0; t1<seq_q; t1++) {
+                const float* mrow = mask+(size_t)t1*seq_k;
+                int jm = seq_k;
+                while (jm > 0 && mrow[jm-1] == std::numeric_limits<float>::lowest())
+                    jm--;
+                jmaxv[t1] = jm;
+            }
         }
 
 #if defined(_OPENMP)
@@ -397,7 +404,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
                 const int jmax = jmaxv[t0+i];
                 ok[i] = jmax > 0 &&
                         attn_softmax_row(scores.data()+(size_t)i*skp,
-                                         mask+(size_t)(t0+i)*seq_k, seq_k, jmax, skt);
+                                         mask ? mask+(size_t)(t0+i)*seq_k : nullptr,
+                                         seq_k, jmax, skt);
                 all_ok &= ok[i];
             }
 
@@ -431,13 +439,13 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         const int t1 = qi%seq_q;
         const int kv = h/group;
         const float* q = Q+((size_t)t1*n_q+h)*head_dim;
-        const float* mrow = mask+(size_t)t1*seq_k;
+        const float* mrow = mask ? mask+(size_t)t1*seq_k : nullptr;
         const float* kt = KTp+(size_t)kv*head_dim*skp;
 
         // block-causal masks end each row with a blocked tail: bound the QK/softmax
         // loops at the last allowed key (bit-exact; blocked keys had weight 0 anyway)
         int jmax = seq_k;
-        while (jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest())
+        while (mrow && jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest())
             jmax--;
 
         float* o = out+((size_t)t1*n_q+h)*head_dim;

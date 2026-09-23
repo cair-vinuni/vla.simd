@@ -55,20 +55,20 @@ bool int8_gemm_available() {
 
 #define VLA_VNNI __attribute__((target("avx2,avxvnni")))
 
-// ROWS tokens x one 16-row weight panel, C-resident. Live registers:
-// 2*ROWS int32 accumulators + 2 weight vectors + 1 activation broadcast, so
-// ROWS=6 -> 15 of 16 YMM, same budget as the fp32 6x16 kernel.
+// ROWS tokens x one 16-row weight panel, C-resident.
 template <int ROWS>
 VLA_VNNI static void mm_i8_rows16(float* out, const int8_t* xq, const float* ascale,
                                   const int8_t* wq, const float* wscale, const float* bias,
                                   const int32_t* rowsum, int N, int Kp, int n0) {
-    __m256i c0[ROWS], c1[ROWS];
+    __v8si c0[ROWS], c1[ROWS];
     for (int i=0; i<ROWS; i++) {
-        c0[i] = _mm256_setzero_si256();
-        c1[i] = _mm256_setzero_si256();
+        c0[i] = (__v8si)_mm256_setzero_si256();
+        c1[i] = (__v8si)_mm256_setzero_si256();
     }
 
     const int KG = Kp/4;
+    const __m256i k80 = _mm256_set1_epi32((int)0x80808080u);
+#pragma GCC unroll 1
     for (int g=0; g<KG; g++) {
         const int8_t* w = wq+(size_t)g*64;
         const __m256i w0 = _mm256_loadu_si256((const __m256i*)w);        // rows 0..7
@@ -79,9 +79,9 @@ VLA_VNNI static void mm_i8_rows16(float* out, const int8_t* xq, const float* asc
             // against a different output row's 4 weights
             uint32_t a4;
             std::memcpy(&a4, xq+(size_t)i*Kp+(size_t)g*4, 4);
-            const __m256i a = _mm256_set1_epi32((int)(a4 ^ 0x80808080u));
-            c0[i] = _mm256_dpbusd_avx_epi32(c0[i], a, w0);
-            c1[i] = _mm256_dpbusd_avx_epi32(c1[i], a, w1);
+            const __m256i a = _mm256_xor_si256(_mm256_set1_epi32((int)a4), k80);
+            c0[i] = (__v8si)_mm256_dpbusd_avx_epi32((__m256i)c0[i], a, w0);
+            c1[i] = (__v8si)_mm256_dpbusd_avx_epi32((__m256i)c1[i], a, w1);
         }
     }
 
@@ -98,8 +98,8 @@ VLA_VNNI static void mm_i8_rows16(float* out, const int8_t* xq, const float* asc
     for (int i=0; i<ROWS; i++) {
         const __m256 sa = _mm256_set1_ps(ascale[i]);
         float* o = out+(size_t)i*N+n0;
-        const __m256 v0 = _mm256_cvtepi32_ps(_mm256_sub_epi32(c0[i], b0));
-        const __m256 v1 = _mm256_cvtepi32_ps(_mm256_sub_epi32(c1[i], b1));
+        const __m256 v0 = _mm256_cvtepi32_ps(_mm256_sub_epi32((__m256i)c0[i], b0));
+        const __m256 v1 = _mm256_cvtepi32_ps(_mm256_sub_epi32((__m256i)c1[i], b1));
         _mm256_storeu_ps(o,   _mm256_fmadd_ps(_mm256_mul_ps(v0, ws0), sa, bb0));
         _mm256_storeu_ps(o+8, _mm256_fmadd_ps(_mm256_mul_ps(v1, ws1), sa, bb1));
     }

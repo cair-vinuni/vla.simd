@@ -19,7 +19,14 @@ using std::size_t;
 
 namespace tcpu {
 
-#if !TCPU_HAL_NEON
+#if TCPU_ISA_X86
+void gqa_attention_dense(float* out, const float* Q, const float* K, const float* V,
+                         int seq_q, int seq_k, int n_q, int n_kv, int head_dim,
+                         float scale, const float* K_pre) {
+    gqa_attention_masked(out, Q, K, V, seq_q, seq_k, n_q, n_kv, head_dim,
+                         scale, nullptr, K_pre);
+}
+#elif !TCPU_HAL_NEON
 // Backends without a dedicated dense kernel keep their masked path exactly as it
 // was: the zero mask they used to be handed is now built here instead of by the
 // caller, so the arithmetic and the measured numbers are unchanged.

@@ -260,11 +260,6 @@ static inline void mm_pack_rows16_kt(float* out_t, const float* x, const float* 
         }
     }
 
-    alignas(32) int32_t mk[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    for (int i=0; i<ROWS; i++)
-        mk[i] = -1;
-    const __m256i vmask = _mm256_load_si256((const __m256i*)mk);
-
     __m256 r[8];
     for (int half=0; half<2; half++) {
         __m256* c = half ? c1 : c0;
@@ -277,7 +272,15 @@ static inline void mm_pack_rows16_kt(float* out_t, const float* x, const float* 
         for (int j=0; j<8; j++) {
             const int n = n0+half*8+j;
             const __m256 row = bias ? _mm256_add_ps(r[j], _mm256_set1_ps(bias[n])) : r[j];
-            _mm256_maskstore_ps(out_t+(size_t)n*ldo+t0, vmask, row);
+            float* dst = out_t+(size_t)n*ldo+t0;
+            const __m128 lo = _mm256_castps256_ps128(row);
+            const __m128 hi = _mm256_extractf128_ps(row, 1);
+            if constexpr (ROWS >= 4) {
+                _mm_storeu_ps(dst, lo);
+                std::memcpy(dst+4, &hi, (ROWS-4)*sizeof(float));
+            } else {
+                std::memcpy(dst, &lo, ROWS*sizeof(float));
+            }
         }
     }
 }
