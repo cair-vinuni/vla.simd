@@ -153,6 +153,11 @@ bool simd_erf() {
     return v;
 }
 
+bool simd_mish() {
+    static const bool v = flag_on("TCPU_SIMD_MISH", true);
+    return v;
+}
+
 bool bf16_mlp() {
     static const bool v = [] {
         const char* e = std::getenv("TCPU_BF16_MLP");

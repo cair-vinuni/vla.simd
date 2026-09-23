@@ -81,7 +81,7 @@ static void im2col_panel_i8(int8_t* col, const int8_t* x, int H, int Wd, int Cin
 static float quantize_tensor_i8(const float* x, int8_t* xq, size_t n) {
     float amax = 0.0f;
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static) reduction(max:amax)
+    #pragma omp parallel for schedule(static) reduction(max:amax) if(n > (size_t)hal::env::omp_min())
 #endif
     for (size_t i=0; i<n; i++) {
         const float a = std::fabs(x[i]);
@@ -93,7 +93,7 @@ static float quantize_tensor_i8(const float* x, int8_t* xq, size_t n) {
     // std::lrint does not vectorize - GCC emits a libm call per element.
     const size_t chunk = 4096;   // multiple of the 32-wide body: one tail, at the end
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(n > (size_t)hal::env::omp_min())
 #endif
     for (size_t i=0; i<n; i += chunk) {
         const size_t m = n-i < chunk ? n-i : chunk;
@@ -103,7 +103,7 @@ static float quantize_tensor_i8(const float* x, int8_t* xq, size_t n) {
 }
 
 static int conv_panel_i8(int npix, int K, int nth) {
-    const int budget = 512*1024;                 // bytes: int8 rows are 4x denser
+    const int budget = 4*hal::env::conv_budget(); // bytes: int8 rows are 4x denser
     const int p_cache  = K     >= budget ? 1 : budget/K;
     const int p_thread = 4*nth >= npix   ? 1 : npix/(4*nth);
     return p_cache < p_thread ? p_cache : p_thread;
@@ -130,10 +130,18 @@ void conv2d_i8(float* out, const float* x, const int8_t* Wq, const float* wscale
     const int P = conv_panel_i8(npix, Kp, nth);
     if (!hal::env::conv_tile() || (size_t)npix*Kp <= 1024*1024 || P >= npix
         || P < hal::env::conv_min_panel()) {
-        std::vector<int8_t> col((size_t)npix*Kp);
-        std::vector<float>  as((size_t)npix, sa);
-        im2col_panel_i8(col.data(), xi, H, Wd, Cin, k, stride, pad, Wout, 0, npix, Kp);
-        dense_linear_i8_pre(out, col.data(), as.data(), Wq, wscale, bias, npix, Cout, K);
+        static thread_local std::vector<int8_t> col;
+        static thread_local std::vector<float>  as;
+        if (col.size() < (size_t)npix*Kp) col.resize((size_t)npix*Kp);
+        as.assign((size_t)npix, sa);
+        int8_t* c = col.data();
+#if defined(_OPENMP)
+        #pragma omp parallel for schedule(static) if((size_t)npix*Kp > (size_t)hal::env::omp_min())
+#endif
+        for (int r0=0; r0<npix; r0+=64)
+            im2col_panel_i8(c+(size_t)r0*Kp, xi, H, Wd, Cin, k, stride, pad, Wout,
+                            r0, npix-r0 < 64 ? npix-r0 : 64, Kp);
+        dense_linear_i8_pre(out, c, as.data(), Wq, wscale, bias, npix, Cout, K);
         return;
     }
 

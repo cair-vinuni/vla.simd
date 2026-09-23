@@ -11,6 +11,7 @@
 
 #include "../arch.h"
 #include "../../ops/quant_ops.h"
+#include "env.h"
 #if TCPU_ISA_ARM
 #include <arm_neon.h>
 #elif TCPU_ISA_X86
@@ -210,21 +211,21 @@ void quantize_act_i8(const float* x, int8_t* xq, float* ascale, int seq, int K) 
     const int Kp = i8_kpad(K);
 #if TCPU_ISA_ARM
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if((size_t)seq*K > (size_t)hal::env::omp_min())
 #endif
     for (int t=0; t<seq; t++)
         quantize_row_neon(x+(size_t)t*K, xq+(size_t)t*Kp, ascale+t, K, Kp);
     return;
 #elif TCPU_ISA_X86
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if((size_t)seq*K > (size_t)hal::env::omp_min())
 #endif
     for (int t=0; t<seq; t++)
         quantize_row_avx2(x+(size_t)t*K, xq+(size_t)t*Kp, ascale+t, K, Kp);
     return;
 #endif
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if((size_t)seq*K > (size_t)hal::env::omp_min())
 #endif
     for (int t=0; t<seq; t++) {
         const float* xt = x+(size_t)t*K;

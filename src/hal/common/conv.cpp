@@ -32,8 +32,8 @@ using std::size_t;
 
 namespace tcpu {
 
-static void im2col(std::vector<float>& col, const float* x, int H, int Wd, int Cin,
-                   int k, int stride, int pad, int Hout, int Wout);
+static const float* im2col(const float* x, int H, int Wd, int Cin,
+                           int k, int stride, int pad, int Hout, int Wout);
 static void im2col_panel(float* col, const float* x, int H, int Wd, int Cin,
                          int k, int stride, int pad, int Wout, int p0, int rows);
 
@@ -42,9 +42,8 @@ void conv2d(float* out, const float* x, const float* W, const float* bias,
     const int Hout = (H +2*pad-k)/stride + 1;
     const int Wout = (Wd+2*pad-k)/stride + 1;
     const int K = k*k*Cin;
-    std::vector<float> col;
-    im2col(col, x, H, Wd, Cin, k, stride, pad, Hout, Wout);
-    dense_linear(out, col.data(), W, bias, Hout*Wout, Cout, K);
+    dense_linear(out, im2col(x, H, Wd, Cin, k, stride, pad, Hout, Wout), W, bias,
+                 Hout*Wout, Cout, K);
 }
 
 // Panel size for the tiled conv: as many output pixels as fit the cache budget,
@@ -78,9 +77,8 @@ void conv2d_packed(float* out, const float* x, const float* Wp, const float* bia
     const int P = conv_panel(npix, K, nth);
     if (!hal::env::conv_tile() || (size_t)npix*K <= 1024*1024 || P >= npix
         || P < hal::env::conv_min_panel()) {
-        std::vector<float> col;
-        im2col(col, x, H, Wd, Cin, k, stride, pad, Hout, Wout);
-        dense_linear_packed(out, col.data(), Wp, bias, npix, Cout, K);
+        dense_linear_packed(out, im2col(x, H, Wd, Cin, k, stride, pad, Hout, Wout), Wp, bias,
+                            npix, Cout, K);
         return;
     }
 
@@ -110,9 +108,8 @@ void conv2d_blas(float* out, const float* x, const float* W, const float* bias,
                  int H, int Wd, int Cin, int Cout, int k, int stride, int pad) {
     const int Hout = (H +2*pad-k)/stride + 1;
     const int Wout = (Wd+2*pad-k)/stride + 1;
-    std::vector<float> col;
-    im2col(col, x, H, Wd, Cin, k, stride, pad, Hout, Wout);
-    dense_linear_blas(out, col.data(), W, bias, Hout*Wout, Cout, k*k*Cin);
+    dense_linear_blas(out, im2col(x, H, Wd, Cin, k, stride, pad, Hout, Wout), W, bias,
+                      Hout*Wout, Cout, k*k*Cin);
 }
 
 // One (oy, ox, ky) row of the im2col patch: the k taps along kx.
@@ -162,22 +159,25 @@ static void im2col_panel(float* col, const float* x, int H, int Wd, int Cin,
     }
 }
 
-static void im2col(std::vector<float>& col, const float* x, int H, int Wd, int Cin,
-                   int k, int stride, int pad, int Hout, int Wout) {
+static const float* im2col(const float* x, int H, int Wd, int Cin,
+                           int k, int stride, int pad, int Hout, int Wout) {
     const int K = k*k*Cin;
-    col.resize((size_t)Hout*Wout*K);
+    static thread_local std::vector<float> col;
+    if (col.size() < (size_t)Hout*Wout*K) col.resize((size_t)Hout*Wout*K);
+    float* c = col.data();
 
 #if defined(_OPENMP)
     #pragma omp parallel for schedule(static)
 #endif
     for (int oy=0; oy<Hout; oy++) {
         for (int ox=0; ox<Wout; ox++) {
-            float* row = col.data()+((size_t)oy*Wout+ox)*K;
+            float* row = c+((size_t)oy*Wout+ox)*K;
             for (int ky=0; ky<k; ky++)
                 im2col_row(row+(size_t)ky*k*Cin, x, H, Wd, Cin, k,
                            oy*stride-pad+ky, ox*stride-pad);
         }
     }
+    return c;
 }
 
 void maxpool2d(float* out, const float* x, int H, int Wd, int C, int k, int stride, int pad) {
@@ -358,7 +358,7 @@ void groupnorm(float* out, const float* x, const float* scale, const float* bias
 void im2col1d(std::vector<float>& col, const float* x, int T, int Cin,
               int k, int stride, int pad, int Tout) {
     const int K = k*Cin;
-    col.resize((size_t)Tout*K);
+    if (col.size() < (size_t)Tout*K) col.resize((size_t)Tout*K);
     for (int ot=0; ot<Tout; ot++) {
         float* row = col.data()+(size_t)ot*K;
         for (int kt=0; kt<k; kt++) {
@@ -383,26 +383,47 @@ void conv_transpose1d(float* out, const float* x, const float* W, const float* b
     const int Tout = (T-1)*stride - 2*pad + k;
 
     // Seed with the bias, then scatter-accumulate each input position's kernel
-    // footprint. Accumulation order is fixed by the loop nest (input-major, then
-    // kernel tap), so the float sum is deterministic across runs and threads.
-    if (bias) for (int ot=0; ot<Tout; ot++)
-                  std::memcpy(out+(size_t)ot*Cout, bias, sizeof(float)*(size_t)Cout);
-    else      std::memset(out, 0, sizeof(float)*(size_t)Tout*Cout);
-
-    for (int t=0; t<T; t++) {
-        const float* xt = x+(size_t)t*Cin;
-        for (int kt=0; kt<k; kt++) {
-            const int ot = t*stride - pad + kt;
-            if (ot < 0 || ot >= Tout) continue;
-            float* dst = out+(size_t)ot*Cout;
+    // footprint. Accumulation order is fixed by the loop nest, so the float sum
+    // is deterministic across runs and threads.
+    const int CB = 64;
+#if defined(_OPENMP)
+    #pragma omp parallel if((size_t)T*Cin*Cout > (size_t)hal::env::omp_min())
+#endif
+  {
+    static thread_local std::vector<float> buf;
+    const size_t nx = (size_t)T*Cin;
+    if (buf.size() < nx + (size_t)Tout*CB) buf.resize(nx + (size_t)Tout*CB);
+    float* xT  = buf.data();
+    float* acc = xT + nx;
+    for (int t=0; t<T; t++)
+        for (int ci=0; ci<Cin; ci++) xT[(size_t)ci*T+t] = x[(size_t)t*Cin+ci];
+#if defined(_OPENMP)
+    #pragma omp for schedule(static)
+#endif
+    for (int c0=0; c0<Cout; c0+=CB) {
+        const int nc = std::min(CB, Cout-c0);
+        std::memset(acc, 0, sizeof(float)*(size_t)Tout*CB);
+        if (bias) for (int ot=0; ot<Tout; ot++)
+                      std::memcpy(acc+(size_t)ot*CB, bias+c0, sizeof(float)*(size_t)nc);
+        float w[CB] = {};
+        for (int kt=k-1; kt>=0; kt--) {
             for (int ci=0; ci<Cin; ci++) {
-                const float v = xt[ci];
-                if (v == 0.0f) continue;
-                const float* w = W+((size_t)ci*k + kt)*Cout;
-                for (int co=0; co<Cout; co++) dst[co] += v*w[co];
+                std::memcpy(w, W+((size_t)ci*k + kt)*Cout+c0, sizeof(float)*(size_t)nc);
+                const float* xc = xT+(size_t)ci*T;
+                for (int t=0; t<T; t++) {
+                    const int ot = t*stride - pad + kt;
+                    if (ot < 0 || ot >= Tout) continue;
+                    const float v = xc[t];
+                    if (v == 0.0f) continue;
+                    float* a = acc+(size_t)ot*CB;
+                    for (int co=0; co<CB; co++) a[co] += v*w[co];
+                }
             }
         }
+        for (int ot=0; ot<Tout; ot++)
+            std::memcpy(out+(size_t)ot*Cout+c0, acc+(size_t)ot*CB, sizeof(float)*(size_t)nc);
     }
+  }
 }
 
 void spatial_softmax(float* out, const float* x, const float* grid,

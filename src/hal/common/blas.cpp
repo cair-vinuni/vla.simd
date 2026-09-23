@@ -30,7 +30,7 @@ void dense_linear_blas(float* out, const float* x, const float* W, const float* 
                 1.0f, x, K, W, K, 0.0f, out, N);
     if (bias) {
 #if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if((size_t)seq*N > (size_t)hal::env::omp_min())
 #endif
         for (int t=0; t<seq; t++) {
             float* o = out+(size_t)t*N;
@@ -46,7 +46,7 @@ void dense_linear_blas_kt(float* out_t, const float* x, const float* W, const fl
                 1.0f, W, K, x, K, 0.0f, out_t, ldo);
     if (bias) {
 #if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if((size_t)seq*N > (size_t)hal::env::omp_min())
 #endif
         for (int n=0; n<N; n++) {
             float* o = out_t+(size_t)n*ldo;

@@ -108,6 +108,8 @@ bool simd_silu();
 // exp, 1.5e-07 absolute on erf, so under 1e-06 absolute on the gelu output.
 bool simd_erf();
 
+bool simd_mish();
+
 // TCPU_BF16_MLP=1: run MLP-role GEMMs from bf16 packed weights (Pi NEON backend;
 // memory-bound MLP, 5th-decimal accuracy class). Default off.
 bool bf16_mlp();

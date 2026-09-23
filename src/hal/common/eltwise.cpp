@@ -248,6 +248,39 @@ void mish(float* x, int n) {
     // above that, tanh(softplus(v)) is 1 to well inside fp32, and the branch also
     // keeps log1p(exp(v)) from returning inf for the large activations the UNet's
     // wide channel blocks do produce.
+#if TCPU_ISA_X86 || TCPU_HAL_APPLE || TCPU_HAL_NEON
+    if (hal::env::simd_mish()) {
+        const int lanes = TCPU_ISA_X86 ? 8 : 4;
+        const int nv = n - (n % lanes);
+#if defined(_OPENMP)
+        #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
+#endif
+        for (int i=0; i<nv; i += lanes) {
+#if TCPU_ISA_X86
+            const __m256 v = _mm256_loadu_ps(x+i);
+            const __m256 e = exp256_ps(_mm256_min_ps(v, _mm256_set1_ps(20.0f)));
+            const __m256 m = _mm256_mul_ps(e, _mm256_add_ps(e, _mm256_set1_ps(2.0f)));
+            const __m256 t = _mm256_div_ps(m, _mm256_add_ps(m, _mm256_set1_ps(2.0f)));
+            _mm256_storeu_ps(x+i, _mm256_mul_ps(v, t));
+#else
+            const float32x4_t v = vld1q_f32(x+i);
+#if TCPU_HAL_APPLE
+            const float32x4_t e = exp_ps(vminq_f32(v, vdupq_n_f32(20.0f)));
+#else
+            const float32x4_t e = exp_ps_neon(vminq_f32(v, vdupq_n_f32(20.0f)));
+#endif
+            const float32x4_t m = vmulq_f32(e, vaddq_f32(e, vdupq_n_f32(2.0f)));
+            vst1q_f32(x+i, vmulq_f32(v, vdivq_f32(m, vaddq_f32(m, vdupq_n_f32(2.0f)))));
+#endif
+        }
+        for (int i=nv; i<n; i++) {
+            const float v  = x[i];
+            const float sp = v > 20.0f ? v : std::log1p(std::exp(v));
+            x[i] = v*std::tanh(sp);
+        }
+        return;
+    }
+#endif
 #if defined(_OPENMP)
     #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
 #endif
