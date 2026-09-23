@@ -71,16 +71,17 @@ bool int8_gemm_available() {
     return v;
 }
 
-#if !TCPU_HAL_APPLE
-#pragma GCC push_options
-#pragma GCC target ("arch=armv8.2-a+dotprod")
+#if defined(__clang__)
+#define VLA_DOTPROD __attribute__((target("dotprod")))
+#else
+#define VLA_DOTPROD __attribute__((target("arch=armv8.2-a+dotprod")))
 #endif
 
 // ROWS tokens x one 16-row weight panel, C-resident. Live registers:
 // 4*ROWS int32 accumulators + 4 weight vectors + 1 activation vector, so
 // ROWS=4 -> 21 and ROWS=6 -> 29 of the 32 NEON registers (no spill either way).
 template <int ROWS>
-static inline void mm_i8_rows16(float* out, const int8_t* xq, const float* ascale,
+VLA_DOTPROD static inline void mm_i8_rows16(float* out, const int8_t* xq, const float* ascale,
                                 const int8_t* wq, const float* wscale, const float* bias,
                                 int N, int Kp, int n0) {
     int32x4_t c0[ROWS], c1[ROWS], c2[ROWS], c3[ROWS];
@@ -130,7 +131,7 @@ static inline void mm_i8_rows16(float* out, const int8_t* xq, const float* ascal
     }
 }
 
-static inline void mm_i8_tile(float* out, const int8_t* xq, const float* ascale,
+VLA_DOTPROD static inline void mm_i8_tile(float* out, const int8_t* xq, const float* ascale,
                               const int8_t* wq, const float* wscale, const float* bias,
                               int rows, int N, int Kp, int n0) {
     switch (rows) {
@@ -143,9 +144,7 @@ static inline void mm_i8_tile(float* out, const int8_t* xq, const float* ascale,
     }
 }
 
-#if !TCPU_HAL_APPLE
-#pragma GCC pop_options
-#endif
+#undef VLA_DOTPROD
 
 void dense_linear_i8_pre(float* out, const int8_t* xq, const float* ascale,
                          const int8_t* Wq, const float* wscale, const float* bias,

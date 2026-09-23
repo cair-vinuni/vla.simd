@@ -18,4 +18,5 @@ compile_commands.json
 .serve/
 __pycache__/
 *.py[cod]
-*.egg-info/        # plain `pip install -e .` builds in-tree; uv does not
+# plain `pip install -e .` builds in-tree; uv does not
+*.egg-info/

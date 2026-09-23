@@ -27,10 +27,10 @@
     #define TCPU_HAL_X86 1
     #define TCPU_HAL_NAME "x86-avx2"
   #endif
-#elif defined(__ARM_NEON) && defined(__APPLE__)
+#elif defined(__ARM_NEON) && defined(__aarch64__) && defined(__APPLE__)
   #define TCPU_HAL_APPLE 1
   #define TCPU_HAL_NAME "apple"
-#elif defined(__ARM_NEON)
+#elif defined(__ARM_NEON) && defined(__aarch64__)
   #define TCPU_HAL_NEON 1
   #define TCPU_HAL_NAME "neon"
 #else

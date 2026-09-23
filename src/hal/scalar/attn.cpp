@@ -20,7 +20,7 @@ namespace tcpu {
 
 void gqa_attention_masked(float* out, const float* Q, const float* K, const float* V,
                           int seq_q, int seq_k, int n_q, int n_kv, int head_dim,
-                          float scale, const float* mask, const float* K_pre) {
+                          float scale, const float* mask, const float*) {
     const int group = n_q/n_kv;
     const float NINF  = -std::numeric_limits<float>::infinity();
     const float BLOCK = std::numeric_limits<float>::lowest();

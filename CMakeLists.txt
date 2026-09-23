@@ -10,6 +10,10 @@ include(GNUInstallDirs)
 # Every object ends up in one of the vla_simd_* shared libraries, so build
 # the tree PIC and reuse the static libs instead of recompiling the HAL per .so.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# Only the vla_* entry points are API; hiding the rest stops two engines in one
+# process from interposing each other's C++ symbols.
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
@@ -48,7 +52,7 @@ target_compile_features(vla_flags INTERFACE cxx_std_17)
 target_include_directories(vla_flags INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-  message(WARNING "vla.cpu: no ISA flags for ${CMAKE_CXX_COMPILER_ID}; "
+  message(WARNING "vla_simd: no ISA flags for ${CMAKE_CXX_COMPILER_ID}; "
                   "the HAL will fall back to the scalar backend")
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
   # Apple is the one target that takes +dotprod from -mcpu rather than from the
@@ -57,7 +61,7 @@ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
   # CI alone passes -DVLA_APPLE_MCPU=apple-m1.
   set(VLA_APPLE_MCPU "native" CACHE STRING "-mcpu for Apple arm64 (CI overrides with apple-m1)")
   target_compile_options(vla_flags INTERFACE -mcpu=${VLA_APPLE_MCPU})
-  message(STATUS "vla.cpu arm64: -mcpu=${VLA_APPLE_MCPU} (apple)")
+  message(STATUS "vla_simd arm64: -mcpu=${VLA_APPLE_MCPU} (apple)")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
   # Off by default: 8% slower than the baseline on a Cortex-A76 (see above).
   # The knob is here so another part can A/B it.
@@ -66,23 +70,20 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
   if(VLA_ARM_FLAGS)
     separate_arguments(VLA_ARM_FLAG_LIST NATIVE_COMMAND "${VLA_ARM_FLAGS}")
     target_compile_options(vla_flags INTERFACE ${VLA_ARM_FLAG_LIST})
-    message(STATUS "vla.cpu aarch64: ${VLA_ARM_FLAGS} (override)")
+    message(STATUS "vla_simd aarch64: ${VLA_ARM_FLAGS} (override)")
   elseif(VLA_ARM_NATIVE)
     target_compile_options(vla_flags INTERFACE -mcpu=native)
-    message(STATUS "vla.cpu aarch64: -mcpu=native")
+    message(STATUS "vla_simd aarch64: -mcpu=native")
   else()
     target_compile_options(vla_flags INTERFACE -march=armv8-a+simd)
-    message(STATUS "vla.cpu aarch64: baseline armv8-a+simd")
+    message(STATUS "vla_simd aarch64: baseline armv8-a+simd")
   endif()
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
-  target_compile_options(vla_flags INTERFACE -mfpu=neon)
-  message(STATUS "vla.cpu arm32: -mfpu=neon")
-else()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i[3-6]86")
   set(VLA_X86_VENDOR "${VLA_HAL}")
   if(VLA_HAL STREQUAL "auto")
     set(VLA_X86_VENDOR "")
     if(CMAKE_CROSSCOMPILING)
-      message(STATUS "vla.cpu: cross-compiling, not sniffing the build host's vendor "
+      message(STATUS "vla_simd: cross-compiling, not sniffing the build host's vendor "
                      "(-DVLA_HAL=amd|avx2 to pick)")
     elseif(EXISTS "/proc/cpuinfo")
       file(READ "/proc/cpuinfo" VLA_CPUINFO)
@@ -98,10 +99,12 @@ else()
   target_compile_options(vla_flags INTERFACE -mavx2 -mfma -mf16c)
   if(VLA_X86_VENDOR STREQUAL "amd")
     target_compile_definitions(vla_flags INTERFACE TCPU_HAL_PREFER_AMD)
-    message(STATUS "vla.cpu HAL: amd-zen (AVX2, Zen-tuned attention)")
+    message(STATUS "vla_simd HAL: amd-zen (AVX2, Zen-tuned attention)")
   else()
-    message(STATUS "vla.cpu HAL: x86-avx2 (Intel tuning)")
+    message(STATUS "vla_simd HAL: x86-avx2 (Intel tuning)")
   endif()
+else()
+  message(STATUS "vla_simd HAL: scalar (${CMAKE_SYSTEM_PROCESSOR})")
 endif()
 
 # GCC defaults to fast, Clang to on. Pin both to what the parity numbers were
@@ -118,7 +121,7 @@ if(VLA_SANITIZE)
   target_compile_options(vla_flags INTERFACE
     -fsanitize=${VLA_SANITIZE} -fno-omit-frame-pointer -fno-sanitize-recover=all)
   target_link_options(vla_flags INTERFACE -fsanitize=${VLA_SANITIZE})
-  message(STATUS "vla.cpu sanitizers: ${VLA_SANITIZE}")
+  message(STATUS "vla_simd sanitizers: ${VLA_SANITIZE}")
 endif()
 
 # Apple clang ships without OpenMP; point FindOpenMP at Homebrew's libomp.
@@ -136,7 +139,7 @@ find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(vla_flags INTERFACE OpenMP::OpenMP_CXX)
 else()
-  message(WARNING "vla.cpu: OpenMP not found - the engine will run single-threaded "
+  message(WARNING "vla_simd: OpenMP not found - the engine will run single-threaded "
                   "and every OMP_NUM_THREADS recipe in the docs is inert")
 endif()
 
@@ -151,7 +154,7 @@ endif()
 # ---------------------------------------------------------------------------
 # HAL + shared layer (model-agnostic): reused by every VLA model
 # ---------------------------------------------------------------------------
-add_library(tcpu_ops
+add_library(tcpu_ops STATIC
   src/hal/common/env.cpp
   src/hal/common/blas.cpp
   src/hal/common/gemm.cpp
@@ -182,37 +185,37 @@ add_library(tcpu_ops
   src/nn/linear_bf16.cpp)   # load-time bf16 init, linked after the hot objects (see file header)
 target_link_libraries(tcpu_ops PUBLIC vla_flags)
 
-add_library(tcpu_preprocess src/preprocess/image.cpp)                    # image load + resize + normalize
+add_library(tcpu_preprocess STATIC src/preprocess/image.cpp)                    # image load + resize + normalize
 target_link_libraries(tcpu_preprocess PUBLIC vla_flags)
 
-add_library(tcpu_tokenizer src/tokenizer/tokenizer.cpp src/tokenizer/t5_tokenizer.cpp
+add_library(tcpu_tokenizer STATIC src/tokenizer/tokenizer.cpp src/tokenizer/t5_tokenizer.cpp
                            src/tokenizer/bert_tokenizer.cpp)  # byte-level BPE (Llama-3 / SmolLM2) + sentencepiece unigram (T5) + BERT WordPiece
 target_link_libraries(tcpu_tokenizer PUBLIC vla_flags)
 
 # ---------------------------------------------------------------------------
 # Models: one library per VLA architecture under src/models/<name>/
 # ---------------------------------------------------------------------------
-add_library(tcpu_octo
+add_library(tcpu_octo STATIC
   src/models/octo/small_stem.cpp
   src/models/octo/octo_transformer.cpp
   src/models/octo/diffusion_head.cpp
   src/models/octo/octo_model.cpp)
 target_link_libraries(tcpu_octo PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
 
-add_library(tcpu_act
+add_library(tcpu_act STATIC
   src/models/act/resnet_backbone.cpp
   src/models/act/act_transformer.cpp
   src/models/act/act_model.cpp)
 target_link_libraries(tcpu_act PUBLIC tcpu_ops tcpu_preprocess)
 
-add_library(tcpu_smolvla
+add_library(tcpu_smolvla STATIC
   src/models/smolvla/smollm2_lm.cpp
   src/models/smolvla/siglip_vision.cpp
   src/models/smolvla/action_expert.cpp
   src/models/smolvla/smolvla_model.cpp)
 target_link_libraries(tcpu_smolvla PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
 
-add_library(tcpu_turbovla
+add_library(tcpu_turbovla STATIC
   src/models/turbovla/dinov3_vision.cpp
   src/models/turbovla/bert_text.cpp
   src/models/turbovla/fusion.cpp
@@ -220,14 +223,14 @@ add_library(tcpu_turbovla
   src/models/turbovla/turbovla_model.cpp)
 target_link_libraries(tcpu_turbovla PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
 
-add_library(tcpu_impact
+add_library(tcpu_impact STATIC
   src/models/impact/resnet_film.cpp
   src/models/impact/t5_text.cpp
   src/models/impact/impact_transformer.cpp
   src/models/impact/impact_model.cpp)
 target_link_libraries(tcpu_impact PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
 
-add_library(tcpu_diffusion
+add_library(tcpu_diffusion STATIC
   src/models/diffusion/rgb_encoder.cpp
   src/models/diffusion/unet1d.cpp
   src/models/diffusion/scheduler.cpp
@@ -250,11 +253,6 @@ function(vla_add_shared name capi_src)
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   add_library(vla::${name} ALIAS ${name})
   set_target_properties(${name} PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
-  # Only the vla_* entry points are API; hiding the rest stops two engines in
-  # one process from interposing each other's C++ symbols.
-  set_target_properties(${name} PROPERTIES
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN ON)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(${name} PRIVATE -fno-semantic-interposition)
   endif()
@@ -296,7 +294,7 @@ if(VLA_LTO AND VLA_IPO_OK AND NOT VLA_SANITIZE)
   set_property(TARGET ${VLA_FIRST_PARTY} tcpu_preprocess
                PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
 elseif(VLA_LTO)
-  message(STATUS "vla.cpu: LTO unavailable (${VLA_IPO_WHY})")
+  message(STATUS "vla_simd: LTO unavailable (${VLA_IPO_WHY})")
 endif()
 
 
