@@ -77,6 +77,10 @@ bool DiffusionModel::load(const std::string& dir) {
     }
 
     if (cfg.n_cams <= 0 || cfg.n_obs_steps <= 0) return false;
+    if (cfg.n_action_steps <= 0 || (long long)cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon) return false;
+    if (cfg.crop_h > cfg.img_h || cfg.crop_w > cfg.img_w) return false;
+    if ((cfg.resize_h > 0 && cfg.resize_h != cfg.img_h) || (cfg.resize_w > 0 && cfg.resize_w != cfg.img_w))
+        return false;
     if (cfg.num_inference_steps > cfg.num_train_timesteps) return false;
 
     const int n_enc = cfg.separate_encoder_per_camera ? cfg.n_cams : 1;
@@ -120,7 +124,7 @@ bool DiffusionModel::load(const std::string& dir) {
 
 void DiffusionModel::preprocess(const uint8_t* src, int cam, float* dst) const {
     // Normalize first, then crop -- the reference normalizes in the processor,
-    // before the encoder's resize/crop ever runs.
+    // before the encoder's crop ever runs.
     const int mc = cfg.separate_encoder_per_camera ? cam : 0;
     (void)mc;
     const float* mean = img_mean.data()+(size_t)cam*3;

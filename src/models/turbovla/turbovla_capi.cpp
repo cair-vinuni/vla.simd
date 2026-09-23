@@ -100,7 +100,7 @@ int32_t vla_turbovla_tensor(void* h, int32_t which, float* out, int32_t max_elem
     const std::vector<float>* t = pick(m, which);
     if (!t) return VLA_ERR_ARG;
     const int32_t n = (int32_t)t->size();
-    if (!out || max_elems <= 0) return n;          // sizing query
+    if (!out) return n;
     if (max_elems < n) return VLA_ERR_SHAPE;
     std::memcpy(out, t->data(), (size_t)n*sizeof(float));
     return n;

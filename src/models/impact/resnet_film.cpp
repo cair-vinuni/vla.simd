@@ -125,6 +125,7 @@ bool ResNetFilm::load(const std::string& dir, const std::string& name) {
         return p;
     };
 
+    if (cfg.in_ch != 3) return false;
     const float* w = take((size_t)cfg.stem_out*cfg.stem_k*cfg.stem_k*cfg.in_ch);
     const float* b = take(cfg.stem_out);
     if (!ok) return false;
@@ -139,7 +140,7 @@ bool ResNetFilm::load(const std::string& dir, const std::string& name) {
         blk.stride   = bm[i].stride;
         blk.has_down = bm[i].has_down != 0;
 
-        if (blk.cin < 1 || blk.cout < 1 || blk.stride < 1) return false;
+        if (blk.cin != (i ? blocks[i-1].cout : cfg.stem_out) || blk.cout < 1 || blk.stride < 1) return false;
         if (!blk.has_down && (blk.stride != 1 || blk.cin != blk.cout)) {
             std::fprintf(stderr, "impact backbone: block %zu has no downsample but "
                          "changes shape (cin %d cout %d stride %d)\n",
@@ -175,8 +176,9 @@ bool ResNetFilm::load(const std::string& dir, const std::string& name) {
             return false;
         }
     }
-    if (!std::is_sorted(film_after.begin(), film_after.end())) {
-        std::fprintf(stderr, "impact backbone: film_after must be ascending - the "
+    if (std::adjacent_find(film_after.begin(), film_after.end(),
+                           [](int x, int y) { return x >= y; }) != film_after.end()) {
+        std::fprintf(stderr, "impact backbone: film_after must be strictly ascending - the "
                      "gamma/beta buffer is cut up in that order\n");
         return false;
     }

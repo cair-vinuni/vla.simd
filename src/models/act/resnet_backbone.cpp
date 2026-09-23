@@ -125,6 +125,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
         return p;
     };
 
+    if (cfg.in_ch != 3) return false;
     const float* w = take((size_t)cfg.stem_out*cfg.stem_k*cfg.stem_k*cfg.in_ch);
     const float* b = take(cfg.stem_out);
     if (!ok) return false;
@@ -140,7 +141,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
         blk.has_down = bm[i].has_down != 0;
 
         // Without a downsample the residual reads the block input in place.
-        if (blk.cin < 1 || blk.cout < 1 || blk.stride < 1) return false;
+        if (blk.cin != (i ? blocks[i-1].cout : cfg.stem_out) || blk.cout < 1 || blk.stride < 1) return false;
         if (!blk.has_down && (blk.stride != 1 || blk.cin != blk.cout)) {
             std::fprintf(stderr, "act backbone: block %zu has no downsample but "
                          "changes shape (cin %d cout %d stride %d)\n",

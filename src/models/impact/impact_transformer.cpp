@@ -51,7 +51,7 @@ static int int8_mask() {
     return v;
 }
 
-bool ImpactTransformer::load(const std::string& dir) {
+bool ImpactTransformer::load(const std::string& dir, int img_ch) {
     std::ifstream meta(dir + "/impact.meta");
     if (!meta) return false;
     std::string line;
@@ -101,7 +101,7 @@ bool ImpactTransformer::load(const std::string& dir) {
         take_linear(a.wo, d, d, nn::Linear::Role::Gemm);
     };
 
-    take_linear(img_proj, d, d, nn::Linear::Role::Gemm);
+    take_linear(img_proj, d, img_ch, nn::Linear::Role::Gemm);
     take_linear(state_proj, d, cfg.state_dim, nn::Linear::Role::Generic);
     latent_tok = take(d);
     pos1d      = take((size_t)cfg.n_1d*d);
@@ -135,7 +135,7 @@ bool ImpactTransformer::load(const std::string& dir) {
     dec_ns  = take(d);
     dec_nb  = take(d);
     take_linear(head, cfg.action_dim, d, nn::Linear::Role::Generic);
-    if (!ok || off != data.size()) return false;
+    if (!ok || off != data.size() || cfg.n_1d != 2 || cfg.heads*cfg.head_dim != d) return false;
 
     // Left out of every int8 group on purpose, as in ACT:
     //   state_proj / head - K and N are the state/action dims, far too small to

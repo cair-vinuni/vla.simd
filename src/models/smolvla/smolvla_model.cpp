@@ -88,11 +88,13 @@ bool SmolvlaModel::load(const std::string& dir) {
     // handle whose first predict indexes an empty embedding table.
     if (vocab <= 0 || hidden <= 0 || max_state_dim <= 0 || n_views <= 0 ||
         real_state_dim <= 0 || real_state_dim > max_state_dim ||
-        real_action_dim <= 0) {
+        real_action_dim <= 0 || real_action_dim > aex.cfg.max_action_dim ||
+        hidden != vlm.cfg.hidden || hidden != vit.cfg.mm_out ||
+        aex.cfg.kv_full() != vlm.cfg.kv_full() || aex.cfg.n_layers > vlm.cfg.n_layers) {
         std::fprintf(stderr, "smolvla: %s/heads.meta is missing or malformed "
-                     "(vocab=%d hidden=%d state=%d/%d action=%d views=%d)\n",
+                     "(vocab=%d hidden=%d state=%d/%d action=%d/%d views=%d)\n",
                      dir.c_str(), vocab, hidden, real_state_dim, max_state_dim,
-                     real_action_dim, n_views);
+                     real_action_dim, aex.cfg.max_action_dim, n_views);
         return false;
     }
 

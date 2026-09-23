@@ -82,6 +82,18 @@ bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
     if (!tf.load(dir)) return false;
     if (!head.load(dir)) return false;
 
+    auto grid = [](const SmallStemConfig& c, int s) {
+        for (int i=0; i<c.n_layers; i++) {
+            s = (s+2*c.pad-c.k)/c.stride+1;
+            if (s < 1) return -1;
+        }
+        return s*s;
+    };
+    if (t5.cfg.d_model != tf.cfg.t5_dim || head.cfg.emb != tf.cfg.d || tf.cfg.heads*tf.cfg.head_dim != tf.cfg.d ||
+        stem_primary.cfg.embed_dim != tf.cfg.stem_dim || stem_wrist.cfg.embed_dim != tf.cfg.stem_dim ||
+        grid(stem_primary.cfg, 256) != tf.cfg.tok_primary || grid(stem_wrist.cfg, 128) != tf.cfg.tok_wrist)
+        return false;
+
     const size_t AD = head.cfg.action_dim;
     if (!read_f32(dir + "/stats_action_mean.bin", act_mean, AD)) return false;
     if (!read_f32(dir + "/stats_action_std.bin",  act_std,  AD)) return false;
@@ -141,7 +153,7 @@ const float* OctoModel::lang_encode(const std::string& instruction) const {
     auto it = lang_cache.find(instruction);
     if (it != lang_cache.end()) return it->second.data();
 
-    const int NT = t5.cfg.n_tokens;
+    const int NT = tf.cfg.n_task;
     std::vector<int> ids = tok.encode(instruction, NT);
     std::vector<int> am(NT);
     for (int i=0; i<NT; i++)
@@ -149,6 +161,7 @@ const float* OctoModel::lang_encode(const std::string& instruction) const {
 
     std::vector<float> out((size_t)NT*t5.cfg.d_model);
     t5.encode(ids.data(), am.data(), NT, out.data());
+    if (lang_cache.size() >= 64) lang_cache.clear();
     return lang_cache.emplace(instruction, std::move(out)).first->second.data();
 }
 

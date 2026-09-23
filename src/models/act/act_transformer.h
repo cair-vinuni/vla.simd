@@ -60,7 +60,7 @@ struct ActTransformer {
     mutable std::vector<float> cam_pos;
     mutable int cam_pos_fh = -1, cam_pos_fw = -1;
 
-    bool load(const std::string& dir);
+    bool load(const std::string& dir, int img_ch);
 
     int n_tokens(int n_cams, int fh, int fw) const { return cfg.n_1d + n_cams*fh*fw; }
 

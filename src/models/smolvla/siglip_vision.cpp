@@ -72,7 +72,10 @@ bool SiglipVision::load(const std::string& dir) {
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));
     wbf.resize(wcount);
     bin.read(reinterpret_cast<char*>(wbf.data()), wcount*sizeof(uint16_t));
-    if (!bin) { std::fprintf(stderr, "smolvla: short read on vit.bin\n"); return false; }
+    if (!bin || bin.peek() != EOF) {
+        std::fprintf(stderr, "smolvla: %s/vit.bin size does not match vit.meta\n", dir.c_str());
+        return false;
+    }
 
     size_t fo = 0, wo = 0;
     auto tf = [&](size_t n) { const float* p = fnorms.data()+fo; fo += n; return p; };

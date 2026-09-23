@@ -127,8 +127,12 @@ bool TurboVlaModel::load(const std::string& dir) {
             const size_t tab = line.find('\t');
             if (tab == std::string::npos) continue;
             const int len = std::atoi(line.substr(0, tab).c_str());
-            if (len >= 1 && len <= cfg.max_text_len)
-                pad_by_instruction[line.substr(tab+1)] = len;
+            if (len < 1 || len > cfg.text_pad) {
+                std::fprintf(stderr, "turbovla: %s/text_pad.txt length %d outside [1, %d]\n",
+                             dir.c_str(), len, cfg.text_pad);
+                return false;
+            }
+            pad_by_instruction[line.substr(tab+1)] = len;
         }
     }
     return true;

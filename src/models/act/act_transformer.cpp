@@ -51,7 +51,7 @@ static int int8_mask() {
     return v;
 }
 
-bool ActTransformer::load(const std::string& dir) {
+bool ActTransformer::load(const std::string& dir, int img_ch) {
     std::ifstream meta(dir + "/act.meta");
     if (!meta) return false;
     std::string line;
@@ -100,7 +100,7 @@ bool ActTransformer::load(const std::string& dir) {
         take_linear(a.wo, d, d, nn::Linear::Role::Gemm);
     };
 
-    take_linear(img_proj, d, d, nn::Linear::Role::Gemm);
+    take_linear(img_proj, d, img_ch, nn::Linear::Role::Gemm);
     take_linear(state_proj, d, cfg.state_dim, nn::Linear::Role::Generic);
     latent_tok = take(d);
     pos1d      = take((size_t)cfg.n_1d*d);
@@ -134,7 +134,7 @@ bool ActTransformer::load(const std::string& dir) {
     dec_ns  = take(d);
     dec_nb  = take(d);
     take_linear(head, cfg.action_dim, d, nn::Linear::Role::Generic);
-    if (!ok || off != data.size()) return false;
+    if (!ok || off != data.size() || cfg.n_1d != 2 || cfg.heads*cfg.head_dim != d) return false;
 
     // ACT_INT8=1 routes the transformer's GEMMs through the W8A8 kernel
     // (ops/quant_ops.h): every d x d projection and both MLPs, in the encoder,

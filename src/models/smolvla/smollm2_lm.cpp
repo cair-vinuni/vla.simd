@@ -40,7 +40,10 @@ bool SmollmVlm::load(const std::string& dir) {
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));
     wbf.resize(wcount);
     bin.read(reinterpret_cast<char*>(wbf.data()), wcount*sizeof(uint16_t));
-    if (!bin) { std::fprintf(stderr, "smolvla: short read on vlm.bin\n"); return false; }
+    if (!bin || bin.peek() != EOF) {
+        std::fprintf(stderr, "smolvla: %s/vlm.bin size does not match vlm.meta\n", dir.c_str());
+        return false;
+    }
 
     layers.resize(NL);
     size_t fo = 0, wo = 0;

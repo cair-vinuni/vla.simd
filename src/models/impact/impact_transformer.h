@@ -77,7 +77,7 @@ struct ImpactTransformer {
     mutable std::vector<float> cam_pos;
     mutable int cam_pos_fh = -1, cam_pos_fw = -1;
 
-    bool load(const std::string& dir);
+    bool load(const std::string& dir, int img_ch);
 
     // n_text_real of the cfg.n_text text slots carry a real token; the padded tail
     // is not emitted, so the sequence length depends on the instruction.

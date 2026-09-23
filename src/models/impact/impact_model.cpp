@@ -44,7 +44,7 @@ bool ImpactModel::load(const std::string& dir) {
     }
 
     if (!backbone.load(dir)) return false;
-    if (!tf.load(dir)) return false;
+    if (!tf.load(dir, backbone.out_channels())) return false;
     if (!tok.load(dir)) {
         std::fprintf(stderr, "impact: cannot load %s/vocab.txt\n", dir.c_str());
         return false;
@@ -186,7 +186,7 @@ void ImpactModel::apply_int8() {
 }
 
 bool ImpactModel::set_instruction(const std::string& instruction) {
-    if (tf.cfg.dim < 1 || text.film_total() < 1) return false;
+    if (tf.cfg.dim < 1) return false;
     if (have_text && instruction == cached_instruction) return true;
     const int L = tf.cfg.n_text;
 

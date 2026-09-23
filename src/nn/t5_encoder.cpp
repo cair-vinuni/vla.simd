@@ -32,6 +32,8 @@ bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* ta
         else if (key == "eps"      ) cfg.eps = (float)val;
         else if (key == "n_tokens" ) cfg.n_tokens = (int)val;
     }
+    if (cfg.n_heads < 1 || cfg.d_kv < 1 || (long long)cfg.n_heads*cfg.d_kv != cfg.d_model ||
+        cfg.n_buckets < 4 || cfg.max_dist <= cfg.n_buckets/4) return false;
 
     if (!read_arena(dir + "/" + stem + ".bin", data)) return false;
 

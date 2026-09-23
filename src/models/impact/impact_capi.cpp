@@ -75,7 +75,7 @@ int32_t vla_impact_tokens(void* h, int32_t* ids, int32_t* compact, int32_t* mask
     if (!h) return VLA_ERR_ARG;
     auto* m = static_cast<ImpactModel*>(h);
     const int n = m->n_text();
-    if (max_elems < n) return VLA_ERR_ARG;
+    if (max_elems < n || m->token_ids().size() != (size_t)n) return VLA_ERR_ARG;
     for (int i = 0; i < n; i++) {
         if (ids)     ids[i]     = m->token_ids()[(size_t)i];
         if (compact) compact[i] = m->compact_ids()[(size_t)i];
@@ -90,7 +90,7 @@ int32_t vla_impact_film(void* h, float* gamma, float* beta, int32_t max_elems) t
     if (!h) return VLA_ERR_ARG;
     auto* m = static_cast<ImpactModel*>(h);
     const int n = (int)m->film_gamma().size();
-    if (n == 0) return VLA_ERR_ARG;
+    if (n == 0) return m->token_ids().empty() ? VLA_ERR_ARG : 0;
     if (max_elems < n) return VLA_ERR_ARG;
     if (gamma) std::memcpy(gamma, m->film_gamma().data(), sizeof(float)*(size_t)n);
     if (beta)  std::memcpy(beta,  m->film_beta().data(),  sizeof(float)*(size_t)n);

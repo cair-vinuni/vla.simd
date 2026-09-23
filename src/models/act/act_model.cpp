@@ -41,7 +41,7 @@ bool ActModel::load(const std::string& dir) {
     }
 
     if (!backbone.load(dir)) return false;
-    if (!tf.load(dir)) return false;
+    if (!tf.load(dir, backbone.out_channels())) return false;
 
     std::ifstream st(dir + "/stats.bin", std::ios::binary);
     if (!st) return false;

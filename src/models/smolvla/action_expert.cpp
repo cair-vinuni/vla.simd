@@ -92,7 +92,7 @@ bool ActionExpert::load(const std::string& dir) {
         return (size_t)EH + (size_t)QF*EH + kvw*2 + (size_t)EH*QF
              + (size_t)EH + (size_t)EF*EH*2 + (size_t)EH*EF;
     };
-    for (int L = 0; L < NL; L++) total += layer_floats(L % cfg.self_attn_every_n == 0);
+    for (int L = 0; L < NL; L++) total += layer_floats(cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0);
     total += (size_t)EH;                                   // out_norm
     total += (size_t)EH*MAD + EH;                          // action_in_proj
     total += (size_t)EH*(2*EH) + EH;                       // action_time_mlp_in
@@ -103,7 +103,10 @@ bool ActionExpert::load(const std::string& dir) {
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/aex.bin\n", dir.c_str()); return false; }
     blob.resize(total);
     bin.read(reinterpret_cast<char*>(blob.data()), total*sizeof(float));
-    if (!bin) { std::fprintf(stderr, "smolvla: short read on aex.bin (need %zu floats)\n", total); return false; }
+    if (!bin || bin.peek() != EOF) {
+        std::fprintf(stderr, "smolvla: %s/aex.bin size does not match aex.meta (need %zu floats)\n", dir.c_str(), total);
+        return false;
+    }
 
     using Role = nn::Linear::Role;
     layers.resize(NL);
@@ -111,7 +114,7 @@ bool ActionExpert::load(const std::string& dir) {
     auto take = [&](size_t n) { const float* p = blob.data()+off; off += n; return p; };
     for (int L = 0; L < NL; L++) {
         ExpertLayerW& w = layers[L];
-        w.is_self_attn = (L % cfg.self_attn_every_n == 0);
+        w.is_self_attn = cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0;
         const int kk = w.is_self_attn ? EH : KV;
         w.ln_in = take(EH);
         w.q   .init(take((size_t)QF*EH), nullptr, QF, EH, Role::Gemm);

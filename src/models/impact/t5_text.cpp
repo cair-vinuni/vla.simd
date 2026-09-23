@@ -35,7 +35,7 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
                      enc_end, cfg.encoder_floats);
         return false;
     }
-    if (cfg.proj_dim < 1 || cfg.n_text < 1 || cfg.film_total < 1) {
+    if (cfg.proj_dim < 1 || cfg.n_text < 1 || cfg.film_total < 0) {
         std::fprintf(stderr, "impact: text.meta is missing proj_dim / n_text / film_total\n");
         return false;
     }
@@ -119,6 +119,7 @@ void ImpactText::encode(const int* compact, const int* attn_mask, int seq,
     // the position to attention queries and keys and never to the values - the
     // visual tokens obey that and so must these.
     proj.forward(tokens, h.data(), seq);
+    if (F == 0) return;
 
     // FiLM reads a mask-aware mean-pool: a padded position holds a real T5 output
     // and would otherwise drag gamma/beta toward whatever the pad rows encode.

@@ -33,9 +33,9 @@ bool DPRgbEncoder::load(const std::string& dir, const std::string& name,
     if (!backbone.load(dir, name + "_backbone")) return false;
 
     // Feature-map size after the backbone, from the size the encoder is actually
-    // fed (post resize/crop), because the grid is built for that map.
-    const int in_h = cfg.crop_h > 0 ? cfg.crop_h : (cfg.resize_h > 0 ? cfg.resize_h : cfg.img_h);
-    const int in_w = cfg.crop_w > 0 ? cfg.crop_w : (cfg.resize_w > 0 ? cfg.resize_w : cfg.img_w);
+    // fed (post crop), because the grid is built for that map.
+    const int in_h = cfg.crop_h > 0 ? cfg.crop_h : cfg.img_h;
+    const int in_w = cfg.crop_w > 0 ? cfg.crop_w : cfg.img_w;
     backbone.feat_size(in_h, in_w, &fh, &fw);
     if (fh <= 0 || fw <= 0) return false;
 
@@ -82,8 +82,8 @@ void DPRgbEncoder::forward(const float* x, BackboneScratch& s, float* feat) cons
     const int C   = backbone.out_channels();
     const int K   = cfg.num_keypoints;
     const int npx = fh*fw;
-    const int in_h = cfg.crop_h > 0 ? cfg.crop_h : (cfg.resize_h > 0 ? cfg.resize_h : cfg.img_h);
-    const int in_w = cfg.crop_w > 0 ? cfg.crop_w : (cfg.resize_w > 0 ? cfg.resize_w : cfg.img_w);
+    const int in_h = cfg.crop_h > 0 ? cfg.crop_h : cfg.img_h;
+    const int in_w = cfg.crop_w > 0 ? cfg.crop_w : cfg.img_w;
 
     std::vector<float> fmap((size_t)npx*C);
     backbone.forward(x, in_h, in_w, s, fmap.data());
