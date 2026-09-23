@@ -51,6 +51,8 @@ typedef enum {
 
 /* The library's VLA_ABI_VERSION, which may differ from the caller's header. */
 VLA_API int32_t vla_abi_version(void);
+VLA_API const char* vla_backend_name(void);
+VLA_API int32_t vla_int8_available(void);
 
 /* ---------------------------------------------------------------- ACT ----- */
 

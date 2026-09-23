@@ -48,6 +48,7 @@ The port is unauthenticated: keep it on a lab LAN or an SSH tunnel.
 import argparse
 import ctypes
 import io
+import json
 import logging
 import os
 import pickle  # nosec: the lerobot async-inference protocol is pickle-based
@@ -1297,6 +1298,13 @@ def main(spec=None, doc=None):
     p.add_argument("--workers", type=int, default=4, help="gRPC thread pool size (default: 4)")
     p.add_argument("--max-message-mb", type=int, default=64,
                    help="gRPC receive/send cap; grpc's own default is 4 MB (default: 64)")
+    p.add_argument("--int8", type=int, default=None, metavar="MASK",
+                   help="W8A8 layer-group bitmask, exported as <MODEL>_INT8 (act, impact, octo, smolvla)")
+    p.add_argument("--bench", type=int, default=0, metavar="N",
+                   help="time N queries after warmup, print the latency and exit")
+    p.add_argument("--soak", type=float, default=0.0, metavar="SEC",
+                   help="like --bench, but keep querying for SEC seconds")
+    p.add_argument("--json", action="store_true", help="print the --bench/--soak result as JSON")
     p.add_argument("--selftest", action="store_true",
                    help="load, run one dummy query, print the latency and exit")
     for add in spec.extra_args:
@@ -1305,7 +1313,8 @@ def main(spec=None, doc=None):
 
     # `seed` only exists for the models whose spec adds it, so check what is there
     # rather than assuming every model took every optional flag.
-    for name, lo in (("fps", 1), ("port", 1), ("workers", 1), ("max_message_mb", 1), ("seed", 0)):
+    for name, lo in (("fps", 1), ("port", 1), ("workers", 1), ("max_message_mb", 1), ("seed", 0),
+                     ("bench", 0), ("soak", 0)):
         if not hasattr(args, name):
             continue
         if getattr(args, name) < lo:
@@ -1317,6 +1326,11 @@ def main(spec=None, doc=None):
         level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger.setLevel(logging.INFO)
 
+    if args.int8 is not None:
+        if spec.policy_type not in ("act", "impact", "octo", "smolvla"):
+            p.error(f"--int8 is not implemented for {spec.policy_type}")
+        os.environ[f"{spec.policy_type.upper()}_INT8"] = str(args.int8)
+
     t0 = time.time()
     engine = spec.engine_cls(args)
     # Every language-conditioned engine carries a default task; ACT does not have
@@ -1327,9 +1341,13 @@ def main(spec=None, doc=None):
         if not engine.task:
             engine.close()
             sys.exit(f"No instruction in {args.model_dir}/config.txt - pass --task.")
-    logger.info("loaded %s in %.1f s | %s | threads %s",
-                args.model_dir, time.time() - t0, engine.describe(),
-                os.environ["OMP_NUM_THREADS"])
+    engine.lib.vla_backend_name.restype = ctypes.c_char_p
+    engine.lib.vla_int8_available.restype = ctypes.c_int32
+    backend = engine.lib.vla_backend_name().decode()
+    int8 = bool(engine.lib.vla_int8_available())
+    logger.info("loaded %s in %.1f s | %s | backend %s | int8 %s | threads %s",
+                args.model_dir, time.time() - t0, engine.describe(), backend,
+                "yes" if int8 else "no", os.environ["OMP_NUM_THREADS"])
 
     try:
         # Warm up before the first client: the first predict pays for every
@@ -1339,6 +1357,31 @@ def main(spec=None, doc=None):
         engine.predict(engine.warmup_input(), 0)
         logger.info("warm inference: %.0f ms per chunk", (time.time() - t0) * 1000)
         if args.selftest:
+            return
+        if args.bench > 0 or args.soak > 0:
+            rng = np.random.default_rng(0)
+            inp = [a.copy() if isinstance(a, np.ndarray) else a for a in engine.warmup_input()]
+            ts = []
+            t_end = time.perf_counter() + args.soak
+            while len(ts) < args.bench or time.perf_counter() < t_end:
+                for a in inp:
+                    if isinstance(a, np.ndarray) and a.dtype == np.uint8 and a.ndim >= 3:
+                        a[...] = rng.integers(0, 256, a.shape, np.uint8)
+                t0 = time.perf_counter()
+                engine.predict(tuple(inp), len(ts))
+                ts.append((time.perf_counter() - t0) * 1000)
+            p10, med, p90 = np.percentile(ts, [10, 50, 90])
+            res = {"model": spec.policy_type, "backend": backend, "int8": args.int8 or 0,
+                   "threads": int(os.environ["OMP_NUM_THREADS"]), "queries": len(ts),
+                   "median_ms": round(float(med), 2), "p10_ms": round(float(p10), 2),
+                   "p90_ms": round(float(p90), 2),
+                   "actions_per_s": round(engine.chunk * 1000 / float(med), 1)}
+            if args.json:
+                print(json.dumps(res))
+            else:
+                print(f"{spec.name} on {backend} x{res['threads']}: median {res['median_ms']} ms "
+                      f"(p10 {res['p10_ms']}, p90 {res['p90_ms']}) over {len(ts)} queries, "
+                      f"{res['actions_per_s']} actions/s")
             return
 
         try:
