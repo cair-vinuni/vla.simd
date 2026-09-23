@@ -61,7 +61,7 @@ struct ResNetBackbone {
     int prof = 0;
 
     bool load(const std::string& dir, const std::string& name = "backbone");
-    void quantize_convs(int from, int to);
+    int quantize_convs(int from, int to);
 
     int out_channels() const { return blocks.empty() ? cfg.stem_out : blocks.back().cout; }
     void feat_size(int H, int W, int* fh, int* fw) const;

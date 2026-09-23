@@ -1100,7 +1100,7 @@ def main():
     p.add_argument("--max-message-mb", type=int, default=64,
                    help="gRPC receive/send cap; grpc's own default is 4 MB (default: 64)")
     p.add_argument("--int8", type=int, default=None, metavar="MASK",
-                   help="W8A8 layer-group bitmask, exported as <MODEL>_INT8 (act, impact, octo, smolvla)")
+                   help="W8A8 layer-group bitmask, exported as <MODEL>_INT8 (act, diffusion, impact, octo, smolvla)")
     p.add_argument("--bench", type=int, default=0, metavar="N",
                    help="time N queries after warmup, print the latency and exit")
     p.add_argument("--soak", type=float, default=0.0, metavar="SEC",
@@ -1130,7 +1130,7 @@ def main():
     logger.setLevel(logging.INFO)
 
     if args.int8 is not None:
-        if spec.policy_type not in ("act", "impact", "octo", "smolvla"):
+        if spec.policy_type not in ("act", "diffusion", "impact", "octo", "smolvla"):
             p.error(f"--int8 is not implemented for {spec.policy_type}")
         os.environ[f"{spec.policy_type.upper()}_INT8"] = str(args.int8)
 

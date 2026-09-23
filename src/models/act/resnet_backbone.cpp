@@ -155,7 +155,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
     return true;
 }
 
-void ResNetBackbone::quantize_convs(int from, int to) {
+int ResNetBackbone::quantize_convs(int from, int to) {
     if (to < 0) to = (int)blocks.size()+1;
     auto want = [&](int stage) { return stage >= from && stage < to; };
 
@@ -171,6 +171,7 @@ void ResNetBackbone::quantize_convs(int from, int to) {
     if (prof >= 2 || n == 0)
         std::fprintf(stderr, "[%s] int8 backbone convs: %d%s\n", tag, n,
                      n ? "" : " (no int8 kernel on this CPU - staying fp32)");
+    return n;
 }
 
 int ResNetBackbone::film_total() const {

@@ -7,6 +7,7 @@
 #include "models/diffusion/diffusion_model.h"
 #include "models/arena.h"
 #include "hal/common/env.h"
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -88,8 +89,16 @@ bool DiffusionModel::load(const std::string& dir) {
         std::string nm = "rgb_encoder" + std::to_string(i);
         if (!encoders[(size_t)i].load(dir, nm, cfg)) return false;
     }
-    if (!unet.load(dir, "unet", cfg)) return false;
+    const int i8 = hal::env::int_env("DIFFUSION_INT8", 0);
+    if (!unet.load(dir, "unet", cfg, (i8 & 1) != 0)) return false;
     if (!sched.init(cfg)) return false;
+    if (i8) {
+        int n = unet.n_int8;
+        if (i8 & 2)
+            for (DPRgbEncoder& e : encoders) n += e.backbone.quantize_convs(0, -1);
+        std::fprintf(stderr, "[diffusion] int8 GEMMs: %d (DIFFUSION_INT8=%d)%s\n", n, i8,
+                     n ? "" : " - no int8 kernel on this CPU, staying fp32");
+    }
 
     // stats.bin: state min/max, action min/max, then per-camera image mean/std.
     // MIN_MAX for state and action is not a stylistic difference from the other

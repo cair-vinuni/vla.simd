@@ -54,6 +54,7 @@ struct DPResBlock {
 struct DPUNet1d {
     DPConfig cfg;
     std::vector<std::vector<float>> data;
+    int n_int8 = 0;
 
     // diffusion timestep encoder: sinusoidal -> Linear -> Mish -> Linear
     nn::Linear step1, step2;
@@ -70,7 +71,7 @@ struct DPUNet1d {
     DPConvBlock final_block;
     nn::Linear final_conv;                                 // 1x1 conv to action_dim
 
-    bool load(const std::string& dir, const std::string& name, const DPConfig& c);
+    bool load(const std::string& dir, const std::string& name, const DPConfig& c, bool int8);
 
     // sample [horizon, action_dim] -> eps [horizon, action_dim]; gc is the
     // global conditioning vector [global_cond_dim], t the timestep being denoised.

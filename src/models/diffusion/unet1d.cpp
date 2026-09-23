@@ -31,7 +31,7 @@ namespace tcpu {
 //     conv2.W [cout, k*cout]  conv2.b  gn_s  gn_b
 //     res.W   [cout, cin]  res.b                 (only when cin != cout)
 
-bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c) {
+bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c, bool int8) {
     cfg = c;
     if (cfg.down_dims.empty()) return false;
     std::ifstream bin(dir + "/" + name + ".bin", std::ios::binary | std::ios::ate);
@@ -44,6 +44,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
     const int CD = cfg.cond_dim();
     const int k  = cfg.kernel_size;
     data.clear();
+    n_int8 = 0;
     auto take = [&](size_t n) {
         const bool fits = bin && n <= left/sizeof(float);
         data.emplace_back(fits ? n : 0);
@@ -61,6 +62,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
         const float* b = take(N);
         if (!bin) return;
         L.init(w, b, N, K, r);
+        if (int8 && r == nn::Linear::Role::Gemm) n_int8 += L.init_int8();
         if (L.drop_raw()) {
             std::vector<float>& raw = data[data.size()-2];
             raw.clear();

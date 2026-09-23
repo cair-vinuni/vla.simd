@@ -30,6 +30,7 @@ static void linspace_np(std::vector<float>& v, double start, double stop, int n)
 bool DPRgbEncoder::load(const std::string& dir, const std::string& name,
                         const DPConfig& c) {
     cfg = c;
+    backbone.tag = "diffusion";
     if (!backbone.load(dir, name + "_backbone")) return false;
 
     // Feature-map size after the backbone, from the size the encoder is actually
