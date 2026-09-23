@@ -239,10 +239,9 @@ void groupnorm(float* out, const float* x, const float* scale, const float* bias
     std::vector<double> S1(C, 0.0), S2(C, 0.0), K(C);
     for (int c=0; c<C; c++) K[c] = x[c];
 
-    const bool par = (size_t)n_pixels*C > (size_t)hal::env::omp_min();
     int nth = 1;
 #if defined(_OPENMP)
-    if (par) nth = omp_get_max_threads();
+    if ((size_t)n_pixels*C > (size_t)hal::env::omp_min()) nth = omp_get_max_threads();
 #endif
     if (C >= 16*nth) {
 #if defined(_OPENMP)
@@ -313,7 +312,7 @@ void groupnorm(float* out, const float* x, const float* scale, const float* bias
     }
 
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static) if(par)
+    #pragma omp parallel for schedule(static) if(nth > 1)
 #endif
     for (int p=0; p<n_pixels; p++) {
         const float* xp = x+(size_t)p*C;
