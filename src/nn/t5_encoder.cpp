@@ -31,7 +31,6 @@ bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* ta
         else if (key == "n_buckets") cfg.n_buckets = (int)val;
         else if (key == "max_dist" ) cfg.max_dist = (int)val;
         else if (key == "eps"      ) cfg.eps = (float)val;
-        else if (key == "n_tokens" ) cfg.n_tokens = (int)val;
     }
     if (cfg.n_heads < 1 || cfg.d_kv < 1 || (long long)cfg.n_heads*cfg.d_kv != cfg.d_model ||
         cfg.n_buckets < 4 || cfg.max_dist <= cfg.n_buckets/4) return false;
@@ -40,14 +39,7 @@ bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* ta
 
     const int D  = cfg.d_model;
     const int FF = cfg.d_ff;
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (!ok || n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
     emb = take((size_t)cfg.vocab*D);
     rel = take((size_t)cfg.n_buckets*cfg.n_heads);
 
@@ -63,11 +55,10 @@ bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* ta
         L.wo2 = take((size_t)D*FF);
     }
     final_ln = take(D);
-    // Octo's arena ends here; MicroVLA appends its text projection, which the
-    // caller reads from `tail` onward. Only the "nothing left over" case is a
-    // shape error, and only when the caller did not ask for the remainder.
-    if (tail) *tail = off;
-    return ok && (tail ? off <= data.size() : off == data.size());
+    // Only the "nothing left over" case is a shape error, and only when the
+    // caller did not ask for the remainder.
+    if (tail) *tail = take.off;
+    return tail ? take.ok : take.done();
 }
 
 // HF T5 _relative_position_bucket, bidirectional. rp = key_pos - query_pos.

@@ -70,8 +70,7 @@ bool TurboActionHead::load(const std::string& dir) {
         return false;
     }
 
-    size_t off = 0;
-    auto take = [&](size_t n) { const float* p = data.data()+off; off += n; return p; };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
 
     state_ln_w = take(S); state_ln_b = take(S);

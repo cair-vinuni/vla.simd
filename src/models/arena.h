@@ -30,4 +30,25 @@ inline bool read_arena(const std::string& path, std::vector<float>& data) {
     return (bool)bin;
 }
 
+template<class T> struct ArenaCursor {
+    const std::vector<T>& d;
+    size_t off = 0;
+    bool ok = true;
+    const T* operator()(size_t n) {
+        if (!ok || n > d.size() - off) { ok = false; return nullptr; }
+        const T* p = d.data() + off;
+        off += n;
+        return p;
+    }
+    bool done() const { return ok && off == d.size(); }
+};
+
+inline bool read_floats(const std::string& path, std::vector<float>& out, size_t n) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return false; }
+    out.resize(n);
+    f.read(reinterpret_cast<char*>(out.data()), (std::streamsize)(n*sizeof(float)));
+    return (bool)f;
+}
+
 } // namespace tcpu

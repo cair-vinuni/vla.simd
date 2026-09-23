@@ -185,7 +185,7 @@ add_library(tcpu_ops STATIC
   src/nn/linear_bf16.cpp)   # load-time bf16 init, linked after the hot objects (see file header)
 target_link_libraries(tcpu_ops PUBLIC vla_flags)
 
-add_library(tcpu_preprocess STATIC src/preprocess/image.cpp)                    # image load + resize + normalize
+add_library(tcpu_preprocess STATIC src/preprocess/image.cpp)
 target_link_libraries(tcpu_preprocess PUBLIC vla_flags)
 
 add_library(tcpu_tokenizer STATIC src/tokenizer/tokenizer.cpp src/tokenizer/t5_tokenizer.cpp
@@ -200,13 +200,13 @@ add_library(tcpu_octo STATIC
   src/models/octo/octo_transformer.cpp
   src/models/octo/diffusion_head.cpp
   src/models/octo/octo_model.cpp)
-target_link_libraries(tcpu_octo PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
+target_link_libraries(tcpu_octo PUBLIC tcpu_ops tcpu_tokenizer)
 
 add_library(tcpu_act STATIC
   src/models/act/resnet_backbone.cpp
   src/models/act/act_transformer.cpp
   src/models/act/act_model.cpp)
-target_link_libraries(tcpu_act PUBLIC tcpu_ops tcpu_preprocess)
+target_link_libraries(tcpu_act PUBLIC tcpu_ops)
 
 add_library(tcpu_smolvla STATIC
   src/models/smolvla/smollm2_lm.cpp
@@ -221,14 +221,14 @@ add_library(tcpu_turbovla STATIC
   src/models/turbovla/fusion.cpp
   src/models/turbovla/action_head.cpp
   src/models/turbovla/turbovla_model.cpp)
-target_link_libraries(tcpu_turbovla PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
+target_link_libraries(tcpu_turbovla PUBLIC tcpu_ops tcpu_tokenizer)
 
 add_library(tcpu_impact STATIC
   src/models/impact/resnet_film.cpp
   src/models/impact/t5_text.cpp
   src/models/impact/impact_transformer.cpp
   src/models/impact/impact_model.cpp)
-target_link_libraries(tcpu_impact PUBLIC tcpu_ops tcpu_tokenizer tcpu_preprocess)
+target_link_libraries(tcpu_impact PUBLIC tcpu_ops tcpu_tokenizer)
 
 add_library(tcpu_diffusion STATIC
   src/models/diffusion/rgb_encoder.cpp
@@ -237,7 +237,7 @@ add_library(tcpu_diffusion STATIC
   src/models/diffusion/diffusion_model.cpp)
 # The ResNet-18 image backbone IS ACT's, linked rather than copied - the
 # reference builds both from the same torchvision resnet18 truncated at layer4.
-target_link_libraries(tcpu_diffusion PUBLIC tcpu_act tcpu_ops tcpu_preprocess)
+target_link_libraries(tcpu_diffusion PUBLIC tcpu_act tcpu_ops)
 
 # ---------------------------------------------------------------------------
 # Shared libs with the C ABI (include/vla_simd.h) for ctypes/FFI callers. Each
@@ -274,10 +274,10 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 
 # ---------------------------------------------------------------------------
-# Warnings, first-party targets only so vendored headers (stb_image) stay quiet.
+# Warnings, first-party targets only.
 # ---------------------------------------------------------------------------
 set(VLA_FIRST_PARTY
-  tcpu_ops tcpu_tokenizer tcpu_octo tcpu_act tcpu_smolvla tcpu_turbovla
+  tcpu_ops tcpu_preprocess tcpu_tokenizer tcpu_octo tcpu_act tcpu_smolvla tcpu_turbovla
   tcpu_impact tcpu_diffusion
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
@@ -300,9 +300,9 @@ if(VLA_LTO)
   check_ipo_supported(RESULT VLA_IPO_OK OUTPUT VLA_IPO_WHY)
 endif()
 if(VLA_LTO AND VLA_IPO_OK AND NOT VLA_SANITIZE)
-  set_property(TARGET ${VLA_FIRST_PARTY} tcpu_preprocess
+  set_property(TARGET ${VLA_FIRST_PARTY}
                PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-  set_property(TARGET ${VLA_FIRST_PARTY} tcpu_preprocess
+  set_property(TARGET ${VLA_FIRST_PARTY}
                PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
 elseif(VLA_LTO)
   message(STATUS "vla_simd: LTO unavailable (${VLA_IPO_WHY})")

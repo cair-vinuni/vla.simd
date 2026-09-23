@@ -11,7 +11,7 @@
 #include <vector>
 
 // SmolLM2 VLM prefix tower (SmolVLA). Reimplements vla.cpp build_vlm_layer
-// (third_party/vla.cpp/src/models/smolvla.cpp:643-678) over the HAL. Standard
+// over the HAL. Standard
 // Llama block: input_layernorm -> GQA (RoPE-NeoX, masked) -> post_attention_layernorm
 // -> SwiGLU MLP. Matmul weights are bf16 in the checkpoint; nn::Linear picks the
 // per-backend representation (see linear.h).

@@ -27,7 +27,7 @@ namespace nn {
 
 struct T5Config {
     int d_model = 768, n_layers = 12, n_heads = 12, d_kv = 64, d_ff = 3072;
-    int vocab = 32128, n_buckets = 32, max_dist = 128, n_tokens = 16;
+    int vocab = 32128, n_buckets = 32, max_dist = 128;
     float eps = 1e-6f;
 };
 
@@ -44,8 +44,8 @@ struct T5Encoder {
     std::vector<T5LayerW> layers;
 
     // Reads <dir>/<stem>.meta and <dir>/<stem>.bin. Anything the arena holds
-    // past the encoder (MicroVLA's text projection) is left for the caller:
-    // `tail` receives the offset just past what this encoder consumed.
+    // past the encoder is left for the caller: `tail` receives the offset just
+    // past what this encoder consumed.
     bool load(const std::string& dir, const std::string& stem = "t5", size_t* tail = nullptr);
 
     // ids/attn_mask [seq] -> out [seq, d_model]. attn_mask: 1 = real token, 0 = pad

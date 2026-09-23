@@ -34,7 +34,7 @@
 // bias. text_pad.txt carries the table; an instruction that is not in it falls
 // back to config.meta's text_pad, exactly as the reference's dict lookup does.
 //
-// Weights from tools/convert_turbovla.py; see docs/12-turbovla-design.md.
+// Weights from tools/convert_turbovla.py.
 
 namespace tcpu {
 
@@ -80,7 +80,6 @@ struct TurboVlaModel {
     int n_views() const { return cfg.n_views; }
     int img_size() const { return cfg.img; }
     int n_patches() const { return vision.n_patches(); }
-    int n_visual() const { return cfg.n_views*vision.n_patches(); }
     int text_pad() const { return cfg.text_pad; }
     int hidden() const { return fusion.cfg.hidden; }
 

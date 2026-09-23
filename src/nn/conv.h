@@ -25,7 +25,6 @@ struct Conv2d {
     // contract as nn::Linear::init_int8: lossy, explicit, and a no-op returning
     // false when the CPU has no int8 kernel or Cout % 16 != 0.
     bool init_int8();
-    bool is_int8() const { return Wq != nullptr; }
 
     int Cout = 0, k = 0, Cin = 0;
 

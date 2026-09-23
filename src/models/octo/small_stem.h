@@ -39,9 +39,9 @@ struct SmallStem {
 
     bool load(const std::string& dir, const std::string& name);
 
-    // obs [H,W,3] uint8 HWC; goal same or nullptr (absent goal = zeros, like
-    // create_tasks). out [(H/16)*(W/16), embed_dim].
-    void encode(const uint8_t* obs, const uint8_t* goal, int H, int W, float* out) const;
+    // obs [H,W,3] uint8 HWC (absent goal = zeros, like create_tasks).
+    // out [(H/16)*(W/16), embed_dim].
+    void encode(const uint8_t* obs, int H, int W, float* out) const;
 };
 
 } // namespace tcpu

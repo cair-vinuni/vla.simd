@@ -6,8 +6,8 @@
 
 #include "dinov3_vision.h"
 #include "models/arena.h"
+#include "nn/encoder.h"
 #include "ops/lm_ops.h"
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -69,8 +69,7 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
         return false;
     }
 
-    size_t off = 0;
-    auto take = [&](size_t n) { const float* p = data.data()+off; off += n; return p; };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
 
     cls_token  = take(H);
@@ -176,12 +175,8 @@ struct VitProf {
     bool on = std::getenv("TURBOVLA_PROFILE_VIT") != nullptr;
     double stem = 0, ln = 0, qkv = 0, rope = 0, attn = 0, proj = 0, mlp = 0, gelu = 0, res = 0;
     double t0 = 0;
-    static double now_ms() {
-        return std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-    void tic() { if (on) t0 = now_ms(); }
-    void toc(double& acc) { if (on) acc += now_ms() - t0; }
+    void tic() { if (on) t0 = nn::now_ms(); }
+    void toc(double& acc) { if (on) acc += nn::now_ms() - t0; }
 };
 } // namespace
 
@@ -191,7 +186,7 @@ void Dinov3Vision::encode(const float* pixels, int n_views, float* out) const {
     const int B = n_views > 0 ? n_views : 1;         // rows in the batch = B*T
     const size_t TH = (size_t)B*T*H;
     VitProf vp;
-    const double t_start = VitProf::now_ms();
+    const double t_start = nn::now_ms();
 
     if (patches.size() < (size_t)B*NP*PD) patches.resize((size_t)B*NP*PD);
     if (tok.size() < TH) tok.resize(TH);
@@ -294,7 +289,7 @@ void Dinov3Vision::encode(const float* pixels, int n_views, float* out) const {
                   norm_w, norm_b, NP, H, cfg.ln_eps);
 
     if (vp.on) {
-        const double wall = VitProf::now_ms() - t_start;
+        const double wall = nn::now_ms() - t_start;
         const double acc = vp.stem+vp.ln+vp.qkv+vp.rope+vp.attn+vp.proj+vp.mlp+vp.gelu+vp.res;
         std::fprintf(stderr,
             "  [dinov3] x%d views  stem %5.1f | x%d: ln %5.1f  qkv %6.1f  rope %5.1f  attn %6.1f"

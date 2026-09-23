@@ -5,6 +5,9 @@
  */
 
 #pragma once
+#include <exception>
+#include <thread>
+#include <vector>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -36,6 +39,31 @@ struct ScopedTeamClamp {
     ScopedTeamClamp(const ScopedTeamClamp&) = delete;
     ScopedTeamClamp& operator=(const ScopedTeamClamp&) = delete;
 };
+
+template<class F> void for_each_view(int n, int threads, F&& fn) {
+    if (threads <= 0 || n < 2) {
+        for (int i = 0; i < n; i++) fn(i);
+        return;
+    }
+    std::vector<std::exception_ptr> err(n);
+    std::vector<std::thread> workers;
+    workers.reserve(n);
+    try {
+        for (int i = 0; i < n; i++) {
+            workers.emplace_back([&, i] {
+#if defined(_OPENMP)
+                omp_set_num_threads(threads);
+#endif
+                try { fn(i); } catch (...) { err[i] = std::current_exception(); }
+            });
+        }
+    } catch (...) {
+        for (std::thread& w : workers) w.join();
+        throw;
+    }
+    for (std::thread& w : workers) w.join();
+    for (std::exception_ptr& e : err) if (e) std::rethrow_exception(e);
+}
 
 } // namespace hal
 } // namespace tcpu

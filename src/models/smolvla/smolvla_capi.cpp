@@ -97,7 +97,7 @@ int32_t vla_smolvla_tokenize(void* h, const char* text, int32_t* ids, int32_t* m
     while (!s.empty() && s.back() == '\n') s.pop_back();
     s.push_back('\n');
 
-    auto enc = hh->tok.encode(s, false);
+    auto enc = hh->tok.encode(s);
     if ((int)enc.size() > hh->tok_maxlen) enc.erase(enc.begin(), enc.end() - hh->tok_maxlen);
     for (int i = 0; i < hh->tok_maxlen; i++) {
         ids[i]  = i < (int)enc.size() ? enc[i] : hh->pad_id;

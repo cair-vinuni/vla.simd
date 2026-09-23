@@ -6,9 +6,8 @@
 
 #include "turbovla_model.h"
 #include "models/arena.h"
+#include "nn/encoder.h"
 #include <array>
-#include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -25,12 +24,8 @@ namespace {
 struct Profile {
     bool on = std::getenv("TURBOVLA_PROFILE") != nullptr;
     double t0 = 0;
-    static double now_ms() {
-        return std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-    void tic() { if (on) t0 = now_ms(); }
-    void toc(double& acc) { if (on) acc += now_ms() - t0; }
+    void tic() { if (on) t0 = nn::now_ms(); }
+    void toc(double& acc) { if (on) acc += nn::now_ms() - t0; }
 };
 
 } // namespace
@@ -64,7 +59,6 @@ bool TurboVlaModel::load(const std::string& dir) {
         else if (key == "question_id"      ) cfg.question_id      = (int)v;
         else if (key == "pad_id"           ) cfg.pad_id           = (int)v;
         else if (key == "unk_id"           ) cfg.unk_id           = (int)v;
-        else if (key == "max_wordpiece"    ) cfg.max_wordpiece    = (int)v;
         else if (key == "gripper_deadband" ) cfg.gripper_deadband = v;
     }
     if (cfg.img < 1 || cfg.n_views < 1 || cfg.text_pad < 1 || cfg.text_pad > cfg.max_text_len ||
@@ -154,7 +148,7 @@ void TurboVlaModel::encode_text(const std::string& instruction) const {
     const int L = pad_length(instruction);          // <= P by construction
 
     int n_real = 0;
-    const std::vector<int> ids = tok.encode(instruction, L, true, &n_real);
+    const std::vector<int> ids = tok.encode(instruction, L, &n_real);
     ids_i.assign(ids.begin(), ids.end());
     pos_i.assign((size_t)L, 0);
     gmask.assign((size_t)L*L, 0.0f);
@@ -195,7 +189,7 @@ void TurboVlaModel::predict(const uint8_t* frames, const float* state,
 
     Profile pf;
     double t_pre = 0, t_vis = 0, t_txt = 0, t_proj = 0, t_fuse = 0, t_head = 0;
-    const double t_start = Profile::now_ms();
+    const double t_start = nn::now_ms();
 
     // uint8 HWC -> normalized CHW, the DINOv3 processor's math (rescale 1/255,
     // then per-channel mean/std). The reference refuses anything but a
@@ -292,7 +286,7 @@ void TurboVlaModel::predict(const uint8_t* frames, const float* state,
     }
 
     if (pf.on) {
-        const double wall = Profile::now_ms() - t_start;
+        const double wall = nn::now_ms() - t_start;
         const double acc = t_pre + t_vis + t_txt + t_proj + t_fuse + t_head;
         std::fprintf(stderr,
             "  [turbovla] pre %5.1f  dinov3 x%d %7.1f  bert %6.1f  vproj %5.1f"

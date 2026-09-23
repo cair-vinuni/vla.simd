@@ -62,12 +62,11 @@ struct OctoTransformer {
 
     // t5_out [n_task, t5_dim]; stem_p [wnd, tok_primary, stem_dim]; stem_w [wnd,
     // tok_wrist, stem_dim] -> out [total_tokens(wnd), d] (post final LayerNorm).
-    // last_token_only: inference fast path - the final layer computes attention/MLP
-    // only for the last readout token (all K/V still computed); only that row of
-    // `out` is written. Exact for that row.
+    // Inference fast path - the final layer computes attention/MLP only for the
+    // last readout token (all K/V still computed); only that row of `out` is
+    // written. Exact for that row.
     void forward(const float* t5_out, const float* stem_p, const float* stem_w,
-                 int wnd, const uint8_t* timestep_mask, float* out,
-                 bool last_token_only = false) const;
+                 int wnd, const uint8_t* timestep_mask, float* out) const;
 };
 
 } // namespace tcpu

@@ -166,9 +166,8 @@ bool is_combining_mark(uint32_t cp) {
 } // namespace
 
 // ---------------------------------------------------------------- load ------
-bool BertTokenizer::load(const std::string& dir) { return load_file(dir + "/vocab.txt"); }
-
-bool BertTokenizer::load_file(const std::string& vocab_path) {
+bool BertTokenizer::load(const std::string& dir) {
+    const std::string vocab_path = dir + "/vocab.txt";
     std::ifstream f(vocab_path);
     if (!f) {
         std::fprintf(stderr, "bert tokenizer: cannot open %s\n", vocab_path.c_str());
@@ -299,7 +298,7 @@ std::vector<int> BertTokenizer::pieces(const std::string& text) const {
     return ids;
 }
 
-std::vector<int> BertTokenizer::encode(const std::string& text, int max_len, bool pad,
+std::vector<int> BertTokenizer::encode(const std::string& text, int max_len,
                                        int* n_real) const {
     std::vector<int> ids = pieces(text);
     // truncation=True: the body is cut so [CLS] body [SEP] fits in max_len.
@@ -312,7 +311,7 @@ std::vector<int> BertTokenizer::encode(const std::string& text, int max_len, boo
     out.insert(out.end(), ids.begin(), ids.end());
     out.push_back(sep_id);
     if (n_real) *n_real = (int)out.size();
-    if (pad) while ((int)out.size() < max_len) out.push_back(pad_id);
+    while ((int)out.size() < max_len) out.push_back(pad_id);
     return out;
 }
 

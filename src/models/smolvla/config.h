@@ -6,7 +6,7 @@
 
 #pragma once
 
-// SmolVLA model dimensions (HuggingFaceVLA/smolvla_libero). See docs/04-smolvla-design.md.
+// SmolVLA model dimensions (HuggingFaceVLA/smolvla_libero).
 
 namespace tcpu {
 

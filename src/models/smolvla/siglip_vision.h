@@ -53,10 +53,8 @@ struct SiglipVision {
 
     // pixels: [3, img, img] CHW, already normalized to [-1,1].
     // out: [n_img_tok, mm_out] image embeddings (before the sqrt(hidden) prefix scaling).
-    void encode(const float* pixels, float* out) const;
-
-    // Same, against a caller-owned scratch. The member `scratch` is shared, so
-    // views encoded concurrently (TCPU_VIEW_THREADS) must each bring their own.
+    // The member `scratch` is shared, so views encoded concurrently
+    // (TCPU_VIEW_THREADS) must each bring their own.
     void encode(const float* pixels, float* out, nn::Scratch& s) const;
 };
 

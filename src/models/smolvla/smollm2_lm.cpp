@@ -5,11 +5,11 @@
  */
 
 #include "smollm2_lm.h"
+#include "models/arena.h"
 #include "ops/lm_ops.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>
-#include <sstream>
 #include <string>
 
 namespace tcpu {
@@ -47,9 +47,8 @@ bool SmollmVlm::load(const std::string& dir) {
     }
 
     layers.resize(NL);
-    size_t fo = 0, wo = 0;
-    auto tf = [&](size_t n) { const float* p = fnorms.data()+fo; fo += n; return p; };
-    auto tw = [&](size_t n) { const uint16_t* p = wbf.data()+wo; wo += n; return p; };
+    ArenaCursor<float> tf{fnorms};
+    ArenaCursor<uint16_t> tw{wbf};
     for (int L = 0; L < NL; L++) {
         layers[L].ln_in   = tf(H);
         layers[L].ln_post = tf(H);

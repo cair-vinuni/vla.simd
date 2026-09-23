@@ -48,11 +48,11 @@ struct SmolvlaModel {
                                           const int32_t* lang_tokens, const int32_t* lang_mask, int n_lang,
                                           const float* state, const float* noise) const;
 
-    // Demo path: raw state -> normalize -> predict -> unnormalize. noise optional (nullptr = seeded).
+    // Demo path: raw state -> normalize -> predict -> unnormalize.
     // Returns real actions [chunk, max_action_dim] (first real_action_dim entries un-normalized).
     std::vector<float> predict(const float* pixels_all, int n_views,
                                const int32_t* lang_tokens, const int32_t* lang_mask, int n_lang,
-                               const float* raw_state, const float* noise = nullptr) const;
+                               const float* raw_state, const float* noise) const;
 };
 
 } // namespace tcpu

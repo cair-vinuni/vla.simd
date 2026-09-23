@@ -192,4 +192,3 @@ uv pip install --python .serve \
 - [Diffusion Policy](https://arxiv.org/abs/2303.04137) - the U-Net action denoiser (Chi et al., 2023)
 - [TinyChatEngine](https://github.com/mit-han-lab/TinyChatEngine) - CPU ops for LLMs, not based on ggml
 - [VAMP](https://github.com/KavrakiLab/vamp) - SIMD accelerator in the same robotics domain
-- [stb_image](https://github.com/nothings/stb) - image loading

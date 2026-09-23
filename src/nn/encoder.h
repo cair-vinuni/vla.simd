@@ -7,9 +7,15 @@
 #pragma once
 #include "attention.h"
 #include "linear.h"
+#include <chrono>
 
 namespace tcpu {
 namespace nn {
+
+inline double now_ms() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 struct Prof {
     bool on = false;

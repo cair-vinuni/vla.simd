@@ -36,14 +36,7 @@ bool DiffusionHead::load(const std::string& dir) {
     const int TD = cfg.time_dim;
     const int H  = cfg.hidden;
     const int IN = TD+cfg.emb+cfg.flat();
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (!ok || n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
 
     fourier_w = take(TD/2);
@@ -51,14 +44,14 @@ bool DiffusionHead::load(const std::string& dir) {
     {
         const float* w = take((size_t)2*TD*TD);
         const float* b = take(2*TD);
-        if (!ok) return false;
+        if (!take.ok) return false;
         cond0.init(w, b, 2*TD, TD, Role::Generic);
     }
 
     {
         const float* w = take((size_t)TD*2*TD);
         const float* b = take(TD);
-        if (!ok) return false;
+        if (!take.ok) return false;
         cond1.init(w, b, TD, 2*TD, Role::Generic);
     }
 
@@ -68,7 +61,7 @@ bool DiffusionHead::load(const std::string& dir) {
     {
         const float* w = take((size_t)H*IN);
         const float* b = take(H);
-        if (!ok) return false;
+        if (!take.ok) return false;
         net.in_proj.init(w, b, H, IN, Role::Generic);
     }
 
@@ -80,14 +73,14 @@ bool DiffusionHead::load(const std::string& dir) {
         {
             const float* w = take((size_t)4*H*H);
             const float* b = take(4*H);
-            if (!ok) return false;
+            if (!take.ok) return false;
             B.d0.init(w, b, 4*H, H, Role::Generic);
         }
 
         {
             const float* w = take((size_t)H*4*H);
             const float* b = take(H);
-            if (!ok) return false;
+            if (!take.ok) return false;
             B.d1.init(w, b, H, 4*H, Role::Generic);
         }
     }
@@ -95,14 +88,14 @@ bool DiffusionHead::load(const std::string& dir) {
     {
         const float* w = take((size_t)cfg.flat()*H);
         const float* b = take(cfg.flat());
-        if (!ok) return false;
+        if (!take.ok) return false;
         net.out_proj.init(w, b, cfg.flat(), H, Role::Generic);
     }
 
     betas      = take(cfg.steps);
     alphas     = take(cfg.steps);
     alpha_hats = take(cfg.steps);
-    if (!ok || off != data.size()) return false;
+    if (!take.done()) return false;
 
     // the sampling loop only uses integer times 0..steps-1: precompute their conditioning
     cond_table.resize((size_t)cfg.steps*cfg.time_dim);
@@ -130,25 +123,14 @@ void DiffusionHead::time_cond(float t, float* cond) const {
     cond1.forward(cond, c1.data(), 1);
 }
 
-void DiffusionHead::eps(const float* emb, const float* x, float t, float* out) const {
+void DiffusionHead::eps(const float* emb, const float* x, int t, float* out) const {
     const int TD   = cfg.time_dim;
     const int FLAT = cfg.flat();
     const int IN   = TD+cfg.emb+FLAT;
 
-    const int ti = (int)t;
-    std::vector<float> cond_buf;
-    const float* cond;
-    if (t == (float)ti && ti >= 0 && ti < cfg.steps && !cond_table.empty()) {
-        cond = cond_table.data()+(size_t)ti*TD;
-    } else {
-        cond_buf.resize(TD);
-        time_cond(t, cond_buf.data());
-        cond = cond_buf.data();
-    }
-
     // reverse network on concat[cond, emb, x]
     std::vector<float> in(IN);
-    std::memcpy(in.data(), cond, TD*sizeof(float));
+    std::memcpy(in.data(), cond_table.data()+(size_t)t*TD, TD*sizeof(float));
     std::memcpy(in.data()+TD, emb, cfg.emb*sizeof(float));
     std::memcpy(in.data()+TD+cfg.emb, x, FLAT*sizeof(float));
     net.forward(out, in.data());
@@ -166,7 +148,7 @@ void DiffusionHead::denoise(const float* emb, const float* noise, const float* z
     hal::ScopedTeamClamp clamp(hal::env::head_threads());
     for (int s=0; s<cfg.steps; s++) {
         const int t = cfg.steps-1-s;
-        eps(emb, x.data(), (float)t, e.data());
+        eps(emb, x.data(), t, e.data());
 
         const float a1 = 1.0f/std::sqrt(alphas[t]);
         const float a2 = (1.0f-alphas[t])/std::sqrt(1.0f-alpha_hats[t]);

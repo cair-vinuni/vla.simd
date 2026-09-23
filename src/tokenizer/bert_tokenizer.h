@@ -39,15 +39,14 @@ struct BertTokenizer {
     // Reads <dir>/vocab.txt. The [CLS]/[SEP]/[PAD]/[UNK] ids are looked up in the
     // vocabulary, so a checkpoint that renumbers them still works.
     bool load(const std::string& dir);
-    bool load_file(const std::string& vocab_path);
 
     // Word pieces of text, without [CLS]/[SEP].
     std::vector<int> pieces(const std::string& text) const;
 
     // [CLS] pieces [SEP], truncated to max_len ids in total (HF's
     // truncation=True, i.e. the [SEP] is kept), then right-padded with pad_id to
-    // max_len when pad is true. n_real receives the count before padding.
-    std::vector<int> encode(const std::string& text, int max_len, bool pad,
+    // max_len. n_real receives the count before padding.
+    std::vector<int> encode(const std::string& text, int max_len,
                             int* n_real = nullptr) const;
 };
 

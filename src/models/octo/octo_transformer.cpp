@@ -7,7 +7,6 @@
 #include "../arena.h"
 #include "octo_transformer.h"
 #include "ops/lm_ops.h"
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -43,19 +42,12 @@ bool OctoTransformer::load(const std::string& dir) {
     // Shapes come from the .meta, the buffer size from the .bin. Linear::init
     // packs immediately, so a short bin has to be caught before the init rather
     // than by the off == data.size() check at the end of the walk.
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
     auto take_linear = [&](nn::Linear& lin, int N, int K, Role role) {
         const float* w = take((size_t)N*K);
         const float* b = take(N);
-        if (!ok) return;
+        if (!take.ok) return;
         lin.init(w, b, N, K, role);
     };
 
@@ -90,12 +82,12 @@ bool OctoTransformer::load(const std::string& dir) {
 
         take_linear(L.w1, cfg.mlp, D, Role::Mlp);
         take_linear(L.w2, D, cfg.mlp, Role::Mlp);
-        if (!ok) return false;
+        if (!take.ok) return false;
     }
 
     final_s = take(D);
     final_b = take(D);
-    return ok && off == data.size();
+    return take.done();
 }
 
 // groups: 0 task_language (prefix, timestep -1), 1 obs_primary, 2 obs_wrist,
@@ -139,15 +131,14 @@ void OctoTransformer::build_mask(int wnd, const uint8_t* timestep_mask, bool wri
 }
 
 void OctoTransformer::forward(const float* t5_out, const float* stem_p, const float* stem_w,
-                              int wnd, const uint8_t* timestep_mask, float* out,
-                              bool last_token_only) const {
+                              int wnd, const uint8_t* timestep_mask, float* out) const {
     const int D     = cfg.d;
     const int per   = tokens_per_step();
     const int total = total_tokens(wnd);
 
     nn::Prof prof;
     prof.on = std::getenv("OCTO_PROFILE_TF") != nullptr;
-    auto wall0 = std::chrono::steady_clock::now();
+    const double wall0 = nn::now_ms();
 
     // assemble input tokens
     prof.tic();
@@ -204,28 +195,14 @@ void OctoTransformer::forward(const float* t5_out, const float* stem_p, const fl
 
     // encoder blocks (pre-LN, MHA with qkv/out bias, gelu-tanh MLP)
     const int ro = readout_index(wnd, wnd-1);
-    for (int li=0; li<cfg.n_layers; li++) {
-        if (last_token_only && li == cfg.n_layers-1) {
-            // final layer: K/V need every token, but only the readout row is consumed
-            layers[li].forward_last_row(x.data(), ro, total, mask.data(), scratch);
-            layernorm(out+(size_t)ro*D, x.data()+(size_t)ro*D,
-                      final_s, final_b, 1, D, cfg.ln_eps);
-            if (prof.on) {
-                prof.wall = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now()-wall0).count();
-                prof.report();
-            }
-            return;
-        }
+    for (int li=0; li+1<cfg.n_layers; li++)
         layers[li].forward(x.data(), total, mask.data(), scratch, &prof);
-    }
-    prof.tic();
-    layernorm(out, x.data(), final_s, final_b, total, D, cfg.ln_eps);
-    prof.toc(prof.ln);
-
+    // final layer: K/V need every token, but only the readout row is consumed
+    if (!layers.empty())
+        layers.back().forward_last_row(x.data(), ro, total, mask.data(), scratch);
+    layernorm(out+(size_t)ro*D, x.data()+(size_t)ro*D, final_s, final_b, 1, D, cfg.ln_eps);
     if (prof.on) {
-        prof.wall = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now()-wall0).count();
+        prof.wall = nn::now_ms()-wall0;
         prof.report();
     }
 }

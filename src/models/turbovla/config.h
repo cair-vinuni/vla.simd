@@ -11,7 +11,6 @@
 // checkpoints (DINOv3 ViT-B/16 @256, BERT-base, 6 interaction layers, a 3-layer
 // ACT decoder over a 12-step chunk); load() overwrites every field from the meta
 // and then checks the shapes close, so nothing here is load-bearing.
-// See docs/12-turbovla-design.md.
 
 namespace tcpu {
 
@@ -68,7 +67,7 @@ struct TurboVlaConfig {
     float img_mean[3] = {0.485f, 0.456f, 0.406f};
     float img_std[3]  = {0.229f, 0.224f, 0.225f};
     int cls_id = 101, sep_id = 102, dot_id = 1012, question_id = 1029;
-    int pad_id = 0, unk_id = 100, max_wordpiece = 18;
+    int pad_id = 0, unk_id = 100;
     float gripper_deadband = 0.0f;
 };
 

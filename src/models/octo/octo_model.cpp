@@ -5,11 +5,12 @@
  */
 
 #include "octo_model.h"
+#include "models/arena.h"
+#include "hal/common/env.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <random>
 
 namespace tcpu {
@@ -28,14 +29,6 @@ struct Prof {
     }
 };
 
-static bool read_f32(const std::string& p, std::vector<float>& v, size_t n) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    v.resize(n);
-    f.read((char*)v.data(), n*sizeof(float));
-    return (bool)f;
-}
-
 // OCTO_INT8 -> route matmul weights through the symmetric W8A8 kernel
 // (ops/quant_ops.h). A bitmask, so a group can be A/B'd against fp32 on its own
 // and each carries its own accuracy argument:
@@ -45,7 +38,7 @@ static bool read_f32(const std::string& p, std::vector<float>& v, size_t n) {
 //   4  transformer MLP w2
 //   8  token projections (task/primary/wrist) + both stem embeds
 //   16 stem convolutions (both towers, stem conv included)
-//   32 diffusion score net (in/out projections, residual blocks, time cond)
+//   32 diffusion score net (in/out projections, residual blocks)
 //   63 = all of it
 //
 // The groups mirror SMOLVLA_INT8's layout so the W8A8 ablation reads across
@@ -65,14 +58,6 @@ static bool read_f32(const std::string& p, std::vector<float>& v, size_t n) {
 namespace {
 enum : int { I8_TF_ATTN = 1, I8_TF_W1 = 2, I8_TF_W2 = 4, I8_PROJ = 8,
              I8_STEM_CONV = 16, I8_HEAD = 32 };
-
-int int8_mask() {
-    static const int v = [] {
-        const char* e = std::getenv("OCTO_INT8");
-        return e ? std::atoi(e) : 0;
-    }();
-    return v;
-}
 } // namespace
 
 bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
@@ -96,9 +81,9 @@ bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
         return false;
 
     const size_t AD = head.cfg.action_dim;
-    if (!read_f32(dir + "/stats_action_mean.bin", act_mean, AD)) return false;
-    if (!read_f32(dir + "/stats_action_std.bin",  act_std,  AD)) return false;
-    if (!read_f32(dir + "/stats_action_mask.bin", act_mask, AD)) return false;
+    if (!read_floats(dir + "/stats_action_mean.bin", act_mean, AD)) return false;
+    if (!read_floats(dir + "/stats_action_std.bin",  act_std,  AD)) return false;
+    if (!read_floats(dir + "/stats_action_mask.bin", act_mask, AD)) return false;
 
     apply_int8();
     return true;
@@ -109,7 +94,7 @@ bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
 // cannot take (N % 16 != 0) stay fp32 silently, and on a CPU with no int8 kernel
 // every call returns false - so a caller may set the mask unconditionally.
 void OctoModel::apply_int8() {
-    const int mask = int8_mask();
+    static const int mask = hal::env::int_env("OCTO_INT8", 0);
     if (!mask) return;
 
     int n = 0;
@@ -142,8 +127,6 @@ void OctoModel::apply_int8() {
             n += b.d0.init_int8();
             n += b.d1.init_int8();
         }
-        n += head.cond0.init_int8();
-        n += head.cond1.init_int8();
     }
     std::fprintf(stderr, "[octo] int8 GEMMs: %d (OCTO_INT8=%d)%s\n", n, mask,
                  n ? "" : " - no int8 kernel on this CPU, staying fp32");
@@ -173,12 +156,6 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
     const int D = tf.cfg.d;
     Prof prof;
 
-    // position tables are sized for max_horizon; octo_demo calls straight in here
-    if (wnd < 1 || wnd > tf.cfg.max_horizon) {
-        std::fprintf(stderr, "octo: window %d outside [1, %d]\n", wnd, tf.cfg.max_horizon);
-        return;
-    }
-
     // vision (goal images absent -> zeros, language-conditioned)
     const size_t PB = (size_t)256*256*3, WB = (size_t)128*128*3;
     const size_t SP = (size_t)tf.cfg.tok_primary*tf.cfg.stem_dim, SW = (size_t)tf.cfg.tok_wrist*tf.cfg.stem_dim;
@@ -193,7 +170,7 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
             for (size_t u=0; u<prev.size()/nb && !hit; u++)
                 if (!std::memcmp(f, prev.data()+u*nb, nb)) hit = prev_out.data()+u*ns;
             if (hit) std::memcpy(out+(size_t)t*ns, hit, ns*sizeof(float));
-            else     st.encode(f, nullptr, hw, hw, out+(size_t)t*ns);
+            else     st.encode(f, hw, hw, out+(size_t)t*ns);
         }
     };
     stems(stem_primary, primary, 256, PB, SP, sp.data(), win_p, win_sp);
@@ -213,7 +190,7 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
     // layer only computes the readout row; the rest of `out` is unused here)
     std::vector<float> out((size_t)tf.total_tokens(wnd)*D);
     tf.forward(t5_out, win_sp.data(), wrist ? win_sw.data() : nullptr, wnd, timestep_mask,
-               out.data(), true);
+               out.data());
     prof.tick("transformer");
     const float* emb = out.data()+(size_t)tf.readout_index(wnd, wnd-1)*D;
 

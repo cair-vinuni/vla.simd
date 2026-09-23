@@ -6,18 +6,12 @@
 
 #include "encoder.h"
 #include "../ops/lm_ops.h"
-#include <chrono>
 #include <cstdio>
 #include <cstddef>
 using std::size_t;
 
 namespace tcpu {
 namespace nn {
-
-static double now_ms() {
-    return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
 
 void Prof::tic() { if (on) t0 = now_ms(); }
 void Prof::toc(double& acc) { if (on) acc += now_ms()-t0; }

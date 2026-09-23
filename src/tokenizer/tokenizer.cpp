@@ -140,14 +140,6 @@ bool Tokenizer::load(const std::string& dir) {
         ranks[{line.substr(0, sp), line.substr(sp+1)}] = rank++;
     }
 
-    std::ifstream sf(dir + "/specials.txt");
-    if (sf) {
-        while (std::getline(sf, line)) {
-            auto tab = line.find('\t');
-            if (tab == std::string::npos) continue;
-            specials[line.substr(tab+1)] = std::stoi(line.substr(0, tab));
-        }
-    }
     return !vocab.empty() && !ranks.empty();
 }
 
@@ -200,44 +192,9 @@ void Tokenizer::encode_text(const std::string& text, std::vector<int>& ids) cons
     }
 }
 
-std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos) const {
+std::vector<int> Tokenizer::encode(const std::string& text) const {
     std::vector<int> ids;
-    if (add_bos) ids.push_back(bos_id);
     encode_text(text, ids);
-    return ids;
-}
-
-std::vector<int> Tokenizer::encode_with_specials(const std::string& text, bool add_bos) const {
-    std::vector<int> ids;
-    if (add_bos) ids.push_back(bos_id);
-
-    std::string buf;
-    for (size_t i=0; i<text.size();) {
-        if (text[i] == '<') {
-            // longest special-token match at this position
-            int best_id     = -1;
-            size_t best_len = 0;
-            for (const auto& kv : specials) {
-                const std::string& c = kv.first;
-                if (c.size() > best_len && i+c.size() <= text.size() && text.compare(i, c.size(), c) == 0) {
-                    best_len = c.size();
-                    best_id  = kv.second;
-                }
-            }
-            if (best_id >= 0) {
-                if (!buf.empty()) {
-                    encode_text(buf, ids);
-                    buf.clear();
-                }
-                ids.push_back(best_id);
-                i += best_len;
-                continue;
-            }
-        }
-        buf += text[i++];
-    }
-
-    if (!buf.empty()) encode_text(buf, ids);
     return ids;
 }
 

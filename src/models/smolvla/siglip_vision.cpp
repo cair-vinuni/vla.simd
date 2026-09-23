@@ -5,8 +5,8 @@
  */
 
 #include "siglip_vision.h"
+#include "models/arena.h"
 #include "ops/lm_ops.h"
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -78,9 +78,8 @@ bool SiglipVision::load(const std::string& dir) {
         return false;
     }
 
-    size_t fo = 0, wo = 0;
-    auto tf = [&](size_t n) { const float* p = fnorms.data()+fo; fo += n; return p; };
-    auto tw = [&](size_t n) { const uint16_t* p = wbf.data()+wo; wo += n; return p; };
+    ArenaCursor<float> tf{fnorms};
+    ArenaCursor<uint16_t> tw{wbf};
 
     const float* patch_b = tf(H);
     pos_emb = tf((size_t)NP*H);
@@ -141,10 +140,6 @@ static void extract_patches(const float* pixels, int img, int patch, float* out)
         }
 }
 
-void SiglipVision::encode(const float* pixels, float* out) const {
-    encode(pixels, out, scratch);
-}
-
 // SMOLVLA_PROFILE_VIT=1: per-op attribution inside one encode() (stderr). The
 // encoder-layer buckets (ln/qkv/attn/proj/mlp/res) come from nn::Prof; the
 // non-layer stages are timed here.
@@ -154,12 +149,8 @@ struct VitProf {
     double patches = 0, stem = 0, pos = 0, postln = 0, shuffle = 0, mmproj = 0, wall = 0;
     double t0 = 0;
 
-    static double now_ms() {
-        return std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-    void tic() { if (on) t0 = now_ms(); }
-    void toc(double& acc) { if (on) acc += now_ms()-t0; }
+    void tic() { if (on) t0 = nn::now_ms(); }
+    void toc(double& acc) { if (on) acc += nn::now_ms()-t0; }
 };
 } // namespace
 
@@ -169,7 +160,7 @@ void SiglipVision::encode(const float* pixels, float* out, nn::Scratch& sc) cons
     VitProf vp;
     nn::Prof lp;
     lp.on = vp.on;
-    const double t_start = VitProf::now_ms();
+    const double t_start = nn::now_ms();
 
     vp.tic();
     std::vector<float> patches((size_t)NP*PD);
@@ -216,7 +207,7 @@ void SiglipVision::encode(const float* pixels, float* out, nn::Scratch& sc) cons
     vp.toc(vp.mmproj);
 
     if (vp.on) {
-        vp.wall = VitProf::now_ms() - t_start;
+        vp.wall = nn::now_ms() - t_start;
         const double layers_sum = lp.ln+lp.qkv+lp.attn+lp.proj+lp.mlp+lp.res;
         const double acc = vp.patches+vp.stem+vp.pos+layers_sum+vp.postln+vp.shuffle+vp.mmproj;
         std::fprintf(stderr,

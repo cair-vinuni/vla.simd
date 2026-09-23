@@ -13,7 +13,7 @@
 
 // SmolVLA action expert + flow-matching denoise. Reimplements vla.cpp
 // build_expert_self_attn_layer / build_expert_cross_attn_layer + the denoise loop
-// (third_party/vla.cpp/src/models/smolvla.cpp:680-749, 1253-1279) over the HAL.
+// over the HAL.
 //
 // The expert runs one stream (the action suffix, `chunk` tokens). Even layers are
 // self-attention (attend the VLM prefix K/V cache concatenated with the suffix's own
@@ -68,14 +68,14 @@ struct ActionExpert {
     // -> suffix:[chunk,expert_h].
     void embed_suffix(const float* x_t, float time, float* suffix) const;
 
-    // One denoise step. kv = per-layer VLM K/V cache ([n_prefix, kv_full] each).
+    // One denoise step.
     // mask_full:[chunk, n_prefix+chunk] additive; mask_prefix:[chunk, n_prefix] additive.
     // pos_full:[chunk] self-attn positions; pos_rebased:[chunk] cross-attn positions.
-    // cK/cV:[n_layers][n_prefix*kv_full] precomputed cross-attn K/V (empty entry => compute
-    // locally). x_t:[chunk,max_action_dim] -> v_t:[chunk,max_action_dim].
+    // cK/cV:[n_layers][n_prefix*kv_full] precomputed cross-attn K/V.
+    // x_t:[chunk,max_action_dim] -> v_t:[chunk,max_action_dim].
     // Buffers come from `ds`, which denoise() sizes and whose K/V prefix half it
     // fills once; a direct caller must call prepare_denoise first.
-    void denoise_step(const std::vector<VlmKV>& kv, int n_prefix, const float* x_t, float time,
+    void denoise_step(int n_prefix, const float* x_t, float time,
                       const float* mask_full, const float* mask_prefix,
                       const int* pos_full, const int* pos_rebased, float* v_t,
                       const std::vector<std::vector<float>>& cK,

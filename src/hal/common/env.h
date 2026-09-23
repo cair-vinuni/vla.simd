@@ -14,6 +14,8 @@ namespace tcpu {
 namespace hal {
 namespace env {
 
+int int_env(const char* name, int dflt);
+
 // TCPU_PACKED=0 falls back to the unpacked dense_linear (all backends).
 bool packed();
 

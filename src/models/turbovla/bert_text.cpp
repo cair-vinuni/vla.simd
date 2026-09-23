@@ -7,7 +7,6 @@
 #include "bert_text.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
-#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -65,8 +64,7 @@ bool BertText::load(const std::string& dir, int fusion_hidden) {
         return false;
     }
 
-    size_t off = 0;
-    auto take = [&](size_t n) { const float* p = data.data()+off; off += n; return p; };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
 
     word_emb = take((size_t)cfg.vocab*H);

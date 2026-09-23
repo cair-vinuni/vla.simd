@@ -50,38 +50,30 @@ bool SmallStem::load(const std::string& dir, const std::string& name) {
     // .bin. A stale meta beside a shorter bin used to hand out pointers past the
     // allocation, and Conv2d::init copies immediately - so the size check has to
     // happen before the init, not after the loop.
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
     layers.resize(cfg.n_layers);
 
     int cin = cfg.in_ch;
     for (int i=0; i<cfg.n_layers; i++) {
         const int cout = cfg.features[i];
-        if (cout < 1) return false;
         const float* w = take((size_t)cout*cfg.k*cfg.k*cin);
         const float* b = take(cout);
-        if (!ok) return false;
+        if (!take.ok) return false;
         layers[i].conv.init(w, b, cout, cfg.k, cin);   // packs (all Cout here are x16)
         layers[i].gn_scale = take(cout);
         layers[i].gn_bias  = take(cout);
-        if (!ok) return false;
+        if (!take.ok) return false;
         cin = cout;
     }
 
     const float* w = take((size_t)cfg.embed_dim*cin);
     const float* b = take(cfg.embed_dim);
-    if (!ok) return false;
+    if (!take.ok) return false;
     embed.init(w, b, cfg.embed_dim, cin, nn::Linear::Role::StemGemm);
-    return off == data.size();
+    return take.done();
 }
 
-void SmallStem::encode(const uint8_t* obs, const uint8_t* goal, int H, int W, float* out) const {
+void SmallStem::encode(const uint8_t* obs, int H, int W, float* out) const {
     // OCTO_PROFILE_STEM=1: per-op attribution inside the stem (stderr)
     static const bool prof = std::getenv("OCTO_PROFILE_STEM") != nullptr;
     using clk = std::chrono::steady_clock;
@@ -99,7 +91,7 @@ void SmallStem::encode(const uint8_t* obs, const uint8_t* goal, int H, int W, fl
             dst[c] = obs[(size_t)p*3+c]/127.5f - 1.0f;
 
         for (int c = 0; c < 3; c++)
-            dst[3+c] = goal ? goal[(size_t)p*3+c]/127.5f - 1.0f : -1.0f;
+            dst[3+c] = -1.0f;
     }
     auto t1 = clk::now();
 
@@ -108,7 +100,6 @@ void SmallStem::encode(const uint8_t* obs, const uint8_t* goal, int H, int W, fl
 
     int h   = H;
     int w   = W;
-    int cin = cfg.in_ch;
     for (int i=0; i<cfg.n_layers; i++) {
         const int cout = cfg.features[i];
         const int ho = (h+2*cfg.pad-cfg.k)/cfg.stride+1;
@@ -131,7 +122,6 @@ void SmallStem::encode(const uint8_t* obs, const uint8_t* goal, int H, int W, fl
 
         h   = ho;
         w   = wo;
-        cin = cout;
     }
     auto t2 = clk::now();
 
@@ -142,7 +132,6 @@ void SmallStem::encode(const uint8_t* obs, const uint8_t* goal, int H, int W, fl
             H, W, ms(t0, t1), conv_ms[0], conv_ms[1], conv_ms[2], conv_ms[3],
             gn_ms, ms(t2, clk::now()), ms(t0, clk::now()));
     }
-    (void)cin;
 }
 
 } // namespace tcpu

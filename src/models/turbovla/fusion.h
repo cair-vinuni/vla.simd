@@ -57,10 +57,10 @@ struct TurboFusion {
     bool load(const std::string& dir);
 
     // dino [n_views, n_patches, vis_dim] -> visual [n_views*n_patches, hidden],
-    // view embedding added. proj_out (optional) receives the projection output
-    // before the view embedding, which is what the golden dump records.
+    // view embedding added. proj_out receives the projection output before the
+    // view embedding, which is what the golden dump records.
     void project_vision(const float* dino, int n_views, int n_patches,
-                        float* visual, float* proj_out = nullptr) const;
+                        float* visual, float* proj_out) const;
 
     // visual [n_vis, hidden] and text [n_text, hidden] in place through the
     // interaction stack. text_pad [n_text]: 1 where the text token is padding

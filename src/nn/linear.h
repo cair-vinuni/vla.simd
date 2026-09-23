@@ -46,7 +46,6 @@ struct Linear {
     // kernel, or when the shape does not fit it (N % 16 != 0), so a caller can
     // enable unconditionally and still get a working model.
     bool init_int8();
-    bool is_int8() const { return Wq != nullptr; }
 
     // out [seq, N] = x [seq, K] * W^T + bias
     void forward(float* out, const float* x, int seq) const;

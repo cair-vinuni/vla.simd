@@ -5,21 +5,17 @@
  */
 
 #include "smolvla_model.h"
+#include "models/arena.h"
 #include "hal/common/env.h"
+#include "hal/common/threads.h"
 #include "ops/lm_ops.h"
 #include <chrono>
-#include <exception>
-#include <thread>
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
-#include <random>
 #include <string>
 
 namespace tcpu {
@@ -36,8 +32,8 @@ namespace tcpu {
 //   63 = all of it
 //
 // The vision tower is 88% of a query on a Pi 5 and 77% of the tower is these
-// GEMMs, so 7 is where nearly all of the win is. Measured on a Pi 5 against
-// tools/ref_smolvla.py, RMS over 8 observations, in the arm's own units
+// GEMMs, so 7 is where nearly all of the win is. Measured on a Pi 5, RMS over
+// 8 observations, in the arm's own units
 // (mean |action| 64.6 deg): 8 -> 0.091, 32 -> 0.104, 16 -> 0.148, 1 -> 0.227,
 // 2 -> 0.238, 4 -> 0.907. **fc2 (bit 4) carries most of the error** - its input
 // is the GELU output, whose long positive tail drags the per-token absmax and
@@ -52,23 +48,7 @@ namespace tcpu {
 namespace {
 enum : int { I8_VIT_ATTN = 1, I8_VIT_W1 = 2, I8_VIT_W2 = 4, I8_VIT_STEM = 8,
              I8_LM = 16, I8_EXPERT = 32 };
-
-int int8_mask() {
-    static const int v = [] {
-        const char* e = std::getenv("SMOLVLA_INT8");
-        return e ? std::atoi(e) : 0;
-    }();
-    return v;
-}
 } // namespace
-
-static bool read_floats(const std::string& path, std::vector<float>& out, size_t n) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { std::fprintf(stderr, "smolvla: cannot open %s\n", path.c_str()); return false; }
-    out.resize(n);
-    f.read(reinterpret_cast<char*>(out.data()), n * sizeof(float));
-    return (bool)f;
-}
 
 bool SmolvlaModel::load(const std::string& dir) {
     if (!vit.load(dir) || !vlm.load(dir) || !aex.load(dir)) return false;
@@ -129,7 +109,7 @@ bool SmolvlaModel::load(const std::string& dir) {
 // kernel cannot take (N % 16 != 0) stay fp32 silently, and on a CPU with no int8
 // kernel every call returns false - so a caller may set the mask unconditionally.
 void SmolvlaModel::apply_int8() {
-    const int mask = int8_mask();
+    static const int mask = hal::env::int_env("SMOLVLA_INT8", 0);
     if (!mask) return;
 
     int n = 0;
@@ -211,37 +191,11 @@ std::vector<float> SmolvlaModel::predict_normalized(
     // the views land in place and the sqrt(H) scaling is one pass afterwards.
     std::vector<float> prefix((size_t)n_prefix * H);
     const int vt = hal::env::view_threads();
-    if (vt > 0 && nv > 1) {
-        // Views are independent: run them concurrently on vt threads each. Each
-        // worker needs its own scratch (the member one is shared). Same math.
-        std::vector<nn::Scratch> vsc(nv);
-        std::vector<std::exception_ptr> err(nv);
-        std::vector<std::thread> workers;
-        workers.reserve(nv);
-        // An exception out of a thread body is std::terminate, and so is unwinding
-        // past a joinable thread: catch per worker, join, then rethrow.
-        try {
-            for (int v = 0; v < nv; v++) {
-                workers.emplace_back([&, v] {
-#if defined(_OPENMP)
-                    omp_set_num_threads(vt);
-#endif
-                    try {
-                        vit.encode(pixels_all + (size_t)v * per_view,
-                                   prefix.data() + (size_t)v * TOK * H, vsc[v]);
-                    } catch (...) { err[v] = std::current_exception(); }
-                });
-            }
-        } catch (...) {
-            for (std::thread& w : workers) w.join();
-            throw;
-        }
-        for (std::thread& w : workers) w.join();
-        for (std::exception_ptr& e : err) if (e) std::rethrow_exception(e);
-    } else {
-        for (int v = 0; v < nv; v++)
-            vit.encode(pixels_all + (size_t)v * per_view, prefix.data() + (size_t)v * TOK * H);
-    }
+    std::vector<nn::Scratch> vsc(vt > 0 && nv > 1 ? nv : 0);
+    hal::for_each_view(nv, vt, [&](int v) {
+        vit.encode(pixels_all + (size_t)v * per_view, prefix.data() + (size_t)v * TOK * H,
+                   vsc.empty() ? vit.scratch : vsc[v]);
+    });
     for (size_t i = 0; i < (size_t)n_img * H; i++)
         prefix[i] *= sq;
     lap("vision");
@@ -302,15 +256,6 @@ std::vector<float> SmolvlaModel::predict(const float* pixels_all, int nv,
     std::vector<float> state(max_state_dim, 0.0f);
     for (int i = 0; i < real_state_dim; i++)
         state[i] = (raw_state[i] - state_mean[i]) / (state_std[i] + norm_eps);
-
-    std::vector<float> noise_buf;
-    if (!noise) {
-        noise_buf.resize((size_t)C * MAD);
-        std::mt19937 rng(0);
-        std::normal_distribution<float> nd(0.f, 1.f);
-        for (auto& x : noise_buf) x = nd(rng);
-        noise = noise_buf.data();
-    }
 
     std::vector<float> a = predict_normalized(pixels_all, nv, lang_tokens, lang_mask, n_lang, state.data(), noise);
     if (a.empty()) return a;   // rejected input; the C ABI turns this into an error

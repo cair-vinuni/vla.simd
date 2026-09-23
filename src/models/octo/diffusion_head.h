@@ -35,7 +35,7 @@ struct DiffusionHead {
 
     // One score-net eval: eps [flat] for embedding emb [emb], noisy actions x [flat],
     // diffusion time t.
-    void eps(const float* emb, const float* x, float t, float* out) const;
+    void eps(const float* emb, const float* x, int t, float* out) const;
 
     // Time conditioning (Fourier features + cond MLP) for diffusion time t; the
     // sampling loop only ever uses t = 0..steps-1, precomputed in cond_table.

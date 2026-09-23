@@ -70,8 +70,7 @@ bool TurboFusion::load(const std::string& dir) {
         return false;
     }
 
-    size_t off = 0;
-    auto take = [&](size_t n) { const float* p = data.data()+off; off += n; return p; };
+    ArenaCursor<float> take{data};
     using Role = nn::Linear::Role;
 
     in_norm_w = take(V); in_norm_b = take(V);
@@ -141,7 +140,7 @@ void TurboFusion::project_vision(const float* dino, int n_views, int n_patches,
         for (size_t i = 0; i < (size_t)n*D; i++) visual[i] += nl[i];
     }
     layernorm(visual, visual, out_norm_w, out_norm_b, n, D, cfg.ln_eps);
-    if (proj_out) std::memcpy(proj_out, visual, (size_t)n*D*sizeof(float));
+    std::memcpy(proj_out, visual, (size_t)n*D*sizeof(float));
 
     // + view embedding, broadcast over that view's patches (position_embedding
     // "view": no per-patch position embedding in this checkpoint family).
@@ -180,7 +179,7 @@ void TurboFusion::forward(float* visual, int n_vis, float* text, int n_text,
     {
         const float blocked = -std::numeric_limits<float>::infinity();
         for (int j = 0; j < n_text; j++) {
-            const float m = (text_pad && text_pad[j]) ? blocked : 0.0f;
+            const float m = text_pad[j] ? blocked : 0.0f;
             for (int i = 0; i < n_vis; i++) kmask[(size_t)i*n_text + j] = m;
         }
     }

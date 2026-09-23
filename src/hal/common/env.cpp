@@ -16,7 +16,7 @@ namespace tcpu {
 namespace hal {
 namespace env {
 
-static int int_env(const char* name, int dflt) {
+int int_env(const char* name, int dflt) {
     const char* e = std::getenv(name);
     if (!e || !*e) return dflt;
     char* end;

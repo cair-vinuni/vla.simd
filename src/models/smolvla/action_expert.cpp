@@ -76,12 +76,9 @@ bool ActionExpert::load(const std::string& dir) {
     // SMOLVLA_NUM_STEPS overrides the checkpoint's flow-matching step count. The
     // Euler integrator is exact in the limit and the chunk moves smoothly as the
     // count drops, so this is the one knob that trades action accuracy for
-    // latency directly (~50 ms/step on a Pi 5). Serving default is the
-    // checkpoint's; see docs/11-smolvla-raspi.md for the measured curve.
-    if (const char* e = std::getenv("SMOLVLA_NUM_STEPS")) {
-        const int n = std::atoi(e);
-        if (n > 0) cfg.num_steps = n;
-    }
+    // latency directly (~50 ms/step on a Pi 5). Serving default is the checkpoint's.
+    const int steps = hal::env::int_env("SMOLVLA_NUM_STEPS", 0);
+    if (steps > 0) cfg.num_steps = steps;
 
     const int EH = cfg.expert_h, EF = cfg.expert_ffn, QF = cfg.q_full(), KV = cfg.kv_full();
     const int NL = cfg.n_layers, MAD = cfg.max_action_dim;
@@ -208,7 +205,7 @@ void ActionExpert::prepare_denoise(const std::vector<VlmKV>& kv, int n_prefix) c
     }
 }
 
-void ActionExpert::denoise_step(const std::vector<VlmKV>& kv, int n_prefix, const float* x_t, float time,
+void ActionExpert::denoise_step(int n_prefix, const float* x_t, float time,
                                 const float* mask_full, const float* mask_prefix,
                                 const int* pos_full, const int* pos_rebased, float* v_t,
                                 const std::vector<std::vector<float>>& cK,
@@ -264,24 +261,11 @@ void ActionExpert::denoise_step(const std::vector<VlmKV>& kv, int n_prefix, cons
         } else {
             // cross-attn: K/V are the reprojected VLM cache (precomputed once, constant across
             // denoise steps). Q gets rebased RoPE; K is not re-RoPE'd.
-            const float *Kx, *Vx;
-            std::vector<float> Kr, Vr;
-            if (L < (int)cK.size() && !cK[L].empty()) {
-                Kx = cK[L].data();
-                Vx = cV[L].data();
-            } else {   // fallback: compute locally (e.g. single-step call in tests)
-                Kr.resize((size_t)n_prefix*KV);
-                Vr.resize((size_t)n_prefix*KV);
-                w.k.forward(Kr.data(), kv[L].k.data(), n_prefix);
-                w.v.forward(Vr.data(), kv[L].v.data(), n_prefix);
-                Kx = Kr.data();
-                Vx = Vr.data();
-            }
             P.tic();
             rope_neox(q.data(), pos_rebased, C, cfg.n_q, HD, cfg.rope_base);
             P.toc(P.rope);
             P.tic();
-            gqa_attention_masked(attn.data(), q.data(), Kx, Vx,
+            gqa_attention_masked(attn.data(), q.data(), cK[L].data(), cV[L].data(),
                                  C, n_prefix, cfg.n_q, cfg.n_kv, HD, scale, mask_prefix);
             P.toc(P.attn);
         }
@@ -371,7 +355,7 @@ void ActionExpert::denoise(const std::vector<VlmKV>& kv, int n_prefix, const flo
 
     for (int step = 0; step < cfg.num_steps; step++) {
         const float time = (float)(1.0 + step*(-1.0/cfg.num_steps));
-        denoise_step(kv, n_prefix, x.data(), time, mask_full, mask_prefix.data(),
+        denoise_step(n_prefix, x.data(), time, mask_full, mask_prefix.data(),
                      pos_full, pos_rebased.data(), v_t.data(), cK, cV);
         for (size_t i = 0; i < x.size(); i++) x[i] += dt*v_t[i];
     }
