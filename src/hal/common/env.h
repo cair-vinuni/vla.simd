@@ -7,8 +7,8 @@
 #pragma once
 
 // All TCPU_* runtime knobs, parsed once. Defaults are per-backend and reproduce
-// each hardware branch (see docs/07-hal-design.md for the matrix). Every knob is
-// an A/B hook: flipping it must never change which model runs, only how.
+// each hardware branch. Every knob is an A/B hook: flipping it must never change
+// which model runs, only how.
 
 namespace tcpu {
 namespace hal {
@@ -28,12 +28,6 @@ bool attn_blas();
 // TCPU_ATTN_DYNAMIC=N: dynamic chunk for attention query rows, 0 = static
 // (Apple NEON path; default 8, measured best on M4 4P+6E).
 int attn_dynamic();
-
-// TCPU_ATTN_DENSE=0 sends the unmasked (ViT) attention back through the masked
-// kernel with a zero mask, i.e. exactly what it did before the dense path
-// existed. Values are identical either way - the dense path was written to keep
-// the FMA order - so this is purely the A/B hook for the traffic win.
-bool attn_dense();
 
 // TCPU_ATTN_QB=N: query rows per block in the dense (unmasked) NEON attention.
 // A block makes one pass over the head's K^T and V panels, so this is the panel
@@ -71,7 +65,7 @@ int conv_budget();
 // panels. A late ResNet stage (few pixels, K in the thousands) lands on thin
 // panels and pays that re-streaming many times over, so it wants the untiled
 // path; early stages, where im2col dwarfs the weights, want tiles. Values are
-// identical either way. Default 16 (measured on i5-12400F, see docs/10-act-design.md).
+// identical either way. Default 16 (measured on i5-12400F).
 int conv_min_panel();
 
 // TCPU_FUSE_GELU=0 splits the MLP back into GEMM + separate gelu pass
@@ -126,25 +120,13 @@ bool bf16_deq();
 // (dynamic whole-panel is the measured ARM default).
 bool gemm_force_static();
 
-// TCPU_GEMM_THREADS / TCPU_GEMM_CHUNK: hybrid-core recruitment experiment hooks
-// for the packed GEMMs (see lm_ops history). 0 / unset = off.
-int gemm_threads();
-int gemm_chunk();   // 0 = unset (x86 hook uses 4; Pi uses one whole panel)
-
-// Token rows per tile in the int8 dotprod GEMM (TCPU_I8_MR). 4 measured best on
-// a Cortex-A76; the kernel is templated for 1..6.
+// Token rows per tile in the int8 dotprod GEMM (TCPU_I8_MR); the kernel is
+// templated for 1..6.
 int i8_mr();
 
 // Token rows cache-blocked per pass over the weight panels in the int8 GEMM
 // (TCPU_I8_MBLOCK); 0 disables the blocking.
 int i8_mblock();
-
-// TCPU_GEMM_MBLOCK: token rows the fp32 packed GEMM holds resident while every
-// weight panel sweeps them. Same trade as i8_mblock: without it the (panel, tile)
-// loop re-streams the whole activation matrix once per 16-column panel, ~600 MB
-// per GEMM for a 1024x3072 ViT MLP. Blocking the token axis leaves the K loop
-// alone, so the result is bitwise identical. Default 0, see env.cpp.
-int gemm_mblock();
 
 // TCPU_OMP_MIN: elements below which the elementwise ops and the token-wise
 // norms stay on the calling thread. Forking a full team costs more than the work

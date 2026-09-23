@@ -11,7 +11,6 @@
 #include "../arch.h"
 #include "../../ops/lm_ops.h"
 #include <cstdint>
-#include <cstring>
 #include <vector>
 #include <cstddef>
 using std::size_t;
@@ -50,12 +49,8 @@ void dense_linear_bf16(float* out, const float* x, const uint16_t* W, const floa
             const float* xt = x+(size_t)t*K;
 
             float s = 0.0f;
-            for (int k=0; k<K; k++) {
-                uint32_t u = (uint32_t)wr[k] << 16;
-                float f;
-                std::memcpy(&f, &u, 4);
-                s += xt[k]*f;
-            }
+            for (int k=0; k<K; k++)
+                s += xt[k]*bf16_f32(wr[k]);
 
             out[(size_t)t*N+nn] = bias ? s+bias[nn] : s;
         }
@@ -73,12 +68,8 @@ void dense_linear_packed_bf16(float* out, const float* x, const uint16_t* Wp, co
         const int j = n%16;
         for (int t=0; t<seq; t++) {
             float s = 0.0f;
-            for (int k=0; k<K; k++) {
-                uint32_t u = (uint32_t)Wp[((size_t)b*K+k)*16+j] << 16;
-                float f;
-                std::memcpy(&f, &u, 4);
-                s += x[(size_t)t*K+k]*f;
-            }
+            for (int k=0; k<K; k++)
+                s += x[(size_t)t*K+k]*bf16_f32(Wp[((size_t)b*K+k)*16+j]);
 
             out[(size_t)t*N+n] = bias ? s+bias[n] : s;
         }

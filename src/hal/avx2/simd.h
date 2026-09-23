@@ -7,7 +7,7 @@
 #pragma once
 #include <immintrin.h>
 
-// x86 AVX2 primitives (i9 tuning, verbatim from the baseline lm_ops.cpp).
+// x86 AVX2 primitives (i9 tuning).
 namespace tcpu {
 static inline float simd_dot(const float* a, const float* b, int n) {
     // 4 independent accumulator chains hide the ~4-cycle FMA latency (a single chain

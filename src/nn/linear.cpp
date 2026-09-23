@@ -74,10 +74,8 @@ bool Linear::init_int8() {
     if (!src) {
         tmp.resize((size_t)N*K);
         if (Wr16) {
-            for (size_t i=0; i<tmp.size(); i++) {
-                const uint32_t u = (uint32_t)Wr16[i] << 16;
-                std::memcpy(&tmp[i], &u, 4);
-            }
+            for (size_t i=0; i<tmp.size(); i++)
+                tmp[i] = bf16_f32(Wr16[i]);
         } else if (Wp) {
             for (int b=0; b<N/16; b++)
                 for (int k=0; k<K; k++)
@@ -87,10 +85,8 @@ bool Linear::init_int8() {
             // packed panels [N/16][K][16]: element [b][k][j] is W[b*16+j][k]
             for (int b=0; b<N/16; b++)
                 for (int k=0; k<K; k++)
-                    for (int j=0; j<16; j++) {
-                        const uint32_t u = (uint32_t)Wb[((size_t)b*K+k)*16+j] << 16;
-                        std::memcpy(&tmp[(size_t)(b*16+j)*K+k], &u, 4);
-                    }
+                    for (int j=0; j<16; j++)
+                        tmp[(size_t)(b*16+j)*K+k] = bf16_f32(Wb[((size_t)b*K+k)*16+j]);
         }
         src = tmp.data();
     }

@@ -6,8 +6,7 @@
 
 // Elementwise activations. gelu_tanh has a SIMD path per backend (same sigmoid
 // identity and Cephes exp everywhere - one exp per vector instead of per-lane
-// tanhf; tolerance class). relu is OMP-parallel only on the Apple backend
-// (measured win there; the other branches shipped it serial).
+// tanhf; tolerance class).
 
 #include "../arch.h"
 #include "../simd.h"
@@ -28,7 +27,7 @@ namespace tcpu {
 // scalar: its only callers are Octo's diffusion head (64-1024 elements), where
 // there is nothing to win and the numerics are golden-verified as they are.
 void silu_gate(float* out, const float* g, const float* u, int n) {
-#if TCPU_ISA_X86 || TCPU_HAL_APPLE || TCPU_HAL_NEON
+#if TCPU_ISA_X86 || TCPU_ISA_ARM
     if (hal::env::simd_silu()) {
         const int lanes = TCPU_ISA_X86 ? 8 : 4;
         const int nv = n - (n % lanes);
@@ -41,14 +40,9 @@ void silu_gate(float* out, const float* g, const float* u, int n) {
             const __m256 e = exp256_ps(_mm256_sub_ps(_mm256_setzero_ps(), x));
             const __m256 s = _mm256_div_ps(x, _mm256_add_ps(_mm256_set1_ps(1.0f), e));
             _mm256_storeu_ps(out+i, _mm256_mul_ps(s, _mm256_loadu_ps(u+i)));
-#elif TCPU_HAL_APPLE
-            const float32x4_t x = vld1q_f32(g+i);
-            const float32x4_t e = exp_ps(vnegq_f32(x));
-            const float32x4_t s = vdivq_f32(x, vaddq_f32(vdupq_n_f32(1.0f), e));
-            vst1q_f32(out+i, vmulq_f32(s, vld1q_f32(u+i)));
 #else
             const float32x4_t x = vld1q_f32(g+i);
-            const float32x4_t e = exp_ps_neon(vnegq_f32(x));
+            const float32x4_t e = exp_ps(vnegq_f32(x));
             const float32x4_t s = vdivq_f32(x, vaddq_f32(vdupq_n_f32(1.0f), e));
             vst1q_f32(out+i, vmulq_f32(s, vld1q_f32(u+i)));
 #endif
@@ -99,27 +93,9 @@ void gelu_tanh(float* x, int n) {
         float v = x[i];
         x[i] = 0.5f*v*(1.0f+std::tanh(c*(v+0.044715f*v*v*v)));
     }
-#elif TCPU_HAL_APPLE
-    // same sigmoid identity as the AVX2 path: one exp_ps per 4 elements
-    const int nv = n & ~3;
-#if defined(_OPENMP)
-    #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
-#endif
-    for (int i=0; i<nv; i += 4) {
-        const float32x4_t v = vld1q_f32(x+i);
-        const float32x4_t v3 = vmulq_f32(vmulq_f32(v, v), v);
-        const float32x4_t y = vmulq_n_f32(vfmaq_n_f32(v, v3, 0.044715f), 2.0f*c);
-        const float32x4_t e = exp_ps(vnegq_f32(y));
-        const float32x4_t s = vdivq_f32(vdupq_n_f32(1.0f), vaddq_f32(vdupq_n_f32(1.0f), e));
-        vst1q_f32(x+i, vmulq_f32(v, s));
-    }
-    for (int i=nv; i<n; i++) {
-        float v = x[i];
-        x[i] = 0.5f*v*(1.0f+std::tanh(c*(v+0.044715f*v*v*v)));
-    }
-#elif TCPU_HAL_NEON
+#elif TCPU_ISA_ARM
     // Same sigmoid identity as the AVX2 path: gelu = v * sigmoid(2c*(v+0.044715 v^3)),
-    // one exp_ps_neon per 4 elements instead of 4 scalar tanhf (11.7M calls across the
+    // one exp_ps per 4 elements instead of 4 scalar tanhf (11.7M calls across the
     // Octo MLP). Matches the AVX2 gelu numerics (tolerance class).
     const int nv = n & ~3;
     const float32x4_t vc2   = vdupq_n_f32(2.0f*c);
@@ -132,7 +108,7 @@ void gelu_tanh(float* x, int n) {
         const float32x4_t v = vld1q_f32(x+i);
         const float32x4_t v3 = vmulq_f32(vmulq_f32(v, v), v);
         const float32x4_t y = vmulq_f32(vc2, vfmaq_f32(v, vcoef, v3));
-        const float32x4_t e = exp_ps_neon(vnegq_f32(y));
+        const float32x4_t e = exp_ps(vnegq_f32(y));
         const float32x4_t s = vdivq_f32(one, vaddq_f32(one, e));
         vst1q_f32(x+i, vmulq_f32(v, s));
     }
@@ -166,7 +142,7 @@ void gelu_tanh(float* x, int n) {
 // gelu_tanh is NOT a substitute for either path: see the header.
 void gelu_erf(float* x, int n) {
     const float inv_sqrt2 = 0.70710678118654752f;
-#if TCPU_ISA_X86 || TCPU_HAL_APPLE || TCPU_HAL_NEON
+#if TCPU_ISA_X86 || TCPU_ISA_ARM
     if (hal::env::simd_erf()) {
         const float p  =  0.3275911f;
         const float a1 =  0.254829592f,  a2 = -0.284496736f, a3 = 1.421413741f;
@@ -206,11 +182,7 @@ void gelu_erf(float* x, int n) {
             poly = vfmaq_f32(vdupq_n_f32(a2), poly, t);
             poly = vfmaq_f32(vdupq_n_f32(a1), poly, t);
             poly = vmulq_f32(poly, t);
-#if TCPU_HAL_APPLE
             const float32x4_t e = exp_ps(vnegq_f32(vmulq_f32(z, z)));
-#else
-            const float32x4_t e = exp_ps_neon(vnegq_f32(vmulq_f32(z, z)));
-#endif
             const float32x4_t erf_abs = vfmsq_f32(vdupq_n_f32(1.0f), poly, e);
             const uint32x4_t sign = vandq_u32(vreinterpretq_u32_f32(v), vdupq_n_u32(0x80000000u));
             const float32x4_t erf = vreinterpretq_f32_u32(
@@ -248,7 +220,7 @@ void mish(float* x, int n) {
     // above that, tanh(softplus(v)) is 1 to well inside fp32, and the branch also
     // keeps log1p(exp(v)) from returning inf for the large activations the UNet's
     // wide channel blocks do produce.
-#if TCPU_ISA_X86 || TCPU_HAL_APPLE || TCPU_HAL_NEON
+#if TCPU_ISA_X86 || TCPU_ISA_ARM
     if (hal::env::simd_mish()) {
         const int lanes = TCPU_ISA_X86 ? 8 : 4;
         const int nv = n - (n % lanes);
@@ -264,11 +236,7 @@ void mish(float* x, int n) {
             _mm256_storeu_ps(x+i, _mm256_mul_ps(v, t));
 #else
             const float32x4_t v = vld1q_f32(x+i);
-#if TCPU_HAL_APPLE
             const float32x4_t e = exp_ps(vminq_f32(v, vdupq_n_f32(20.0f)));
-#else
-            const float32x4_t e = exp_ps_neon(vminq_f32(v, vdupq_n_f32(20.0f)));
-#endif
             const float32x4_t m = vmulq_f32(e, vaddq_f32(e, vdupq_n_f32(2.0f)));
             vst1q_f32(x+i, vmulq_f32(v, vdivq_f32(m, vaddq_f32(m, vdupq_n_f32(2.0f)))));
 #endif

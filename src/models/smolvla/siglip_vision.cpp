@@ -6,6 +6,7 @@
 
 #include "siglip_vision.h"
 #include "models/arena.h"
+#include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include <cmath>
 #include <cstdio>
@@ -123,21 +124,6 @@ bool SiglipVision::load(const std::string& dir) {
     }
 
     return true;
-}
-
-// extract [n_patches, patch_dim] with per-patch order (ic, kh, kw), matching the conv
-// weight reshape [hidden, ic*patch*patch + kh*patch + kw].
-static void extract_patches(const float* pixels, int img, int patch, float* out) {
-    const int grid = img/patch, pd = 3*patch*patch;
-    for (int ph = 0; ph < grid; ph++)
-        for (int pw = 0; pw < grid; pw++) {
-            float* dst = out + ((size_t)(ph*grid+pw))*pd;
-            for (int ic = 0; ic < 3; ic++)
-                for (int kh = 0; kh < patch; kh++)
-                    for (int kw = 0; kw < patch; kw++)
-                        dst[ic*patch*patch + kh*patch + kw] =
-                            pixels[((size_t)ic*img + (ph*patch+kh))*img + (pw*patch+kw)];
-        }
 }
 
 // SMOLVLA_PROFILE_VIT=1: per-op attribution inside one encode() (stderr). The

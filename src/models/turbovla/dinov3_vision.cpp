@@ -7,6 +7,7 @@
 #include "dinov3_vision.h"
 #include "models/arena.h"
 #include "nn/encoder.h"
+#include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include <cmath>
 #include <cstddef>
@@ -127,21 +128,6 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
             }
         }
     return true;
-}
-
-// [n_patches, patch_dim] with per-patch order (ic, kh, kw), matching the conv
-// weight reshape the converter writes.
-static void extract_patches(const float* pixels, int img, int patch, float* out) {
-    const int g = img/patch, pd = 3*patch*patch;
-    for (int ph = 0; ph < g; ph++)
-        for (int pw = 0; pw < g; pw++) {
-            float* dst = out + (size_t)(ph*g+pw)*pd;
-            for (int ic = 0; ic < 3; ic++)
-                for (int kh = 0; kh < patch; kh++)
-                    for (int kw = 0; kw < patch; kw++)
-                        dst[ic*patch*patch + kh*patch + kw] =
-                            pixels[((size_t)ic*img + (ph*patch+kh))*img + (pw*patch+kw)];
-        }
 }
 
 // In-place RoPE over the patch rows of x [T, n_heads, head_dim]: rows

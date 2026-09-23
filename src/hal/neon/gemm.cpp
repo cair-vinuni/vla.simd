@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Pi / generic ARM NEON GEMM backend (raspi tuning, verbatim from the raspi
-// branch; Cortex-A72-class cores). MR=4 lane-FMLA packed micro-kernel (no
-// spills in 32 regs), dynamic whole-panel scheduling by default
-// (TCPU_GEMM_SCHED=static reverts), opt-in bf16 packed kernel for
-// memory-bound MLPs (TCPU_BF16_MLP).
+// Pi / generic ARM NEON GEMM backend (raspi tuning; Cortex-A72-class cores).
+// MR=4 lane-FMLA packed micro-kernel (no spills in 32 regs), dynamic whole-panel
+// scheduling by default (TCPU_GEMM_SCHED=static reverts), opt-in bf16 packed
+// kernel for memory-bound MLPs (TCPU_BF16_MLP).
 
 #include "../arch.h"
 #if TCPU_HAL_NEON
@@ -17,19 +16,15 @@
 #include "../common/env.h"
 #include "../../ops/lm_ops.h"
 #include <cstdint>
-#include <cstring>
-#include <vector>
 #include <cstddef>
 using std::size_t;
 
 namespace tcpu {
-using hal::env::gemm_threads;
-using hal::env::gemm_chunk;
 using hal::env::gemm_force_static;
 
 // 4-output-row micro-kernel (NEON analogue of mm_block4): one block of 4 weight
 // rows, 4 independent FMLA chains -> hides FMLA latency; sums reordered vs a plain
-// dot (within the fp32 noise floor, see CONVENTIONS).
+// dot (within the fp32 noise floor).
 static inline void mm_block4_neon(float* out, const float* x,
                                   const float* w0, const float* w1, const float* w2, const float* w3,
                                   int seq, int N, int K, const float* bias, int n0) {
@@ -260,33 +255,17 @@ void dense_linear_packed(float* out, const float* x, const float* Wp, const floa
     // 8/8 interleaved A/B pairs vs static, -8% end-to-end, bit-exact (scheduling
     // does not touch per-tile math). Small chunks lose B-panel locality (measured
     // worse, same as x86). On hybrid x86 dynamic lost (E-core imbalance), so the
-    // AVX2 path above keeps static. TCPU_GEMM_SCHED=static reverts (A/B hook);
-    // TCPU_GEMM_THREADS/CHUNK override the team size / chunk as on x86.
+    // AVX2 path keeps static. TCPU_GEMM_SCHED=static reverts (A/B hook).
     // Bodies are duplicated, NOT a shared lambda: a [&] lambda in this loop cost
     // ~100 ms end-to-end (capture struct blocks inlining in the outlined region).
     if (!gemm_force_static()) {
-        const int ce = gemm_chunk();
-        const int chunk = (ce > 0 && ce < mtiles) ? ce : mtiles;
-        const int gt = gemm_threads();
-        if (gt > 0) {
-            #pragma omp parallel for schedule(dynamic, chunk) collapse(2) num_threads(gt)
-            for (int b=0; b<nblocks; b++) {
-                for (int m=0; m<mtiles; m++) {
-                    const int t0   = m*MR;
-                    const int rows = seq-t0 < MR ? seq-t0 : MR;
-                    mm_pack6x16_neon(out+(size_t)t0*N, x+(size_t)t0*K,
-                                     Wp+(size_t)b*K*16, bias, rows, N, K, b*16);
-                }
-            }
-        } else {
-            #pragma omp parallel for schedule(dynamic, chunk) collapse(2)
-            for (int b=0; b<nblocks; b++) {
-                for (int m=0; m<mtiles; m++) {
-                    const int t0   = m*MR;
-                    const int rows = seq-t0 < MR ? seq-t0 : MR;
-                    mm_pack6x16_neon(out+(size_t)t0*N, x+(size_t)t0*K,
-                                     Wp+(size_t)b*K*16, bias, rows, N, K, b*16);
-                }
+        #pragma omp parallel for schedule(dynamic, mtiles) collapse(2)
+        for (int b=0; b<nblocks; b++) {
+            for (int m=0; m<mtiles; m++) {
+                const int t0   = m*MR;
+                const int rows = seq-t0 < MR ? seq-t0 : MR;
+                mm_pack6x16_neon(out+(size_t)t0*N, x+(size_t)t0*K,
+                                 Wp+(size_t)b*K*16, bias, rows, N, K, b*16);
             }
         }
         return;
@@ -312,9 +291,7 @@ void dense_linear_packed_bf16(float* out, const float* x, const uint16_t* Wp, co
     // dynamic whole-panel schedule by default, same rationale + hooks as the fp32
     // NEON path in dense_linear_packed (bodies duplicated, not a lambda).
     if (!gemm_force_static()) {
-        const int ce = gemm_chunk();
-        const int chunk = (ce > 0 && ce < mtiles) ? ce : mtiles;
-        #pragma omp parallel for schedule(dynamic, chunk) collapse(2)
+        #pragma omp parallel for schedule(dynamic, mtiles) collapse(2)
         for (int b=0; b<nblocks; b++) {
             for (int m=0; m<mtiles; m++) {
                 const int t0   = m*MR;

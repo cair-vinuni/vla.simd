@@ -44,9 +44,7 @@ using std::size_t;
 
 namespace tcpu {
 
-using hal::env::gemm_chunk;
 using hal::env::gemm_force_static;
-using hal::env::gemm_threads;
 
 #ifndef HWCAP_ASIMDDP
 #define HWCAP_ASIMDDP (1 << 20)
@@ -179,28 +177,13 @@ void dense_linear_i8_pre(float* out, const int8_t* xq, const float* ascale,
     // duplicated rather than shared through a lambda for the inlining reason
     // documented in dense_linear_packed.
     if (!gemm_force_static()) {
-        const int ce = gemm_chunk();
-        const int chunk = (ce > 0 && ce < mtiles) ? ce : mtiles;
-        const int gt = gemm_threads();
-        if (gt > 0) {
-            #pragma omp parallel for schedule(dynamic, chunk) collapse(2) num_threads(gt)
-            for (int b=0; b<nblocks; b++) {
-                for (int m=0; m<mtiles; m++) {
-                    const int t0   = m*MR;
-                    const int rows = seq-t0 < MR ? seq-t0 : MR;
-                    mm_i8_tile(out+(size_t)t0*N, xq+(size_t)t0*Kp, ascale+t0,
-                               Wq+(size_t)b*pstride, wscale, bias, rows, N, Kp, b*16);
-                }
-            }
-        } else {
-            #pragma omp parallel for schedule(dynamic, chunk) collapse(2)
-            for (int b=0; b<nblocks; b++) {
-                for (int m=0; m<mtiles; m++) {
-                    const int t0   = m*MR;
-                    const int rows = seq-t0 < MR ? seq-t0 : MR;
-                    mm_i8_tile(out+(size_t)t0*N, xq+(size_t)t0*Kp, ascale+t0,
-                               Wq+(size_t)b*pstride, wscale, bias, rows, N, Kp, b*16);
-                }
+        #pragma omp parallel for schedule(dynamic, mtiles) collapse(2)
+        for (int b=0; b<nblocks; b++) {
+            for (int m=0; m<mtiles; m++) {
+                const int t0   = m*MR;
+                const int rows = seq-t0 < MR ? seq-t0 : MR;
+                mm_i8_tile(out+(size_t)t0*N, xq+(size_t)t0*Kp, ascale+t0,
+                           Wq+(size_t)b*pstride, wscale, bias, rows, N, Kp, b*16);
             }
         }
         return;

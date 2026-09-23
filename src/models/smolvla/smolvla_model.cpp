@@ -13,7 +13,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -202,10 +201,8 @@ std::vector<float> SmolvlaModel::predict_normalized(
     for (int t = 0; t < n_lang; t++) {
         const uint16_t* e = emb.data() + (size_t)lang_tokens[t] * H;   // bf16 token embedding
         float* dst = prefix.data() + (size_t)(n_img + t) * H;
-        for (int j = 0; j < H; j++) {
-            uint32_t u = (uint32_t)e[j] << 16; float f; std::memcpy(&f, &u, 4);
-            dst[j] = f * sq;
-        }
+        for (int j = 0; j < H; j++)
+            dst[j] = bf16_f32(e[j]) * sq;
     }
     dense_linear(prefix.data() + (size_t)(n_prefix - 1) * H, state, state_w.data(), state_b.data(),
                  1, H, max_state_dim);

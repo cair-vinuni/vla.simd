@@ -31,12 +31,9 @@ int i8_kpad(int K) { return (K+3) & ~3; }
 // table lands 4-byte aligned.
 static size_t i8_panel_bytes(int N, int K) { return (size_t)N*i8_kpad(K); }
 
-size_t packed_i8_floats(int N, int K) {
-    return i8_panel_bytes(N, K) + (size_t)N*sizeof(int32_t);
-}
-
 size_t packed_i8_words(int N, int K) {
-    return packed_i8_floats(N, K)/sizeof(int32_t);   // panel bytes are a multiple of 4
+    // panel bytes are a multiple of 4
+    return (i8_panel_bytes(N, K) + (size_t)N*sizeof(int32_t))/sizeof(int32_t);
 }
 
 const int32_t* i8_rowsums(const int8_t* Wq, int N, int K) {
@@ -56,7 +53,7 @@ static inline int8_t q8(float v) {
 
 void pack_weights_i8(const float* W, int8_t* Wq, float* wscale, int N, int K) {
     // The panel index below is b = n/16, so a partial trailing block writes past
-    // the buffer packed_i8_floats sized. Both callers check this
+    // the buffer packed_i8_words sized. Both callers check this
     // (nn::Linear::init_int8, nn::Conv2d::init_int8); assert so a third cannot
     // discover it as heap corruption.
     assert(N % 16 == 0 && "pack_weights_i8 requires N % 16 == 0");

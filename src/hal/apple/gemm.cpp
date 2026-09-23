@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Apple-Silicon NEON GEMM backend (M4 tuning, verbatim from the m4 branch).
+// Apple-Silicon NEON GEMM backend (M4 tuning).
 // These are the hand kernels used when Accelerate routing is off (TCPU_ACCEL=0)
 // or for shapes the model does not send to BLAS; with TCPU_ACCEL on (default),
 // Gemm/Mlp-role linears go to the AMX units via hal/blas instead. 6x16
@@ -14,24 +14,11 @@
 #if TCPU_HAL_APPLE
 
 #include "../simd.h"
-#include "../common/env.h"
 #include "../../ops/lm_ops.h"
-#include <cstdint>
-#include <cstring>
-#include <vector>
 #include <cstddef>
 using std::size_t;
 
 namespace tcpu {
-using hal::env::gemm_threads;
-#if defined(_OPENMP)
-namespace {
-inline int gemm_chunk4() {
-    const int c = hal::env::gemm_chunk();
-    return c > 0 ? c : 4;
-}
-}
-#endif
 
 // NEON mirror of the AVX2 4-row micro-kernel: 4 rows x 2 chains (K unrolled by 8)
 // = 8 independent FMA chains at width 4.
@@ -93,7 +80,7 @@ static inline void mm_block4(float* out, const float* x,
 void dense_linear(float* out, const float* x, const float* W, const float* bias,
                   int seq, int N, int K) {
     // Register-blocked micro-kernel; threaded over row-blocks. Sums are reordered vs a plain
-    // dot -> within the fp32 noise floor (see CONVENTIONS: SIMD FMA ops may reorder sums).
+    // dot -> within the fp32 noise floor (SIMD FMA ops may reorder sums).
     constexpr int NR = 4;
     const int nblocks = (N+NR-1)/NR;
 #if defined(_OPENMP)
@@ -175,14 +162,6 @@ void dense_linear_packed(float* out, const float* x, const float* Wp, const floa
                     bias, rows, N, K, b*16);
     };
 #if defined(_OPENMP)
-    const int gt = gemm_threads();
-    if (gt > 0) {
-        const int chunk = gemm_chunk4();
-        #pragma omp parallel for schedule(dynamic, chunk) collapse(2) num_threads(gt)
-        for (int b=0; b<nblocks; b++)
-            for (int m=0; m<mtiles; m++) tile(b, m);
-        return;
-    }
     #pragma omp parallel for schedule(static) collapse(2)
 #endif
     for (int b=0; b<nblocks; b++) {

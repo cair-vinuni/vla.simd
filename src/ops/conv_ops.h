@@ -25,8 +25,7 @@ void conv2d(float* out, const float* x, const float* W, const float* bias,
 void conv2d_packed(float* out, const float* x, const float* Wp, const float* bias,
                    int H, int Wd, int Cin, int Cout, int k, int stride, int pad);
 
-// Same conv, GEMM routed to a vendor BLAS (Accelerate/AMX on Apple); raw W layout.
-// W8A8 convolution (see hal/common/conv_i8.cpp). Weights are pre-packed by
+// W8A8 convolution (see hal/common/conv.cpp). Weights are pre-packed by
 // pack_weights_i8 over K = k*k*Cin; the activation scale is per input tensor.
 // xq_scratch is caller-owned and grown once, so a control loop allocates
 // nothing per frame.
@@ -34,15 +33,18 @@ void conv2d_i8(float* out, const float* x, const int8_t* Wq, const float* wscale
                const float* bias, int H, int Wd, int Cin, int Cout, int k,
                int stride, int pad, std::vector<int8_t>& xq_scratch);
 
+// Same conv, GEMM routed to a vendor BLAS (Accelerate/AMX on Apple); raw W layout.
 void conv2d_blas(float* out, const float* x, const float* W, const float* bias,
                  int H, int Wd, int Cin, int Cout, int k, int stride, int pad);
+
+// extract [n_patches, patch_dim] with per-patch order (ic, kh, kw), matching the conv
+// weight reshape [hidden, ic*patch*patch + kh*patch + kw].
+void extract_patches(const float* pixels, int img, int patch, float* out);
 
 // Max pooling, square kernel/stride, symmetric padding. Single image, channel-last:
 //   x [H, W, C]  ->  out [Hout, Wout, C],  Hout = (H + 2*pad - k)/stride + 1.
 // Padded cells count as -inf (torch MaxPool2d, ceil_mode=false).
-void maxpool2d(float* out, const float* x, int H, int Wd, int C, int k, int stride, int pad);
-
-// maxpool2d with the preceding ReLU folded into its epilogue, for the ResNet stem
+// The preceding ReLU is folded into its epilogue, for the ResNet stem
 // where the pool is the relu'd map's only consumer. ReLU is monotonic, so
 // max_i relu(v_i) == max(0, max_i v_i) == relu(max_i v_i): the two orders are the
 // same float, and running the pool first means relu touches the pooled map (4x
@@ -57,14 +59,7 @@ void maxpool2d_relu(float* out, const float* x, int H, int Wd, int C, int k, int
 // sequence is the "length" axis and channels stay last, so groupnorm() below
 // applies unchanged with n_pixels = T.
 
-// 1D convolution, symmetric zero padding.
-//   x [T, Cin] -> out [Tout, Cout],  Tout = (T + 2*pad - k)/stride + 1.
-// W is [Cout, k, Cin] row-major (torch Conv1d weight is [Cout, Cin, k]; the
-// converter transposes). bias optional.
-void conv1d(float* out, const float* x, const float* W, const float* bias,
-            int T, int Cin, int Cout, int k, int stride, int pad);
-
-// The im2col expansion conv1d runs on, exposed because the UNet's blocks hold
+// The 1D im2col expansion, exposed because the UNet's blocks hold
 // their weights as nn::Linear (packed panels) and drive the GEMM themselves:
 //   col [Tout, k*Cin], row ot = the k taps at ot*stride - pad, zero outside.
 void im2col1d(std::vector<float>& col, const float* x, int T, int Cin,

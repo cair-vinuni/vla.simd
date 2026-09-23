@@ -6,13 +6,14 @@
 
 #pragma once
 #include <cstdint>
+#include <cstring>
 
 // Portable LM-layer op API. Layout convention:
 //   activations: row-major [seq, hidden], element (t,h) at x[t*hidden + h]
 //   heads:       row-major [seq, n_heads, head_dim]
 // Implementations live in src/hal/ (one backend per target: x86 AVX2,
 // Apple-Silicon NEON + Accelerate, generic ARM NEON, scalar). Callers see the
-// same math a given platform's hardware branch shipped; see docs/07-hal-design.md.
+// same math a given platform's hardware branch shipped.
 
 namespace tcpu {
 
@@ -88,6 +89,13 @@ void dense_linear(float* out, const float* x, const float* W, const float* bias,
 // resident weights stay half-size. Activations + accumulation are fp32.
 void dense_linear_bf16(float* out, const float* x, const uint16_t* W, const float* bias,
                        int seq, int N, int K);
+
+inline float bf16_f32(uint16_t h) {
+    const uint32_t u = (uint32_t)h << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
 
 // Packed-panel GEMM (BLIS-style 6x16 micro-kernel). The C tile lives in registers, so
 // the inner loop is FMA-bound instead of load-port-bound like the row-blocked kernel

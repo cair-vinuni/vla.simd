@@ -53,11 +53,6 @@ int attn_dynamic() {
     return v;
 }
 
-bool attn_dense() {
-    static const bool v = flag_on("TCPU_ATTN_DENSE", true);
-    return v;
-}
-
 int attn_qblock() {
     static const int v = [] {
         const int n = int_env("TCPU_ATTN_QB", 16);   // measured best on Cortex-A76
@@ -183,16 +178,6 @@ bool gemm_force_static() {
     return v;
 }
 
-int gemm_threads() {
-    static const int v = int_env("TCPU_GEMM_THREADS", 0);
-    return v;
-}
-
-int gemm_chunk() {
-    static const int v = int_env("TCPU_GEMM_CHUNK", 0);   // 0 = unset
-    return v;
-}
-
 int omp_min() {
     static const int v = std::max(0, int_env("TCPU_OMP_MIN", 8192));
     return v;
@@ -200,16 +185,6 @@ int omp_min() {
 
 int i8_mblock() {
     static const int v = int_env("TCPU_I8_MBLOCK", 128);   // token rows held resident
-    return v;
-}
-
-int gemm_mblock() {
-    // Off by default: measured neutral (752 vs 754 ms, min of 5, SmolVLA on a
-    // Core Ultra 9 285K), where a 36 MB L3 already holds the activation matrix
-    // and the re-streaming it removes was hitting cache anyway. Kept as a hook
-    // for small-cache targets, where the int8 kernel's identical blocking is
-    // worth up to 1.8x; it needs a measurement on one of those before it moves.
-    static const int v = int_env("TCPU_GEMM_MBLOCK", 0);
     return v;
 }
 

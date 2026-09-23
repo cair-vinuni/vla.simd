@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Apple-Silicon masked attention (M4 tuning, verbatim from the m4 branch).
+// Apple-Silicon masked attention (M4 tuning).
 // Two engines: per-head sgemm on the AMX units (TCPU_ATTN_BLAS, needs the
 // pre-transposed K panel) and the key-vectorized NEON path with dynamic
 // query-row scheduling (TCPU_ATTN_DYNAMIC; hybrid P/E cores).
@@ -14,16 +14,16 @@
 
 #include "../simd.h"
 #include "../common/env.h"
+#include "../common/layout.h"
 #include "../../ops/lm_ops.h"
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <vector>
+#include <cstddef>
+using std::size_t;
 
 #if defined(TCPU_ACCELERATE)
 #include <Accelerate/Accelerate.h>
-#include <cstddef>
-using std::size_t;
 #endif
 
 namespace tcpu {
@@ -54,12 +54,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
 #if defined(_OPENMP)
         #pragma omp parallel for schedule(static)
 #endif
-        for (int t1=0; t1<seq_q; t1++) {
-            const float* mrow = mask+(size_t)t1*seq_k;
-            int jmax = seq_k;
-            while (jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest()) jmax--;
-            jmp[t1] = jmax;
-        }
+        for (int t1=0; t1<seq_q; t1++)
+            jmp[t1] = hal::row_bound(mask+(size_t)t1*seq_k, seq_k);
 
         for (int h=0; h<n_q; h++) {
             const int kv = h/group;
@@ -141,10 +137,10 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         return;
     }
 #endif
-    // Key-vectorized path at NEON width (see the AVX2 comments above): K^T
-    // [kv][d][key] built once (or taken from K_pre), scores for 16 keys per pass
-    // with the q broadcast coming from a lane of one 4-float load
-    // (vfmaq_laneq_f32), softmax max/exp/sum vectorized with exp_ps.
+    // Key-vectorized path at NEON width: K^T [kv][d][key] built once (or taken
+    // from K_pre), scores for 16 keys per pass with the q broadcast coming from a
+    // lane of one 4-float load (vfmaq_laneq_f32), softmax max/exp/sum vectorized
+    // with exp_ps.
     const int skp = (seq_k+7) & ~7;
     const float* KTp = K_pre;
     if (!KTp) {
@@ -152,21 +148,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         // OpenMP worker would see its own (empty) thread_local instance.
         static thread_local std::vector<float> KT;
         if (KT.size() < (size_t)n_kv*head_dim*skp) KT.resize((size_t)n_kv*head_dim*skp);
-        float* const KTw = KT.data();
-#if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
-#endif
-        for (int jb=0; jb<skp; jb+=8) {
-            const int je = seq_k-jb < 8 ? seq_k-jb : 8;
-            for (int kv=0; kv<n_kv; kv++)
-                for (int d=0; d<head_dim; d++) {
-                    float* dst = KTw+((size_t)kv*head_dim+d)*skp+jb;
-                    for (int j=0; j<je; j++)
-                        dst[j] = K[((size_t)(jb+j)*n_kv+kv)*head_dim+d];
-                    for (int j=je; j<8; j++) dst[j] = 0.0f;
-                }
-        }
-        KTp = KTw;
+        hal::transpose_kt(KT.data(), K, seq_k, n_kv, head_dim, skp);
+        KTp = KT.data();
     }
     // TCPU_ATTN_DYNAMIC=N runs the query-row loop schedule(dynamic, N): rows have
     // uneven work (block-causal jmax) and hybrid P/E cores amplify the static-chunk
@@ -187,8 +170,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         const float* kt   = KTp+(size_t)kv*head_dim*skp;
 
         // bound the QK/softmax loops at the last allowed key (bit-exact)
-        int jmax = seq_k;
-        while (jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest()) jmax--;
+        const int jmax = hal::row_bound(mrow, seq_k);
         if (jmax == 0) {   // fully-masked row -> uniform over all keys (dense semantics)
             const float u = 1.0f/(float)seq_k;
             float* o = out+((size_t)t1*n_q+h)*head_dim;

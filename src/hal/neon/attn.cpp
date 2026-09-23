@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Pi / generic ARM NEON masked attention (raspi tuning, verbatim). Mask-density
+// Pi / generic ARM NEON masked attention (raspi tuning). Mask-density
 // dispatch: sparse rows (history padding) take the per-key SKIP loop
 // (bit-exact vs scalar); dense rows take the 4-query-tiled kernel that cuts
 // K/V traffic 4x (the op is L2-bandwidth-bound on the A72). TCPU_ATTN forces
@@ -18,7 +18,6 @@
 #include "../common/layout.h"
 #include "../../ops/lm_ops.h"
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -87,7 +86,7 @@ static void attn_row_skip_neon(float* o, const float* q, const float* mrow,
 
 // One masked-attention query row against a per-head transposed K panel
 // kt = [head_dim][skp] (key direction contiguous). Vectorized QK (lane-FMLA),
-// softmax (exp_ps_neon; blocked keys flush to weight exactly 0), jmax row bound,
+// softmax (exp_ps; blocked keys flush to weight exactly 0), jmax row bound,
 // register-resident AV for head_dim 64. Used for tile tails and head_dim != 64;
 // the 4-query tiled path in gqa_attention_masked computes identical floats.
 static void attn_row_kt_neon(float* o, const float* q, const float* mrow,
@@ -96,8 +95,7 @@ static void attn_row_kt_neon(float* o, const float* q, const float* mrow,
                              float* sc) {
     const float NINF = -std::numeric_limits<float>::infinity();
 
-    int jmax = seq_k;
-    while (jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest()) jmax--;
+    const int jmax = hal::row_bound(mrow, seq_k);
     if (jmax == 0) {   // fully-masked row -> uniform over all keys (dense semantics)
         const float u = 1.0f/(float)seq_k;
         for (int d=0; d<head_dim; d++) o[d] = 0.0f;
@@ -190,7 +188,7 @@ static void attn_row_kt_neon(float* o, const float* q, const float* mrow,
         const float32x4_t vm = vdupq_n_f32(maxs);
         float32x4_t vsum = vdupq_n_f32(0.0f);
         for (j=0; j<skq; j+=4) {
-            const float32x4_t e = exp_ps_neon(vsubq_f32(vld1q_f32(sc+j), vm));
+            const float32x4_t e = exp_ps(vsubq_f32(vld1q_f32(sc+j), vm));
             vst1q_f32(sc+j, e);
             vsum = vaddq_f32(vsum, e);
         }
@@ -221,6 +219,138 @@ static void attn_row_kt_neon(float* o, const float* q, const float* mrow,
     }
 }
 
+__attribute__((always_inline))
+static inline void qk4x16(float* s, int skp, const float* qt, const float* kt,
+                          float32x4_t vscale4) {
+    float32x4_t a00 = vdupq_n_f32(0.0f);
+    float32x4_t a01 = a00, a02 = a00, a03 = a00;
+    float32x4_t a10 = a00, a11 = a00, a12 = a00, a13 = a00;
+    float32x4_t a20 = a00, a21 = a00, a22 = a00, a23 = a00;
+    float32x4_t a30 = a00, a31 = a00, a32 = a00, a33 = a00;
+
+    for (int d=0; d<64; d++) {
+        const float32x4_t qv = vld1q_f32(qt+d*4);
+        const float* kr = kt+(size_t)d*skp;
+        const float32x4_t k0 = vld1q_f32(kr);
+        const float32x4_t k1 = vld1q_f32(kr+4);
+        const float32x4_t k2 = vld1q_f32(kr+8);
+        const float32x4_t k3 = vld1q_f32(kr+12);
+        a00 = vfmaq_laneq_f32(a00, k0, qv, 0);
+        a01 = vfmaq_laneq_f32(a01, k1, qv, 0);
+        a02 = vfmaq_laneq_f32(a02, k2, qv, 0);
+        a03 = vfmaq_laneq_f32(a03, k3, qv, 0);
+        a10 = vfmaq_laneq_f32(a10, k0, qv, 1);
+        a11 = vfmaq_laneq_f32(a11, k1, qv, 1);
+        a12 = vfmaq_laneq_f32(a12, k2, qv, 1);
+        a13 = vfmaq_laneq_f32(a13, k3, qv, 1);
+        a20 = vfmaq_laneq_f32(a20, k0, qv, 2);
+        a21 = vfmaq_laneq_f32(a21, k1, qv, 2);
+        a22 = vfmaq_laneq_f32(a22, k2, qv, 2);
+        a23 = vfmaq_laneq_f32(a23, k3, qv, 2);
+        a30 = vfmaq_laneq_f32(a30, k0, qv, 3);
+        a31 = vfmaq_laneq_f32(a31, k1, qv, 3);
+        a32 = vfmaq_laneq_f32(a32, k2, qv, 3);
+        a33 = vfmaq_laneq_f32(a33, k3, qv, 3);
+    }
+    float* s0 = s;
+    float* s1 = s+skp;
+    float* s2 = s+2*(size_t)skp;
+    float* s3 = s+3*(size_t)skp;
+    vst1q_f32(s0,    vmulq_f32(a00, vscale4));
+    vst1q_f32(s0+4,  vmulq_f32(a01, vscale4));
+    vst1q_f32(s0+8,  vmulq_f32(a02, vscale4));
+    vst1q_f32(s0+12, vmulq_f32(a03, vscale4));
+    vst1q_f32(s1,    vmulq_f32(a10, vscale4));
+    vst1q_f32(s1+4,  vmulq_f32(a11, vscale4));
+    vst1q_f32(s1+8,  vmulq_f32(a12, vscale4));
+    vst1q_f32(s1+12, vmulq_f32(a13, vscale4));
+    vst1q_f32(s2,    vmulq_f32(a20, vscale4));
+    vst1q_f32(s2+4,  vmulq_f32(a21, vscale4));
+    vst1q_f32(s2+8,  vmulq_f32(a22, vscale4));
+    vst1q_f32(s2+12, vmulq_f32(a23, vscale4));
+    vst1q_f32(s3,    vmulq_f32(a30, vscale4));
+    vst1q_f32(s3+4,  vmulq_f32(a31, vscale4));
+    vst1q_f32(s3+8,  vmulq_f32(a32, vscale4));
+    vst1q_f32(s3+12, vmulq_f32(a33, vscale4));
+}
+
+__attribute__((always_inline))
+static inline void qk4x4(float* s, int skp, const float* qt, const float* kt,
+                         float32x4_t vscale4) {
+    float32x4_t a0 = vdupq_n_f32(0.0f);
+    float32x4_t a1 = a0, a2 = a0, a3 = a0;
+    for (int d=0; d<64; d++) {
+        const float32x4_t qv = vld1q_f32(qt+d*4);
+        const float32x4_t k0 = vld1q_f32(kt+(size_t)d*skp);
+        a0 = vfmaq_laneq_f32(a0, k0, qv, 0);
+        a1 = vfmaq_laneq_f32(a1, k0, qv, 1);
+        a2 = vfmaq_laneq_f32(a2, k0, qv, 2);
+        a3 = vfmaq_laneq_f32(a3, k0, qv, 3);
+    }
+    vst1q_f32(s,               vmulq_f32(a0, vscale4));
+    vst1q_f32(s+skp,           vmulq_f32(a1, vscale4));
+    vst1q_f32(s+2*(size_t)skp, vmulq_f32(a2, vscale4));
+    vst1q_f32(s+3*(size_t)skp, vmulq_f32(a3, vscale4));
+}
+
+template <bool SKIP>
+__attribute__((always_inline))
+static inline void av4x16(float* o, size_t ldo, int rows, const float* w, int skp,
+                          const float* v, size_t ldv, int n) {
+    const float* w0 = w;
+    const float* w1 = w+skp;
+    const float* w2 = w+2*(size_t)skp;
+    const float* w3 = w+3*(size_t)skp;
+
+    float32x4_t b00 = vdupq_n_f32(0.0f);
+    float32x4_t b01 = b00, b02 = b00, b03 = b00;
+    float32x4_t b10 = b00, b11 = b00, b12 = b00, b13 = b00;
+    float32x4_t b20 = b00, b21 = b00, b22 = b00, b23 = b00;
+    float32x4_t b30 = b00, b31 = b00, b32 = b00, b33 = b00;
+
+    for (int t2=0; t2<n; t2++) {
+        float32x4_t pv = vdupq_n_f32(w0[t2]);
+        pv = vsetq_lane_f32(w1[t2], pv, 1);
+        pv = vsetq_lane_f32(w2[t2], pv, 2);
+        pv = vsetq_lane_f32(w3[t2], pv, 3);
+        if (SKIP && vmaxvq_f32(pv) == 0.0f) continue;   // weights are >= 0
+
+        const float* vv = v+(size_t)t2*ldv;
+        const float32x4_t v0 = vld1q_f32(vv);
+        const float32x4_t v1 = vld1q_f32(vv+4);
+        const float32x4_t v2 = vld1q_f32(vv+8);
+        const float32x4_t v3 = vld1q_f32(vv+12);
+        b00 = vfmaq_laneq_f32(b00, v0, pv, 0);
+        b01 = vfmaq_laneq_f32(b01, v1, pv, 0);
+        b02 = vfmaq_laneq_f32(b02, v2, pv, 0);
+        b03 = vfmaq_laneq_f32(b03, v3, pv, 0);
+        b10 = vfmaq_laneq_f32(b10, v0, pv, 1);
+        b11 = vfmaq_laneq_f32(b11, v1, pv, 1);
+        b12 = vfmaq_laneq_f32(b12, v2, pv, 1);
+        b13 = vfmaq_laneq_f32(b13, v3, pv, 1);
+        b20 = vfmaq_laneq_f32(b20, v0, pv, 2);
+        b21 = vfmaq_laneq_f32(b21, v1, pv, 2);
+        b22 = vfmaq_laneq_f32(b22, v2, pv, 2);
+        b23 = vfmaq_laneq_f32(b23, v3, pv, 2);
+        b30 = vfmaq_laneq_f32(b30, v0, pv, 3);
+        b31 = vfmaq_laneq_f32(b31, v1, pv, 3);
+        b32 = vfmaq_laneq_f32(b32, v2, pv, 3);
+        b33 = vfmaq_laneq_f32(b33, v3, pv, 3);
+    }
+
+    if (rows > 0) { vst1q_f32(o, b00); vst1q_f32(o+4, b01);
+                    vst1q_f32(o+8, b02); vst1q_f32(o+12, b03); }
+    if (rows > 1) { float* o1 = o+ldo;
+                    vst1q_f32(o1, b10); vst1q_f32(o1+4, b11);
+                    vst1q_f32(o1+8, b12); vst1q_f32(o1+12, b13); }
+    if (rows > 2) { float* o2 = o+2*ldo;
+                    vst1q_f32(o2, b20); vst1q_f32(o2+4, b21);
+                    vst1q_f32(o2+8, b22); vst1q_f32(o2+12, b23); }
+    if (rows > 3) { float* o3 = o+3*ldo;
+                    vst1q_f32(o3, b30); vst1q_f32(o3+4, b31);
+                    vst1q_f32(o3+8, b32); vst1q_f32(o3+12, b33); }
+}
+
 void gqa_attention_masked(float* out, const float* Q, const float* K, const float* V,
                           int seq_q, int seq_k, int n_q, int n_kv, int head_dim,
                           float scale, const float* mask,
@@ -228,10 +358,10 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
     // ponytail: this path transposes K itself; K_pre is an AVX2-only shortcut.
     const int group = n_q / n_kv;
     const float NINF = -std::numeric_limits<float>::infinity();
-    // Key-vectorized path, NEON port of the AVX2 block above. K is transposed once
+    // Key-vectorized path, NEON port of the AVX2 block. K is transposed once
     // per call to [kv][d][key] (thread_local arena) so the key direction is
     // contiguous; scores for 16 keys/pass via lane-FMLA from a loaded q vector;
-    // softmax max/exp/sum vectorized (exp_ps_neon's deep-negative clamp flushes
+    // softmax max/exp/sum vectorized (exp_ps's deep-negative clamp flushes
     // blocked keys to weight exactly 0, so the AV zero-skip still works).
     //
     // HISTORY: an earlier 4-keys/pass variant WITHOUT the transpose read K at
@@ -290,19 +420,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
     static thread_local std::vector<float> KT;
     if (KT.size() < (size_t)n_kv*head_dim*skp) KT.resize((size_t)n_kv*head_dim*skp);
     float* const KTw = KT.data();   // hoisted BEFORE the parallel regions (see AVX2 note)
-#if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
-#endif
-    for (int jb=0; jb<skp; jb+=4) {
-        const int je = seq_k-jb < 4 ? seq_k-jb : 4;
-        for (int kv=0; kv<n_kv; kv++)
-            for (int d=0; d<head_dim; d++) {
-                float* dst = KTw+((size_t)kv*head_dim+d)*skp+jb;
-                for (int j=0; j<je; j++)
-                    dst[j] = K[((size_t)(jb+j)*n_kv+kv)*head_dim+d];
-                for (int j=je; j<4; j++) dst[j] = 0.0f;
-            }
-    }
+    hal::transpose_kt(KTw, K, seq_k, n_kv, head_dim, skp);
 
     // 4-query tiles: attention here is L2-bandwidth-bound on the A72 (each query
     // streams its head's whole K^T/V panels, which exceed L1), so the win comes
@@ -348,8 +466,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
             mr[r] = mask+(size_t)(tq0+r)*seq_k;
             sc[r] = scores.data()+(size_t)r*skp;
 
-            int jm = seq_k;   // per-row bound at the last allowed key
-            while (jm > 0 && mr[r][jm-1] == std::numeric_limits<float>::lowest()) jm--;
+            const int jm = hal::row_bound(mr[r], seq_k);   // per-row bound at the last allowed key
             jmax[r] = jm;
             if (jm > jmax_t) jmax_t = jm;
         }
@@ -372,83 +489,10 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         // lane-FMLAs (16 accumulators + 4 K vectors + 1 q vector = 21 live regs)
         const float32x4_t vscale4 = vdupq_n_f32(scale);
         int j = 0;
-        for (; j+16<=skq; j+=16) {
-            float32x4_t a00 = vdupq_n_f32(0.0f);
-            float32x4_t a01 = a00;
-            float32x4_t a02 = a00;
-            float32x4_t a03 = a00;
-            float32x4_t a10 = a00;
-            float32x4_t a11 = a00;
-            float32x4_t a12 = a00;
-            float32x4_t a13 = a00;
-            float32x4_t a20 = a00;
-            float32x4_t a21 = a00;
-            float32x4_t a22 = a00;
-            float32x4_t a23 = a00;
-            float32x4_t a30 = a00;
-            float32x4_t a31 = a00;
-            float32x4_t a32 = a00;
-            float32x4_t a33 = a00;
-
-            for (int d=0; d<64; d++) {
-                const float32x4_t qv = vld1q_f32(qt+d*4);
-                const float* kr = kt+(size_t)d*skp+j;
-                const float32x4_t k0 = vld1q_f32(kr);
-                const float32x4_t k1 = vld1q_f32(kr+4);
-                const float32x4_t k2 = vld1q_f32(kr+8);
-                const float32x4_t k3 = vld1q_f32(kr+12);
-                a00 = vfmaq_laneq_f32(a00, k0, qv, 0);
-                a01 = vfmaq_laneq_f32(a01, k1, qv, 0);
-                a02 = vfmaq_laneq_f32(a02, k2, qv, 0);
-                a03 = vfmaq_laneq_f32(a03, k3, qv, 0);
-                a10 = vfmaq_laneq_f32(a10, k0, qv, 1);
-                a11 = vfmaq_laneq_f32(a11, k1, qv, 1);
-                a12 = vfmaq_laneq_f32(a12, k2, qv, 1);
-                a13 = vfmaq_laneq_f32(a13, k3, qv, 1);
-                a20 = vfmaq_laneq_f32(a20, k0, qv, 2);
-                a21 = vfmaq_laneq_f32(a21, k1, qv, 2);
-                a22 = vfmaq_laneq_f32(a22, k2, qv, 2);
-                a23 = vfmaq_laneq_f32(a23, k3, qv, 2);
-                a30 = vfmaq_laneq_f32(a30, k0, qv, 3);
-                a31 = vfmaq_laneq_f32(a31, k1, qv, 3);
-                a32 = vfmaq_laneq_f32(a32, k2, qv, 3);
-                a33 = vfmaq_laneq_f32(a33, k3, qv, 3);
-            }
-            vst1q_f32(sc[0]+j,    vmulq_f32(a00, vscale4));
-            vst1q_f32(sc[0]+j+4,  vmulq_f32(a01, vscale4));
-            vst1q_f32(sc[0]+j+8,  vmulq_f32(a02, vscale4));
-            vst1q_f32(sc[0]+j+12, vmulq_f32(a03, vscale4));
-            vst1q_f32(sc[1]+j,    vmulq_f32(a10, vscale4));
-            vst1q_f32(sc[1]+j+4,  vmulq_f32(a11, vscale4));
-            vst1q_f32(sc[1]+j+8,  vmulq_f32(a12, vscale4));
-            vst1q_f32(sc[1]+j+12, vmulq_f32(a13, vscale4));
-            vst1q_f32(sc[2]+j,    vmulq_f32(a20, vscale4));
-            vst1q_f32(sc[2]+j+4,  vmulq_f32(a21, vscale4));
-            vst1q_f32(sc[2]+j+8,  vmulq_f32(a22, vscale4));
-            vst1q_f32(sc[2]+j+12, vmulq_f32(a23, vscale4));
-            vst1q_f32(sc[3]+j,    vmulq_f32(a30, vscale4));
-            vst1q_f32(sc[3]+j+4,  vmulq_f32(a31, vscale4));
-            vst1q_f32(sc[3]+j+8,  vmulq_f32(a32, vscale4));
-            vst1q_f32(sc[3]+j+12, vmulq_f32(a33, vscale4));
-        }
-        for (; j+4<=skq; j+=4) {   // 4-key tail
-            float32x4_t a0 = vdupq_n_f32(0.0f);
-            float32x4_t a1 = a0;
-            float32x4_t a2 = a0;
-            float32x4_t a3 = a0;
-            for (int d=0; d<64; d++) {
-                const float32x4_t qv = vld1q_f32(qt+d*4);
-                const float32x4_t k0 = vld1q_f32(kt+(size_t)d*skp+j);
-                a0 = vfmaq_laneq_f32(a0, k0, qv, 0);
-                a1 = vfmaq_laneq_f32(a1, k0, qv, 1);
-                a2 = vfmaq_laneq_f32(a2, k0, qv, 2);
-                a3 = vfmaq_laneq_f32(a3, k0, qv, 3);
-            }
-            vst1q_f32(sc[0]+j, vmulq_f32(a0, vscale4));
-            vst1q_f32(sc[1]+j, vmulq_f32(a1, vscale4));
-            vst1q_f32(sc[2]+j, vmulq_f32(a2, vscale4));
-            vst1q_f32(sc[3]+j, vmulq_f32(a3, vscale4));
-        }
+        for (; j+16<=skq; j+=16)
+            qk4x16(scores.data()+j, skp, qt, kt+j, vscale4);
+        for (; j+4<=skq; j+=4)   // 4-key tail
+            qk4x4(scores.data()+j, skp, qt, kt+j, vscale4);
 
         // per-row mask + softmax + prescale by 1/sum (weights land in sc[r])
         int av_end[4];
@@ -477,7 +521,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
                 const float32x4_t vm = vdupq_n_f32(maxs);
                 float32x4_t vsum = vdupq_n_f32(0.0f);
                 for (jj=0; jj<skq; jj+=4) {
-                    const float32x4_t e = exp_ps_neon(vsubq_f32(vld1q_f32(s+jj), vm));
+                    const float32x4_t e = exp_ps(vsubq_f32(vld1q_f32(s+jj), vm));
                     vst1q_f32(s+jj, e);
                     vsum = vaddq_f32(vsum, e);
                 }
@@ -497,73 +541,9 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         // all 4 rows (16 accumulators + 4 V vectors + 1 weight vector = 21 regs).
         // Keys where all 4 weights are 0 are skipped; a 0-weight FMA adds exact
         // zeros, so results match the per-row zero-skip path bit-for-bit.
-        float* o[4];
-        for (int r=0; r<4; r++) o[r] = out+((size_t)(tq0+r)*n_q+h)*64;
-
-        for (int c=0; c<64; c+=16) {
-            float32x4_t b00 = vdupq_n_f32(0.0f);
-            float32x4_t b01 = b00;
-            float32x4_t b02 = b00;
-            float32x4_t b03 = b00;
-            float32x4_t b10 = b00;
-            float32x4_t b11 = b00;
-            float32x4_t b12 = b00;
-            float32x4_t b13 = b00;
-            float32x4_t b20 = b00;
-            float32x4_t b21 = b00;
-            float32x4_t b22 = b00;
-            float32x4_t b23 = b00;
-            float32x4_t b30 = b00;
-            float32x4_t b31 = b00;
-            float32x4_t b32 = b00;
-            float32x4_t b33 = b00;
-
-            for (int t2=0; t2<av_end_t; t2++) {
-                float32x4_t pv = vdupq_n_f32(sc[0][t2]);
-                pv = vsetq_lane_f32(sc[1][t2], pv, 1);
-                pv = vsetq_lane_f32(sc[2][t2], pv, 2);
-                pv = vsetq_lane_f32(sc[3][t2], pv, 3);
-                if (vmaxvq_f32(pv) == 0.0f) continue;   // weights are >= 0
-
-                const float* vv = V+((size_t)t2*n_kv+kv)*64+c;
-                const float32x4_t v0 = vld1q_f32(vv);
-                const float32x4_t v1 = vld1q_f32(vv+4);
-                const float32x4_t v2 = vld1q_f32(vv+8);
-                const float32x4_t v3 = vld1q_f32(vv+12);
-                b00 = vfmaq_laneq_f32(b00, v0, pv, 0);
-                b01 = vfmaq_laneq_f32(b01, v1, pv, 0);
-                b02 = vfmaq_laneq_f32(b02, v2, pv, 0);
-                b03 = vfmaq_laneq_f32(b03, v3, pv, 0);
-                b10 = vfmaq_laneq_f32(b10, v0, pv, 1);
-                b11 = vfmaq_laneq_f32(b11, v1, pv, 1);
-                b12 = vfmaq_laneq_f32(b12, v2, pv, 1);
-                b13 = vfmaq_laneq_f32(b13, v3, pv, 1);
-                b20 = vfmaq_laneq_f32(b20, v0, pv, 2);
-                b21 = vfmaq_laneq_f32(b21, v1, pv, 2);
-                b22 = vfmaq_laneq_f32(b22, v2, pv, 2);
-                b23 = vfmaq_laneq_f32(b23, v3, pv, 2);
-                b30 = vfmaq_laneq_f32(b30, v0, pv, 3);
-                b31 = vfmaq_laneq_f32(b31, v1, pv, 3);
-                b32 = vfmaq_laneq_f32(b32, v2, pv, 3);
-                b33 = vfmaq_laneq_f32(b33, v3, pv, 3);
-            }
-            vst1q_f32(o[0]+c,    b00);
-            vst1q_f32(o[0]+c+4,  b01);
-            vst1q_f32(o[0]+c+8,  b02);
-            vst1q_f32(o[0]+c+12, b03);
-            vst1q_f32(o[1]+c,    b10);
-            vst1q_f32(o[1]+c+4,  b11);
-            vst1q_f32(o[1]+c+8,  b12);
-            vst1q_f32(o[1]+c+12, b13);
-            vst1q_f32(o[2]+c,    b20);
-            vst1q_f32(o[2]+c+4,  b21);
-            vst1q_f32(o[2]+c+8,  b22);
-            vst1q_f32(o[2]+c+12, b23);
-            vst1q_f32(o[3]+c,    b30);
-            vst1q_f32(o[3]+c+4,  b31);
-            vst1q_f32(o[3]+c+8,  b32);
-            vst1q_f32(o[3]+c+12, b33);
-        }
+        for (int c=0; c<64; c+=16)
+            av4x16<true>(out+((size_t)tq0*n_q+h)*64+c, (size_t)n_q*64, 4, scores.data(), skp,
+                         V+(size_t)kv*64+c, (size_t)n_kv*64, av_end_t);
     }
   }
 }
@@ -583,7 +563,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
 //       block before the next slice is touched;
 //   AV  runs 16-dim-column-outer, so V's column slice (seq_k*16*4 B) stays in L2
 //       across the block's micro-tiles.
-// Panel traffic drops by QB/4 - 16x at the default QB=64.
+// Panel traffic drops by QB/4.
 //
 // The micro-kernels are the masked path's, with the mask, the jmax row bound and
 // the zero-weight skip removed. With an all-zero mask each of those is a no-op
@@ -611,80 +591,12 @@ static void attn_dense_qblock(float* out, const float* Q, const float* vp,
     // ---- QK, keys outer: kt's 16-key slice is loaded once for the whole block
     const float32x4_t vscale4 = vdupq_n_f32(scale);
     int j = 0;
-    for (; j+16<=skq; j+=16) {
-        for (int t=0; t<nt; t++) {
-            const float* qtile = qt+(size_t)t*64*4;
-            float32x4_t a00 = vdupq_n_f32(0.0f);
-            float32x4_t a01 = a00, a02 = a00, a03 = a00;
-            float32x4_t a10 = a00, a11 = a00, a12 = a00, a13 = a00;
-            float32x4_t a20 = a00, a21 = a00, a22 = a00, a23 = a00;
-            float32x4_t a30 = a00, a31 = a00, a32 = a00, a33 = a00;
-
-            for (int d=0; d<64; d++) {
-                const float32x4_t qv = vld1q_f32(qtile+d*4);
-                const float* kr = kt+(size_t)d*skp+j;
-                const float32x4_t k0 = vld1q_f32(kr);
-                const float32x4_t k1 = vld1q_f32(kr+4);
-                const float32x4_t k2 = vld1q_f32(kr+8);
-                const float32x4_t k3 = vld1q_f32(kr+12);
-                a00 = vfmaq_laneq_f32(a00, k0, qv, 0);
-                a01 = vfmaq_laneq_f32(a01, k1, qv, 0);
-                a02 = vfmaq_laneq_f32(a02, k2, qv, 0);
-                a03 = vfmaq_laneq_f32(a03, k3, qv, 0);
-                a10 = vfmaq_laneq_f32(a10, k0, qv, 1);
-                a11 = vfmaq_laneq_f32(a11, k1, qv, 1);
-                a12 = vfmaq_laneq_f32(a12, k2, qv, 1);
-                a13 = vfmaq_laneq_f32(a13, k3, qv, 1);
-                a20 = vfmaq_laneq_f32(a20, k0, qv, 2);
-                a21 = vfmaq_laneq_f32(a21, k1, qv, 2);
-                a22 = vfmaq_laneq_f32(a22, k2, qv, 2);
-                a23 = vfmaq_laneq_f32(a23, k3, qv, 2);
-                a30 = vfmaq_laneq_f32(a30, k0, qv, 3);
-                a31 = vfmaq_laneq_f32(a31, k1, qv, 3);
-                a32 = vfmaq_laneq_f32(a32, k2, qv, 3);
-                a33 = vfmaq_laneq_f32(a33, k3, qv, 3);
-            }
-            float* s0 = scores+(size_t)(t*4+0)*skp+j;
-            float* s1 = scores+(size_t)(t*4+1)*skp+j;
-            float* s2 = scores+(size_t)(t*4+2)*skp+j;
-            float* s3 = scores+(size_t)(t*4+3)*skp+j;
-            vst1q_f32(s0,    vmulq_f32(a00, vscale4));
-            vst1q_f32(s0+4,  vmulq_f32(a01, vscale4));
-            vst1q_f32(s0+8,  vmulq_f32(a02, vscale4));
-            vst1q_f32(s0+12, vmulq_f32(a03, vscale4));
-            vst1q_f32(s1,    vmulq_f32(a10, vscale4));
-            vst1q_f32(s1+4,  vmulq_f32(a11, vscale4));
-            vst1q_f32(s1+8,  vmulq_f32(a12, vscale4));
-            vst1q_f32(s1+12, vmulq_f32(a13, vscale4));
-            vst1q_f32(s2,    vmulq_f32(a20, vscale4));
-            vst1q_f32(s2+4,  vmulq_f32(a21, vscale4));
-            vst1q_f32(s2+8,  vmulq_f32(a22, vscale4));
-            vst1q_f32(s2+12, vmulq_f32(a23, vscale4));
-            vst1q_f32(s3,    vmulq_f32(a30, vscale4));
-            vst1q_f32(s3+4,  vmulq_f32(a31, vscale4));
-            vst1q_f32(s3+8,  vmulq_f32(a32, vscale4));
-            vst1q_f32(s3+12, vmulq_f32(a33, vscale4));
-        }
-    }
-    for (; j+4<=skq; j+=4) {   // 4-key tail
-        for (int t=0; t<nt; t++) {
-            const float* qtile = qt+(size_t)t*64*4;
-            float32x4_t a0 = vdupq_n_f32(0.0f);
-            float32x4_t a1 = a0, a2 = a0, a3 = a0;
-            for (int d=0; d<64; d++) {
-                const float32x4_t qv = vld1q_f32(qtile+d*4);
-                const float32x4_t k0 = vld1q_f32(kt+(size_t)d*skp+j);
-                a0 = vfmaq_laneq_f32(a0, k0, qv, 0);
-                a1 = vfmaq_laneq_f32(a1, k0, qv, 1);
-                a2 = vfmaq_laneq_f32(a2, k0, qv, 2);
-                a3 = vfmaq_laneq_f32(a3, k0, qv, 3);
-            }
-            vst1q_f32(scores+(size_t)(t*4+0)*skp+j, vmulq_f32(a0, vscale4));
-            vst1q_f32(scores+(size_t)(t*4+1)*skp+j, vmulq_f32(a1, vscale4));
-            vst1q_f32(scores+(size_t)(t*4+2)*skp+j, vmulq_f32(a2, vscale4));
-            vst1q_f32(scores+(size_t)(t*4+3)*skp+j, vmulq_f32(a3, vscale4));
-        }
-    }
+    for (; j+16<=skq; j+=16)
+        for (int t=0; t<nt; t++)
+            qk4x16(scores+(size_t)t*4*skp+j, skp, qt+(size_t)t*64*4, kt+j, vscale4);
+    for (; j+4<=skq; j+=4)   // 4-key tail
+        for (int t=0; t<nt; t++)
+            qk4x4(scores+(size_t)t*4*skp+j, skp, qt+(size_t)t*64*4, kt+j, vscale4);
 
     // ---- softmax, per row, prescaled by 1/sum (same order as the masked path)
     for (int r=0; r<nq; r++) {
@@ -697,7 +609,7 @@ static void attn_dense_qblock(float* out, const float* Q, const float* vp,
 
         float32x4_t vsum = vdupq_n_f32(0.0f);
         for (int jj=0; jj<skq; jj+=4) {
-            const float32x4_t e = exp_ps_neon(vsubq_f32(vld1q_f32(s+jj), vm));
+            const float32x4_t e = exp_ps(vsubq_f32(vld1q_f32(s+jj), vm));
             vst1q_f32(s+jj, e);
             vsum = vaddq_f32(vsum, e);
         }
@@ -707,63 +619,11 @@ static void attn_dense_qblock(float* out, const float* Q, const float* vp,
     }
 
     // ---- AV, 16-dim column outer: V's column slice serves every micro-tile
-    for (int c=0; c<64; c+=16) {
-        for (int t=0; t<nt; t++) {
-            const int rows = nq-t*4 < 4 ? nq-t*4 : 4;
-            const float* w0 = scores+(size_t)(t*4+0)*skp;
-            const float* w1 = scores+(size_t)(t*4+1)*skp;
-            const float* w2 = scores+(size_t)(t*4+2)*skp;
-            const float* w3 = scores+(size_t)(t*4+3)*skp;
-
-            float32x4_t b00 = vdupq_n_f32(0.0f);
-            float32x4_t b01 = b00, b02 = b00, b03 = b00;
-            float32x4_t b10 = b00, b11 = b00, b12 = b00, b13 = b00;
-            float32x4_t b20 = b00, b21 = b00, b22 = b00, b23 = b00;
-            float32x4_t b30 = b00, b31 = b00, b32 = b00, b33 = b00;
-
-            for (int t2=0; t2<seq_k; t2++) {
-                float32x4_t pv = vdupq_n_f32(w0[t2]);
-                pv = vsetq_lane_f32(w1[t2], pv, 1);
-                pv = vsetq_lane_f32(w2[t2], pv, 2);
-                pv = vsetq_lane_f32(w3[t2], pv, 3);
-
-                const float* vv = vp+(size_t)t2*64+c;
-                const float32x4_t v0 = vld1q_f32(vv);
-                const float32x4_t v1 = vld1q_f32(vv+4);
-                const float32x4_t v2 = vld1q_f32(vv+8);
-                const float32x4_t v3 = vld1q_f32(vv+12);
-                b00 = vfmaq_laneq_f32(b00, v0, pv, 0);
-                b01 = vfmaq_laneq_f32(b01, v1, pv, 0);
-                b02 = vfmaq_laneq_f32(b02, v2, pv, 0);
-                b03 = vfmaq_laneq_f32(b03, v3, pv, 0);
-                b10 = vfmaq_laneq_f32(b10, v0, pv, 1);
-                b11 = vfmaq_laneq_f32(b11, v1, pv, 1);
-                b12 = vfmaq_laneq_f32(b12, v2, pv, 1);
-                b13 = vfmaq_laneq_f32(b13, v3, pv, 1);
-                b20 = vfmaq_laneq_f32(b20, v0, pv, 2);
-                b21 = vfmaq_laneq_f32(b21, v1, pv, 2);
-                b22 = vfmaq_laneq_f32(b22, v2, pv, 2);
-                b23 = vfmaq_laneq_f32(b23, v3, pv, 2);
-                b30 = vfmaq_laneq_f32(b30, v0, pv, 3);
-                b31 = vfmaq_laneq_f32(b31, v1, pv, 3);
-                b32 = vfmaq_laneq_f32(b32, v2, pv, 3);
-                b33 = vfmaq_laneq_f32(b33, v3, pv, 3);
-            }
-
-            float* o0 = out+((size_t)(q0+t*4+0)*n_q+h)*64+c;
-            if (rows > 0) { vst1q_f32(o0, b00); vst1q_f32(o0+4, b01);
-                            vst1q_f32(o0+8, b02); vst1q_f32(o0+12, b03); }
-            if (rows > 1) { float* o = out+((size_t)(q0+t*4+1)*n_q+h)*64+c;
-                            vst1q_f32(o, b10); vst1q_f32(o+4, b11);
-                            vst1q_f32(o+8, b12); vst1q_f32(o+12, b13); }
-            if (rows > 2) { float* o = out+((size_t)(q0+t*4+2)*n_q+h)*64+c;
-                            vst1q_f32(o, b20); vst1q_f32(o+4, b21);
-                            vst1q_f32(o+8, b22); vst1q_f32(o+12, b23); }
-            if (rows > 3) { float* o = out+((size_t)(q0+t*4+3)*n_q+h)*64+c;
-                            vst1q_f32(o, b30); vst1q_f32(o+4, b31);
-                            vst1q_f32(o+8, b32); vst1q_f32(o+12, b33); }
-        }
-    }
+    for (int c=0; c<64; c+=16)
+        for (int t=0; t<nt; t++)
+            av4x16<false>(out+((size_t)(q0+t*4)*n_q+h)*64+c, (size_t)n_q*64,
+                          nq-t*4 < 4 ? nq-t*4 : 4, scores+(size_t)t*4*skp, skp,
+                          vp+c, 64, seq_k);
 }
 
 void gqa_attention_dense(float* out, const float* Q, const float* K, const float* V,
@@ -772,12 +632,13 @@ void gqa_attention_dense(float* out, const float* Q, const float* K, const float
     const int group = n_q/n_kv;
     const int skp   = K_pre ? hal::kt_stride(seq_k) : ((seq_k+3) & ~3);
 
-    if (!hal::env::attn_dense()) {   // A/B: the pre-dense-path behaviour
-        static thread_local std::vector<float> zero;
-        if (zero.size() < (size_t)seq_q*seq_k) zero.assign((size_t)seq_q*seq_k, 0.0f);
-        gqa_attention_masked(out, Q, K, V, seq_q, seq_k, n_q, n_kv, head_dim,
-                             scale, zero.data(), K_pre);
-        return;
+    // K^T [kv][d][key], built once (the masked path's transpose, verbatim)
+    static thread_local std::vector<float> KT;
+    const float* KTr = K_pre;
+    if (!KTr) {
+        if (KT.size() < (size_t)n_kv*head_dim*skp) KT.resize((size_t)n_kv*head_dim*skp);
+        hal::transpose_kt(KT.data(), K, seq_k, n_kv, head_dim, skp);
+        KTr = KT.data();
     }
 
     // head_dim != 64 has no register-blocked micro-kernel; run the generic row
@@ -786,16 +647,6 @@ void gqa_attention_dense(float* out, const float* Q, const float* K, const float
         static thread_local std::vector<float> zrow;
         if ((int)zrow.size() < seq_k) zrow.assign(seq_k, 0.0f);
         const float* zr = zrow.data();
-        std::vector<float> KTv;
-        const float* KTw = K_pre;
-        if (!KTw) {
-            KTv.resize((size_t)n_kv*head_dim*skp, 0.0f);
-            for (int t2=0; t2<seq_k; t2++)
-                for (int kv=0; kv<n_kv; kv++)
-                    for (int d=0; d<head_dim; d++)
-                        KTv[((size_t)kv*head_dim+d)*skp+t2] = K[((size_t)t2*n_kv+kv)*head_dim+d];
-            KTw = KTv.data();
-        }
 #if defined(_OPENMP)
         #pragma omp parallel
 #endif
@@ -808,33 +659,11 @@ void gqa_attention_dense(float* out, const float* Q, const float* K, const float
             const int h = qi/seq_q, t1 = qi%seq_q, kv = h/group;
             attn_row_kt_neon(out+((size_t)t1*n_q+h)*head_dim,
                              Q+((size_t)t1*n_q+h)*head_dim, zr,
-                             KTw+(size_t)kv*head_dim*skp, V, kv, n_kv,
+                             KTr+(size_t)kv*head_dim*skp, V, kv, n_kv,
                              head_dim, seq_k, skp, scale, sc.data());
         }
       }
         return;
-    }
-
-    // K^T [kv][d][key], built once (the masked path's transpose, verbatim)
-    static thread_local std::vector<float> KT;
-    const float* KTr = K_pre;
-    if (!KTr) {
-        if (KT.size() < (size_t)n_kv*head_dim*skp) KT.resize((size_t)n_kv*head_dim*skp);
-        float* const KTw = KT.data();
-#if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
-#endif
-        for (int jb=0; jb<skp; jb+=4) {
-            const int je = seq_k-jb < 4 ? seq_k-jb : 4;
-            for (int kv=0; kv<n_kv; kv++)
-                for (int d=0; d<head_dim; d++) {
-                    float* dst = KTw+((size_t)kv*head_dim+d)*skp+jb;
-                    for (int j=0; j<je; j++)
-                        dst[j] = K[((size_t)(jb+j)*n_kv+kv)*head_dim+d];
-                    for (int j=je; j<4; j++) dst[j] = 0.0f;
-                }
-        }
-        KTr = KT.data();
     }
 
     static thread_local std::vector<float> VP;

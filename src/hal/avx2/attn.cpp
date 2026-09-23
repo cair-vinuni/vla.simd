@@ -17,20 +17,23 @@
 // on an i5-12400F at 6 threads: IMPACT 153.2 -> 146.7 ms, ACT 124.5 -> 120.4 ms,
 // Octo neutral (its block-causal mask already bounded most rows).
 //
-// The structure is ported from amd/attn.cpp with its V pre-pack left out: the 16
-// lanes one A*V pass needs are already contiguous within a key, and on Intel the
-// pack measured as a net loss (a full V copy per call against a cache that
-// absorbs the stride). Zen keeps it because its L2 set-aliasing costs more than
-// the copy. Values are identical either way - see attn_softmax_row for why the
-// tile-wide softmax bound is value-preserving.
+// Bit-exactness vs the per-row form:
+//   - scores are prescaled by 1/sum in the softmax epilogue, which is the same
+//     fp32 product `p[t2]*inv` the per-row A*V computed at use time;
+//   - a tile softmaxes over the tile-wide bound instead of each row's own: the
+//     extra lanes are -inf -> exp() gives exactly 0.0f, so they change neither
+//     the max, nor the (vector-lane) sum, nor the A*V accumulation (acc + 0*v);
+//   - the per-row zero-weight skip is a pure optimisation (0*v adds nothing), so
+//     dropping it inside a tile is value-preserving;
+//   - degenerate rows (fully-masked -> uniform weights) keep the per-row path.
 
 #include "../arch.h"
-#if TCPU_HAL_X86
+#if TCPU_ISA_X86
 
 #include "../simd.h"
 #include "../common/env.h"
+#include "../common/layout.h"
 #include "../../ops/lm_ops.h"
-#include <cmath>
 #include <limits>
 #include <vector>
 #include <cstddef>
@@ -46,80 +49,6 @@ static inline void attn_uniform_row(float* o, const float* V, int seq_k,
         o[d] = 0.0f;
     for (int t2=0; t2<seq_k; t2++)
         simd_axpy(o, u, V+((size_t)t2*n_kv+kv)*head_dim, head_dim);
-}
-
-// Post-QK per-row pass (mask add, softmax, AV), shared by the per-query and
-// query-tiled paths: identical op order on identical score values -> the two
-// paths are bit-exact vs each other.
-static inline void attn_softmax_av_row(float* scores, const float* mrow, float* o,
-                                       const float* V, int seq_k, int jmax,
-                                       int kv, int n_kv, int head_dim) {
-    const float NINF = -std::numeric_limits<float>::infinity();
-    const int skq = (jmax+7) & ~7;
-
-    // add the mask row; lanes past jmax (still < seq_k) -> -inf
-    const int me = skq < seq_k ? skq : seq_k;
-    int j;
-    if (mrow) {
-        for (j=0; j+8 <= me; j += 8)
-            _mm256_storeu_ps(scores+j,
-                             _mm256_add_ps(_mm256_loadu_ps(scores+j),
-                                           _mm256_loadu_ps(mrow+j)));
-        for (; j < me; j++)
-            scores[j] += mrow[j];
-    }
-    for (j=me; j<skq; j++)
-        scores[j] = NINF;
-
-    __m256 vmax = _mm256_set1_ps(NINF);
-    for (j=0; j<skq; j += 8)
-        vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(scores+j));
-    const float maxs = hmax8(vmax);
-
-    float sum;
-    if (maxs <= std::numeric_limits<float>::lowest()) {
-        // all remaining scores collapsed to finfo.min -> uniform (dense semantics)
-        for (j=0; j<seq_k; j++)
-            scores[j] = 1.0f;
-        sum = (float)seq_k;
-    } else {
-        const __m256 vm = _mm256_set1_ps(maxs);
-        __m256 vsum = _mm256_setzero_ps();
-        for (j=0; j<skq; j += 8) {
-            const __m256 e = exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(scores+j), vm));
-            _mm256_storeu_ps(scores+j, e);
-            vsum = _mm256_add_ps(vsum, e);
-        }
-        sum = hsum8(vsum);
-    }
-
-    const int av_end = maxs <= std::numeric_limits<float>::lowest() ? seq_k : jmax;
-    const float inv = 1.0f/sum;
-    if (head_dim == 64) {
-        // AV with the output resident in 8 accumulators: per key 1 broadcast +
-        // 8 V loads + 8 FMAs, no o read-modify-write. Same key order -> bit-exact
-        // vs the axpy path.
-        __m256 av[8];
-        for (int v=0; v<8; v++)
-            av[v] = _mm256_setzero_ps();
-        for (int t2=0; t2<av_end; t2++) {
-            if (scores[t2] == 0.0f) continue;
-            const float* vv = V+((size_t)t2*n_kv+kv)*64;
-            const __m256 a = _mm256_set1_ps(scores[t2]*inv);
-            for (int v=0; v<8; v++)
-                av[v] = _mm256_fmadd_ps(a, _mm256_loadu_ps(vv+8*v), av[v]);
-        }
-        for (int v=0; v<8; v++)
-            _mm256_storeu_ps(o+8*v, av[v]);
-    } else {
-        for (int d=0; d<head_dim; d++)
-            o[d] = 0.0f;
-        for (int t2=0; t2<av_end; t2++) {
-            if (scores[t2] == 0.0f) continue;
-            const float* vv = V+((size_t)t2*n_kv+kv)*head_dim;
-            simd_axpy(o, scores[t2]*inv, vv, head_dim);
-        }
-    }
 }
 
 // Mask + softmax for one row, over the tile-wide bound `sbound` (a multiple of
@@ -198,14 +127,14 @@ static inline void attn_av_row(const float* p, float* o, const float* V, int av_
 //
 // V is read in place at the model's [key][kv][d] stride: the 16 lanes one pass
 // needs are contiguous within a key, so no repack is required. The Zen backend
-// does pre-pack (amd/attn.cpp, vpack) because its L2 set-aliasing at that stride
-// costs more than the copy; on Intel the pack measured as a net loss - a full V
-// copy per call against a cache that absorbs the stride. Same values either way:
-// each output element still accumulates keys in ascending order.
+// does pre-pack (vpack) because its L2 set-aliasing at that stride costs more
+// than the copy; on Intel the pack measured as a net loss - a full V copy per
+// call against a cache that absorbs the stride. Same values either way: each
+// output element still accumulates keys in ascending order.
 template <int ROWS>
 static inline void av_tile16(const float* p, size_t lds, float* o, size_t ldo,
-                             const float* V, int av_end, int kv, int n_kv, int head_dim) {
-    const size_t ldv = (size_t)n_kv*head_dim;
+                             const float* vb, size_t ldt, size_t ldblk, int av_end,
+                             int head_dim) {
     for (int d0=0; d0<head_dim; d0 += 16) {
         __m256 c0[ROWS];
         __m256 c1[ROWS];
@@ -214,8 +143,8 @@ static inline void av_tile16(const float* p, size_t lds, float* o, size_t ldo,
             c1[i] = _mm256_setzero_ps();
         }
 
-        const float* vv = V+(size_t)kv*head_dim+d0;
-        for (int t2=0; t2<av_end; t2++, vv += ldv) {
+        const float* vv = vb+(size_t)(d0/16)*ldblk;
+        for (int t2=0; t2<av_end; t2++, vv += ldt) {
             const __m256 b0 = _mm256_loadu_ps(vv);
             const __m256 b1 = _mm256_loadu_ps(vv+8);
             for (int i=0; i<ROWS; i++) {
@@ -233,17 +162,47 @@ static inline void av_tile16(const float* p, size_t lds, float* o, size_t ldo,
 }
 
 static inline void av_tile16_rows(int rows, const float* p, size_t lds, float* o, size_t ldo,
-                                  const float* V, int av_end, int kv, int n_kv, int head_dim) {
+                                  const float* vb, size_t ldt, size_t ldblk, int av_end,
+                                  int head_dim) {
     switch (rows) {
-        case 6: av_tile16<6>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
-        case 5: av_tile16<5>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
-        case 4: av_tile16<4>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
-        case 3: av_tile16<3>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
-        case 2: av_tile16<2>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
-        default: av_tile16<1>(p, lds, o, ldo, V, av_end, kv, n_kv, head_dim); break;
+        case 6: av_tile16<6>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
+        case 5: av_tile16<5>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
+        case 4: av_tile16<4>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
+        case 3: av_tile16<3>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
+        case 2: av_tile16<2>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
+        default: av_tile16<1>(p, lds, o, ldo, vb, ldt, ldblk, av_end, head_dim); break;
     }
 }
 
+#if TCPU_HAL_AMD
+// V comes pre-packed as [kv][d/16][key][16], so each of the four head_dim passes
+// streams one contiguous run instead of walking the model's [key][kv][d] layout
+// at an n_kv*head_dim stride. That stride is the same L1/L2 set-aliasing trap as
+// the K^T one: at the ViT shape it is 3072 B, which folds the head's 256 KB V
+// slice onto 64 of the L2's 1024 sets (16 lines deep in an 8-way cache), so a
+// "resident" slice re-misses every pass. Measured A*V alone at seq 1024, 6
+// threads: 411 -> 676 GF/s, 1.49x including the pack.
+//
+// V [key][kv][d] -> VP [kv][d/16][key][16]. Pure copy, so the A*V above sees the
+// same values in the same key order as the per-row form.
+static void vpack(float* VP, const float* V, int seq_k, int n_kv, int head_dim) {
+    const int nb = head_dim/16;
+    const size_t ldv = (size_t)n_kv*head_dim;
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(static) collapse(2)
+#endif
+    for (int kv=0; kv<n_kv; kv++) {
+        for (int db=0; db<nb; db++) {
+            float* dst = VP+((size_t)kv*nb+db)*(size_t)seq_k*16;
+            const float* src = V+(size_t)kv*head_dim+db*16;
+            for (int t=0; t<seq_k; t++, dst += 16, src += ldv) {
+                _mm256_storeu_ps(dst,   _mm256_loadu_ps(src));
+                _mm256_storeu_ps(dst+8, _mm256_loadu_ps(src+8));
+            }
+        }
+    }
+}
+#endif
 
 // ROWSx16 QK micro-kernel over transposed keys: ROWS query rows share every K
 // panel load (up to 12 accumulators + 2 K loads + 1 broadcast = 15 YMM, the
@@ -315,7 +274,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
     // fmadd stream (no per-dot hsum), and softmax max/exp/sum are vectorized
     // (exp256_ps). Blocked keys (mask == finfo.min) flush to weight exactly 0.0f via
     // the exp clamp, so the AV pass still skips them.
-    const int skp = (seq_k+7) & ~7;
+    const int skp = hal::kt_stride(seq_k);   // K^T leading dimension (padded on Zen)
+    const int sds = TCPU_HAL_AMD ? ((seq_k+7) & ~7) + 8 : skp;   // scores leading dimension (same aliasing)
     const float* KTp = K_pre;
     if (!KTp) {
         // reused across calls (the op is entered from one thread; parallelism is
@@ -325,22 +285,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         static thread_local std::vector<float> KT;
         if (KT.size() < (size_t)n_kv*head_dim*skp)
             KT.resize((size_t)n_kv*head_dim*skp);
-        float* const KTw = KT.data();
-#if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
-#endif
-        for (int jb=0; jb<skp; jb += 8) {
-            const int je = seq_k-jb < 8 ? seq_k-jb : 8;
-            for (int kv=0; kv<n_kv; kv++)
-                for (int d=0; d<head_dim; d++) {
-                    float* dst = KTw+((size_t)kv*head_dim+d)*skp+jb;
-                    for (int j=0; j<je; j++)
-                        dst[j] = K[((size_t)(jb+j)*n_kv+kv)*head_dim+d];
-                    for (int j=je; j<8; j++)
-                        dst[j] = 0.0f;
-                }
-        }
-        KTp = KTw;
+        hal::transpose_kt(KT.data(), K, seq_k, n_kv, head_dim, skp);
+        KTp = KT.data();
     }
 
     if (hal::env::attn_qtile() && seq_q >= 6 && head_dim%16 == 0) {
@@ -353,26 +299,34 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         constexpr int QR = 6;
         const int ntiles = (seq_q+QR-1)/QR;
 
+#if TCPU_HAL_AMD
+        // V repacked once per call for the tiled A*V (same reuse rule as KT:
+        // grab the pointer before any parallel region).
+        static thread_local std::vector<float> VPbuf;
+        if (VPbuf.size() < (size_t)n_kv*head_dim*seq_k)
+            VPbuf.resize((size_t)n_kv*head_dim*seq_k);
+        vpack(VPbuf.data(), V, seq_k, n_kv, head_dim);
+        const float* const VB = VPbuf.data();
+        const size_t ldkv = (size_t)head_dim*seq_k, ldt = 16, ldblk = (size_t)seq_k*16;
+#else
+        const float* const VB = V;
+        const size_t ldkv = head_dim, ldt = (size_t)n_kv*head_dim, ldblk = 16;
+#endif
 
         std::vector<int> jmaxv(seq_q, seq_k);
         if (mask) {
 #if defined(_OPENMP)
             #pragma omp parallel for schedule(static)
 #endif
-            for (int t1=0; t1<seq_q; t1++) {
-                const float* mrow = mask+(size_t)t1*seq_k;
-                int jm = seq_k;
-                while (jm > 0 && mrow[jm-1] == std::numeric_limits<float>::lowest())
-                    jm--;
-                jmaxv[t1] = jm;
-            }
+            for (int t1=0; t1<seq_q; t1++)
+                jmaxv[t1] = hal::row_bound(mask+(size_t)t1*seq_k, seq_k);
         }
 
 #if defined(_OPENMP)
         #pragma omp parallel
 #endif
       {
-        std::vector<float> scores((size_t)QR*skp);   // per-thread scratch
+        std::vector<float> scores((size_t)QR*sds);   // per-thread scratch
 #if defined(_OPENMP)
         #pragma omp for schedule(static)
 #endif
@@ -396,28 +350,29 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
             }
 
             const int skt = (tjm+7) & ~7;
-            qk_rows16_rows(rows, scores.data(), skp, q0, ldq, kt, skp, head_dim, scale, skt);
+            qk_rows16_rows(rows, scores.data(), sds, q0, ldq, kt, skp, head_dim, scale, skt);
 
             bool ok[QR];
             bool all_ok = true;
             for (int i=0; i<rows; i++) {
                 const int jmax = jmaxv[t0+i];
                 ok[i] = jmax > 0 &&
-                        attn_softmax_row(scores.data()+(size_t)i*skp,
+                        attn_softmax_row(scores.data()+(size_t)i*sds,
                                          mask ? mask+(size_t)(t0+i)*seq_k : nullptr,
                                          seq_k, jmax, skt);
                 all_ok &= ok[i];
             }
 
             if (all_ok) {
-                av_tile16_rows(rows, scores.data(), skp, o0, ldq, V, tjm, kv, n_kv, head_dim);
+                av_tile16_rows(rows, scores.data(), sds, o0, ldq, VB+(size_t)kv*ldkv, ldt, ldblk,
+                               tjm, head_dim);
                 continue;
             }
 
             // rare: a degenerate (fully-masked) row in the tile - finish per row
             for (int i=0; i<rows; i++) {
                 float* o = o0+(size_t)i*ldq;
-                if (ok[i]) attn_av_row(scores.data()+(size_t)i*skp, o, V, jmaxv[t0+i],
+                if (ok[i]) attn_av_row(scores.data()+(size_t)i*sds, o, V, jmaxv[t0+i],
                                        kv, n_kv, head_dim);
                 else       attn_uniform_row(o, V, seq_k, kv, n_kv, head_dim);
             }
@@ -426,11 +381,12 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         return;
     }
 
+    // Per-query path (short queries: decode steps, cross-attention with seq_q < 6).
 #if defined(_OPENMP)
     #pragma omp parallel
 #endif
   {
-    std::vector<float> scores(skp);   // per-thread scratch (reused across queries)
+    std::vector<float> scores(sds);   // per-thread scratch (reused across queries)
 #if defined(_OPENMP)
     #pragma omp for schedule(static)
 #endif
@@ -444,9 +400,7 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
 
         // block-causal masks end each row with a blocked tail: bound the QK/softmax
         // loops at the last allowed key (bit-exact; blocked keys had weight 0 anyway)
-        int jmax = seq_k;
-        while (mrow && jmax > 0 && mrow[jmax-1] == std::numeric_limits<float>::lowest())
-            jmax--;
+        const int jmax = mrow ? hal::row_bound(mrow, seq_k) : seq_k;
 
         float* o = out+((size_t)t1*n_q+h)*head_dim;
         if (jmax == 0) {
@@ -484,11 +438,14 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
             _mm256_storeu_ps(scores.data()+j, _mm256_mul_ps(a0, vscale));
         }
 
-        attn_softmax_av_row(scores.data(), mrow, o, V, seq_k, jmax, kv, n_kv, head_dim);
+        if (attn_softmax_row(scores.data(), mrow, seq_k, jmax, skq))
+            attn_av_row(scores.data(), o, V, jmax, kv, n_kv, head_dim);
+        else
+            attn_uniform_row(o, V, seq_k, kv, n_kv, head_dim);
     }
   }
 }
 
 } // namespace tcpu
 
-#endif // TCPU_HAL_X86
+#endif // TCPU_ISA_X86

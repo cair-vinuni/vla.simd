@@ -4,22 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// x86 AVX2 GEMM backend (i9 tuning, kernels + drivers verbatim from the
-// baseline lm_ops.cpp). Packed-panel 6x16 C-resident micro-kernel, in-register
-// K^T transpose epilogue, static schedule (TCPU_GEMM_THREADS/CHUNK are the
-// hybrid-core experiment hooks).
+// x86 AVX2 GEMM backend (i9 tuning). Packed-panel 6x16 C-resident
+// micro-kernel, in-register K^T transpose epilogue, static schedule.
 //
 // Shared by BOTH x86 backends (TCPU_ISA_X86), Intel and AMD Zen: the 6x16 tile
 // is FMA-bound and both uarchs retire 2x256-bit FMA per cycle, so the Intel
 // tuning already lands at 93% of a Ryzen 5 5500's pinned FMA peak (measured:
 // 713 GF/s on 768x768x1024, 625-645 GF/s on the 3072-wide MLP shapes). Nothing
-// Zen-specific was found to add here; the AMD divergence is in amd/attn.cpp.
+// Zen-specific was found to add here.
 
 #include "../arch.h"
 #if TCPU_ISA_X86
 
 #include "../simd.h"
-#include "../common/env.h"
 #include "../../ops/lm_ops.h"
 #include <cstdint>
 #include <cstring>
@@ -28,15 +25,6 @@
 using std::size_t;
 
 namespace tcpu {
-using hal::env::gemm_threads;
-#if defined(_OPENMP)
-namespace {
-inline int gemm_chunk4() {
-    const int c = hal::env::gemm_chunk();
-    return c > 0 ? c : 4;
-}
-}
-#endif
 
 // 4-output-row micro-kernel: for one block of 4 weight rows (w0..w3, each length K, fp32),
 // compute out[t, n0..n0+3] for all t. 4 rows x 2 accumulators (K unrolled by 2) = 8
@@ -103,18 +91,14 @@ static inline void bf16_to_f32(const uint16_t* src, float* dst, int n) {
         __m256i w = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(src+i)));
         _mm256_storeu_ps(dst+i, _mm256_castsi256_ps(_mm256_slli_epi32(w, 16)));
     }
-    for (; i < n; i++) {
-        uint32_t u = (uint32_t)src[i] << 16;
-        float f;
-        std::memcpy(&f, &u, 4);
-        dst[i] = f;
-    }
+    for (; i < n; i++)
+        dst[i] = bf16_f32(src[i]);
 }
 
 void dense_linear(float* out, const float* x, const float* W, const float* bias,
                   int seq, int N, int K) {
     // Register-blocked micro-kernel; threaded over row-blocks. Sums are reordered vs a plain
-    // dot -> within the fp32 noise floor (see CONVENTIONS: SIMD FMA ops may reorder sums).
+    // dot -> within the fp32 noise floor (SIMD FMA ops may reorder sums).
     constexpr int NR = 4;
     const int nblocks = (N+NR-1)/NR;
 #if defined(_OPENMP)
@@ -305,15 +289,6 @@ void dense_linear_packed_kt(float* out_t, const float* x, const float* Wp, const
         }
     };
 #if defined(_OPENMP)
-    const int gt = gemm_threads();
-    if (gt > 0) {
-        const int chunk = gemm_chunk4();
-        #pragma omp parallel for schedule(dynamic, chunk) collapse(2) num_threads(gt)
-        for (int b=0; b<nblocks; b++)
-            for (int m=0; m<mtiles; m++)
-                tile(b, m);
-        return;
-    }
     #pragma omp parallel for schedule(static) collapse(2)
 #endif
     for (int b=0; b<nblocks; b++) {
@@ -327,24 +302,6 @@ static void dense_linear_packed_impl(float* out, const float* x, const float* Wp
                                      int seq, int N, int K) {
     constexpr int MR = 6;
     const int nblocks = N/16;
-
-    // Optional token-axis cache block (TCPU_GEMM_MBLOCK, default off). The
-    // (panel, tile) loop below sweeps the WHOLE activation matrix once per
-    // 16-column weight panel: SigLIP's fc2 (seq 1024, K 3072, N 768) re-reads
-    // 12.6 MB for each of 48 panels against 4.8 GFLOP of work. Holding a block of
-    // tokens resident trades that for (seq/MB) passes over the weights - the same
-    // fix TCPU_I8_MBLOCK already makes in the int8 kernel. The K loop is
-    // untouched, so the result is bitwise identical either way.
-    const int mb = hal::env::gemm_mblock();
-    if (mb > 0 && seq > mb) {
-        for (int t00=0; t00<seq; t00+=mb) {
-            const int rows_here = seq-t00 < mb ? seq-t00 : mb;
-            dense_linear_packed_impl<GELU, ADD>(out+(size_t)t00*N, x+(size_t)t00*K, Wp, bias,
-                                                rows_here, N, K);
-        }
-        return;
-    }
-
     const int mtiles = (seq+MR-1)/MR;
     auto tile = [&](int b, int m) {
         const int t0 = m*MR;
@@ -353,15 +310,6 @@ static void dense_linear_packed_impl(float* out, const float* x, const float* Wp
                                bias, rows, N, K, b*16);
     };
 #if defined(_OPENMP)
-    const int gt = gemm_threads();
-    if (gt > 0) {
-        const int chunk = gemm_chunk4();
-        #pragma omp parallel for schedule(dynamic, chunk) collapse(2) num_threads(gt)
-        for (int b=0; b<nblocks; b++)
-            for (int m=0; m<mtiles; m++)
-                tile(b, m);
-        return;
-    }
     #pragma omp parallel for schedule(static) collapse(2)
 #endif
     for (int b=0; b<nblocks; b++) {

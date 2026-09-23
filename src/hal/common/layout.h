@@ -6,6 +6,8 @@
 
 #pragma once
 #include "../arch.h"
+#include <cstddef>
+#include <limits>
 
 // Buffer geometry the backend wants. Pure functions of the shape, so producer
 // (nn::Linear::forward_kt) and consumer (gqa_attention_masked) derive the same
@@ -33,6 +35,31 @@ inline int kt_stride(int seq_k) {
 #else
     return skp;
 #endif
+}
+
+inline void transpose_kt(float* kt, const float* K, int seq_k, int n_kv, int head_dim, int ldk) {
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int jb=0; jb<ldk; jb += 8) {
+        const int rem = seq_k-jb;
+        const int je  = rem < 0 ? 0 : (rem < 8 ? rem : 8);
+        const int jz  = ldk-jb < 8 ? ldk-jb : 8;
+        for (int kv=0; kv<n_kv; kv++)
+            for (int d=0; d<head_dim; d++) {
+                float* dst = kt+((std::size_t)kv*head_dim+d)*ldk+jb;
+                for (int j=0; j<je; j++)
+                    dst[j] = K[((std::size_t)(jb+j)*n_kv+kv)*head_dim+d];
+                for (int j=je; j<jz; j++)
+                    dst[j] = 0.0f;
+            }
+    }
+}
+
+inline int row_bound(const float* mrow, int seq_k) {
+    while (seq_k > 0 && mrow[seq_k-1] == std::numeric_limits<float>::lowest())
+        seq_k--;
+    return seq_k;
 }
 
 } // namespace hal

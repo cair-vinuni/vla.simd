@@ -30,7 +30,7 @@ string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " -funroll-loops")
 # macros these enable and Debug/RelWithDebInfo would otherwise fall through to
 # the scalar kernels.
 #
-# x86-64 -> AVX2/FMA, backend by vendor (AuthenticAMD -> Zen, src/hal/amd;
+# x86-64 -> AVX2/FMA, backend by vendor (AuthenticAMD -> Zen;
 # -DVLA_HAL=amd|avx2 to force). Apple arm64 -> -mcpu. Other aarch64 -> baseline
 # ARMv8 NEON. Anything else -> scalar fallback.
 #
@@ -163,7 +163,6 @@ add_library(tcpu_ops STATIC
   src/hal/avx2/gemm.cpp
   src/hal/avx2/gemm_i8.cpp
   src/hal/avx2/attn.cpp
-  src/hal/amd/attn.cpp
   src/hal/apple/gemm.cpp
   src/hal/apple/attn.cpp
   src/hal/neon/gemm.cpp
@@ -174,7 +173,6 @@ add_library(tcpu_ops STATIC
   src/hal/common/eltwise.cpp
   src/hal/common/norms.cpp
   src/hal/common/conv.cpp
-  src/hal/common/conv_i8.cpp
   # nn modules over the HAL backends
   src/nn/linear.cpp
   src/nn/attention.cpp

@@ -18,11 +18,10 @@ using std::size_t;
 namespace tcpu {
 
 namespace hal {
-bool accel_on() { return accel_available() && env::accel(); }
+bool accel_on() { return env::accel(); }
 } // namespace hal
 
 #if defined(TCPU_ACCELERATE)
-bool accel_available() { return true; }
 void dense_linear_blas(float* out, const float* x, const float* W, const float* bias,
                        int seq, int N, int K) {
     // out[seq,N] = x[seq,K] * W[N,K]^T on the AMX units via Accelerate.
@@ -57,7 +56,6 @@ void dense_linear_blas_kt(float* out_t, const float* x, const float* W, const fl
     }
 }
 #else
-bool accel_available() { return false; }
 void dense_linear_blas(float* out, const float* x, const float* W, const float* bias,
                        int seq, int N, int K) {
     dense_linear(out, x, W, bias, seq, N, K);

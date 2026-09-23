@@ -9,12 +9,9 @@
 // Vendor-BLAS GEMM routing (Apple Accelerate -> AMX matrix units). Compiled to
 // real sgemm calls only when TCPU_ACCELERATE is defined (Apple targets); the
 // fallbacks keep callers link-clean elsewhere. fp32 reorder class (BLAS
-// accumulation order). Callers gate on accel_available() + env::accel().
+// accumulation order).
 
 namespace tcpu {
-
-// True when a vendor BLAS is linked (Accelerate on Apple).
-bool accel_available();
 
 namespace hal {
 // Linked AND enabled (TCPU_ACCEL) - the routing predicate callers use.

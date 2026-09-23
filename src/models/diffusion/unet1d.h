@@ -15,9 +15,9 @@
 // this UNet 100 times -- which is why the step count is a first-class row in the
 // results rather than a footnote.
 //
-// Layout is [T, C] channel-last throughout, matching ops/conv1d and letting
-// groupnorm() apply with n_pixels = T. The reference works in torch's [C, T];
-// the converter transposes the conv weights once so no transpose runs per step.
+// Layout is [T, C] channel-last throughout, letting groupnorm() apply with
+// n_pixels = T. The reference works in torch's [C, T]; the converter transposes
+// the conv weights once so no transpose runs per step.
 
 namespace tcpu {
 

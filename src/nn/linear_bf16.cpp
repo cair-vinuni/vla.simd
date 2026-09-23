@@ -14,7 +14,6 @@
 #include "../hal/common/blas.h"
 #include "../hal/common/env.h"
 #include "../ops/lm_ops.h"
-#include <cstring>
 #include <cstddef>
 using std::size_t;
 
@@ -63,10 +62,8 @@ void Linear::init_bf16(const uint16_t* Wb16, const float* bias_, int N_, int K_,
     }
 
     deq.resize((size_t)N_*K_);
-    for (size_t i=0; i<deq.size(); i++) {
-        uint32_t u = (uint32_t)Wb16[i] << 16;
-        std::memcpy(&deq[i], &u, 4);
-    }
+    for (size_t i=0; i<deq.size(); i++)
+        deq[i] = bf16_f32(Wb16[i]);
 
     init(deq.data(), bias_, N_, K_, role_);
     if (Wp) {

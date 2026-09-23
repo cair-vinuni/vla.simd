@@ -11,8 +11,6 @@
 #if TCPU_HAL_SCALAR
 
 #include "../../ops/lm_ops.h"
-#include <cstdint>
-#include <cstring>
 #include <cstddef>
 using std::size_t;
 

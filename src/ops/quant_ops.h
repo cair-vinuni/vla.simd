@@ -51,7 +51,6 @@ int i8_kpad(int K);
 // 8 output rows). Requires N % 16 == 0.
 //
 // The buffer carries an int32 row-sum table after the panels - see i8_rowsums.
-size_t packed_i8_floats(int N, int K);   // int8 elements in Wq, panels + row sums
 // Same buffer counted in int32 words. Owners allocate std::vector<int32_t> and
 // hand out (int8_t*): the row-sum table is then read as the int32 objects it is,
 // instead of punned out of int8 storage.

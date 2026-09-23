@@ -21,7 +21,7 @@ struct Conv2d {
     // x [H, W, Cin] -> out [Hout, Wout, Cout]
     void forward(float* out, const float* x, int H, int Wd, int stride, int pad) const;
 
-    // Opt in to the W8A8 conv (ops/quant_ops.h + hal/common/conv_i8.cpp). Same
+    // Opt in to the W8A8 conv (ops/quant_ops.h + hal/common/conv.cpp). Same
     // contract as nn::Linear::init_int8: lossy, explicit, and a no-op returning
     // false when the CPU has no int8 kernel or Cout % 16 != 0.
     bool init_int8();

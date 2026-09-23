@@ -5,17 +5,53 @@
  */
 
 #pragma once
-
+#include "../arch.h"
 
 // ---------------------------------------------------------------------------
 // ARM NEON path (aarch64, e.g. Raspberry Pi 4 Cortex-A72). NEON is 128-bit
 // (4x fp32). We mirror the AVX2 helpers so the shared function bodies can select
-// a SIMD path with a single HAVE_SIMD guard; the microkernels below (dot, axpy,
-// 4-row dense block, 16-wide packed block) use multiple accumulator chains to
-// hide FMLA latency (~7 cyc on A72), same idea as the AVX2 kernels.
+// a SIMD path with a single HAVE_SIMD guard; the microkernels below (dot) use
+// multiple accumulator chains to hide FMLA latency (~7 cyc on A72), same idea as
+// the AVX2 kernels.
 // ---------------------------------------------------------------------------
 #include <arm_neon.h>
 namespace tcpu {
+#if TCPU_HAL_APPLE
+static inline float simd_dot(const float* a, const float* b, int n) {
+    // 8 independent chains: M4 P-cores have 4 FMA pipes x ~3-cycle latency, so a
+    // single 4-wide chain is latency-bound just like the one-chain AVX2 version was.
+    float32x4_t c0 = vdupq_n_f32(0);
+    float32x4_t c1 = vdupq_n_f32(0);
+    float32x4_t c2 = vdupq_n_f32(0);
+    float32x4_t c3 = vdupq_n_f32(0);
+    float32x4_t c4 = vdupq_n_f32(0);
+    float32x4_t c5 = vdupq_n_f32(0);
+    float32x4_t c6 = vdupq_n_f32(0);
+    float32x4_t c7 = vdupq_n_f32(0);
+
+    int i = 0;
+    for (; i+32<=n; i+=32) {
+        c0 = vfmaq_f32(c0, vld1q_f32(a+i),    vld1q_f32(b+i));
+        c1 = vfmaq_f32(c1, vld1q_f32(a+i+4),  vld1q_f32(b+i+4));
+        c2 = vfmaq_f32(c2, vld1q_f32(a+i+8),  vld1q_f32(b+i+8));
+        c3 = vfmaq_f32(c3, vld1q_f32(a+i+12), vld1q_f32(b+i+12));
+        c4 = vfmaq_f32(c4, vld1q_f32(a+i+16), vld1q_f32(b+i+16));
+        c5 = vfmaq_f32(c5, vld1q_f32(a+i+20), vld1q_f32(b+i+20));
+        c6 = vfmaq_f32(c6, vld1q_f32(a+i+24), vld1q_f32(b+i+24));
+        c7 = vfmaq_f32(c7, vld1q_f32(a+i+28), vld1q_f32(b+i+28));
+    }
+    for (; i+4<=n; i+=4)
+        c0 = vfmaq_f32(c0, vld1q_f32(a+i), vld1q_f32(b+i));
+
+    c0 = vaddq_f32(vaddq_f32(vaddq_f32(c0, c1), vaddq_f32(c2, c3)),
+                   vaddq_f32(vaddq_f32(c4, c5), vaddq_f32(c6, c7)));
+    float s = vaddvq_f32(c0);
+
+    for (; i<n; i++)
+        s += a[i]*b[i];
+    return s;
+}
+#else
 static inline float simd_dot(const float* a, const float* b, int n) {
     float32x4_t acc0 = vdupq_n_f32(0);
     float32x4_t acc1 = vdupq_n_f32(0);
@@ -39,6 +75,7 @@ static inline float simd_dot(const float* a, const float* b, int n) {
         s += a[i]*b[i];
     return s;
 }
+#endif
 static inline void simd_axpy(float* o, float alpha, const float* v, int n) {
     const float32x4_t va = vdupq_n_f32(alpha);
     int i = 0;
@@ -51,7 +88,7 @@ static inline void simd_axpy(float* o, float alpha, const float* v, int n) {
 // Cephes-style exp (~1-2 ulp), the NEON twin of exp256_ps - same polynomial and
 // constants, so it matches the AVX2 gelu path's numerics (tolerance class). Lanes
 // below -87 flush to exactly 0.0f (mirrors libm underflow).
-static inline float32x4_t exp_ps_neon(float32x4_t x) {
+static inline float32x4_t exp_ps(float32x4_t x) {
     const uint32x4_t keep = vmvnq_u32(vcleq_f32(x, vdupq_n_f32(-87.0f)));
     x = vminq_f32(x, vdupq_n_f32(88.3762626647949f));
     x = vmaxq_f32(x, vdupq_n_f32(-88.3762626647950f));
