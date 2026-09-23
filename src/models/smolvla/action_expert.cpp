@@ -8,6 +8,7 @@
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
 #include "ops/lm_ops.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -313,7 +314,8 @@ void ActionExpert::denoise_step(int n_prefix, const float* x_t, float time,
 }
 
 void ActionExpert::denoise(const std::vector<VlmKV>& kv, int n_prefix, const float* noise,
-                           const float* mask_full, const int* pos_full, float* out) const {
+                           const float* mask_full, const int* pos_full, float* out,
+                           const float* prev, const float* weights, float max_guidance) const {
     const int C = cfg.chunk, MAD = cfg.max_action_dim, SK = n_prefix + C;
 
     // The whole loop is seq-50 ops repeated 10 x 32 times, so its cost is part
@@ -354,9 +356,19 @@ void ActionExpert::denoise(const std::vector<VlmKV>& kv, int n_prefix, const flo
     const float dt = -1.0f/(float)cfg.num_steps;
 
     for (int step = 0; step < cfg.num_steps; step++) {
-        const float time = (float)(1.0 + step*(-1.0/cfg.num_steps));
+        const double td = 1.0 + step*(-1.0/cfg.num_steps);
+        const float time = (float)td;
         denoise_step(n_prefix, x.data(), time, mask_full, mask_prefix.data(),
                      pos_full, pos_rebased.data(), v_t.data(), cK, cV);
+        if (prev) {
+            const float tau = (float)(1.0 - td), s = (1.0f - tau)*(1.0f - tau);
+            const float gw = std::min((1.0f - tau)/tau*((s + tau*tau)/s), max_guidance);
+            for (int r = 0; r < C; r++)
+                for (int j = 0; j < MAD; j++) {
+                    const size_t i = (size_t)r*MAD + j;
+                    v_t[i] -= gw*((prev[i] - (x[i] - time*v_t[i]))*weights[r]);
+                }
+        }
         for (size_t i = 0; i < x.size(); i++) x[i] += dt*v_t[i];
     }
     std::memcpy(out, x.data(), (size_t)C*MAD*sizeof(float));

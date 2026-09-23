@@ -50,11 +50,13 @@ import ctypes
 import io
 import json
 import logging
+import math
 import os
 import pickle  # nosec: the lerobot async-inference protocol is pickle-based
 import sys
 import threading
 import time
+from collections import deque
 from concurrent import futures
 from queue import Empty, Full, Queue
 
@@ -197,12 +199,12 @@ class _Engine:
             raise ValueError(f"frames {frames.shape} != {want}")
         return frames
 
-    def _run(self, *argv, after=()):
+    def _run(self, *argv, after=(), fn="predict"):
         out = np.empty((self.chunk, self.action_dim), np.float32)
         with self.lock:
-            rc = self._fn("predict")(self.h, *argv, out.ctypes.data_as(F32P), *after)
+            rc = self._fn(fn)(self.h, *argv, out.ctypes.data_as(F32P), *after)
         if rc != 0:
-            raise RuntimeError(f"vla_{self.name}_predict failed (rc={rc})")
+            raise RuntimeError(f"vla_{self.name}_{fn} failed (rc={rc})")
         return out
 
     def close(self):
@@ -303,6 +305,33 @@ class SmolvlaEngine(_Engine):
         self.lib.vla_smolvla_tokenize.restype = ctypes.c_int32
         self.task = None   # set by main() from --task or config.txt
         self._tokens = {}
+        self.rtc_horizon, self.rtc_max_guidance = args.rtc_horizon, args.rtc_max_guidance
+        self.rtc_delay, self.fps = args.rtc_delay, args.fps
+        if self.rtc_horizon:
+            self._fn("predict_rtc").argtypes = [*self._fn("predict").argtypes,
+                                                F32P, ctypes.c_int32, F32P, ctypes.c_float]
+            self._fn("predict_rtc").restype = ctypes.c_int32
+        self._rtc_lock = threading.Lock()
+        self.rtc_gen = 0
+        self.reset_rtc()
+
+    def reset_rtc(self):
+        with self._rtc_lock:
+            self._prev = None
+            self._lat = deque(maxlen=5)
+            self.rtc_gen += 1
+
+    def _guide(self, timestep):
+        w = np.zeros(self.chunk, np.float32)
+        if timestep is None or self._prev is None or not 0 <= timestep - self._prev[0] < len(self._prev[1]):
+            return np.zeros((0, self.action_dim), np.float32), w
+        left = np.ascontiguousarray(self._prev[1][timestep - self._prev[0]:])
+        d = self.rtc_delay if self.rtc_delay is not None else 1 + math.ceil(max(self._lat) * self.fps)
+        h = min(self.rtc_horizon, len(left))
+        s = min(d, h)
+        w[:s] = 1
+        w[s:h] = np.linspace(1, 0, h - s + 2)[1:-1]
+        return left, w
 
     def describe(self):
         return (f"{self.n_views} views {self.cam_names or '(unnamed)'} -> {self.img_size}px "
@@ -328,7 +357,7 @@ class SmolvlaEngine(_Engine):
             self._tokens[task] = (ids, mask)
         return self._tokens[task]
 
-    def predict(self, adapted, seed):
+    def predict(self, adapted, seed, rtc=None):
         """frames [n_views, H, W, 3] uint8 native res -> [chunk, action_dim]."""
         frames, state, task = adapted
         task = self._task(task)
@@ -339,10 +368,23 @@ class SmolvlaEngine(_Engine):
         if frames.shape[1] <= 0 or frames.shape[2] <= 0:
             raise ValueError(f"frames have a zero dimension: {frames.shape}")
         ids, mask = self.tokenize(task)
-        return self._run(frames.ctypes.data_as(U8P), self.n_views,
-                         frames.shape[1], frames.shape[2],
-                         ids.ctypes.data_as(I32P), mask.ctypes.data_as(I32P), self.tok_maxlen,
-                         state.ctypes.data_as(F32P), None, seed)
+        argv = (frames.ctypes.data_as(U8P), self.n_views,
+                frames.shape[1], frames.shape[2],
+                ids.ctypes.data_as(I32P), mask.ctypes.data_as(I32P), self.tok_maxlen,
+                state.ctypes.data_as(F32P), None, seed)
+        if rtc is None:
+            return self._run(*argv)
+        timestep, keep, since, gen = rtc
+        with self._rtc_lock:
+            live = gen == self.rtc_gen
+            left, w = self._guide(timestep if live else None)
+            out = self._run(*argv, fn="predict_rtc",
+                            after=(left.ctypes.data_as(F32P), len(left), w.ctypes.data_as(F32P),
+                                   self.rtc_max_guidance))
+            if live:
+                self._lat.append(time.perf_counter() - since)
+                self._prev = (timestep, out[:keep])
+        return out
 
     def warmup_input(self):
         return (np.zeros((self.n_views, 480, 640, 3), np.uint8),
@@ -725,6 +767,12 @@ def _smolvla_extra(p):
                    help="instruction; default is the one the converter recorded")
     p.add_argument("--seed", type=int, default=0,
                    help="flow-matching noise for query i is seed+i (default: 0)")
+    p.add_argument("--rtc-horizon", type=int, default=0,
+                   help="real-time chunking execution horizon in actions; 0 = off (default: 0)")
+    p.add_argument("--rtc-max-guidance", type=float, default=10.0,
+                   help="RTC guidance weight cap (default: 10.0)")
+    p.add_argument("--rtc-delay", type=int, default=None,
+                   help="RTC inference delay in actions (default: measured from latency and --fps)")
 
 
 ACT = ModelSpec("ACT", "act", ActEngine, ActAdapter, "libvla_simd_act", "act",
@@ -836,6 +884,8 @@ def build_servicer_class(spec):
             # inherit the previous client's feature mapping and camera keys.
             self.adapter = None
             self.lerobot_features = None
+            if self.cfg.rtc_horizon:
+                self.engine.reset_rtc()
 
         # -- rpc -------------------------------------------------------------
         def Ready(self, request, context):  # noqa: N802
@@ -898,7 +948,7 @@ def build_servicer_class(spec):
 
         def GetActions(self, request, context):  # noqa: N802
             try:
-                obs, adapted = self.observation_queue.get(timeout=self.cfg.obs_queue_timeout)
+                obs, adapted, stamp = self.observation_queue.get(timeout=self.cfg.obs_queue_timeout)
             except Empty:
                 return services_pb2.Empty()
 
@@ -907,7 +957,7 @@ def build_servicer_class(spec):
                     self._predicted_timesteps.add(obs.get_timestep())
 
                 t0 = time.perf_counter()
-                chunk = self._predict(obs, adapted)
+                chunk = self._predict(obs, adapted, stamp)
                 inference_ms = (time.perf_counter() - t0) * 1000
 
                 with self._query_lock:
@@ -947,12 +997,13 @@ def build_servicer_class(spec):
             except Empty:
                 pass
             try:
-                self.observation_queue.put_nowait((obs, adapted))
+                self.observation_queue.put_nowait(
+                    (obs, adapted, (time.perf_counter(), self.engine.rtc_gen) if self.cfg.rtc_horizon else None))
             except Full:
                 return False
             return True
 
-        def _predict(self, timed_obs: "TimedObservation", adapted):
+        def _predict(self, timed_obs: "TimedObservation", adapted, stamp=None):
             if self.adapter is None:
                 raise RuntimeError("no policy instructions received yet")
 
@@ -966,7 +1017,8 @@ def build_servicer_class(spec):
             with self._query_lock:
                 index = self.n_queries
                 self.n_queries += 1
-            actions = self.engine.predict(adapted, self.cfg.seed + index)[: self.actions_per_chunk]
+            kw = {"rtc": (timed_obs.get_timestep(), self.actions_per_chunk, *stamp)} if stamp else {}
+            actions = self.engine.predict(adapted, self.cfg.seed + index, **kw)[: self.actions_per_chunk]
 
             t0 = timed_obs.get_timestamp()
             i0 = timed_obs.get_timestep()
@@ -994,6 +1046,7 @@ class ServerConfig:
         self.obs_queue_timeout = args.obs_queue_timeout
         self.environment_dt = 1.0 / args.fps
         self.seed = getattr(args, "seed", 0)
+        self.rtc_horizon = getattr(args, "rtc_horizon", 0)
 
 
 def main():
@@ -1060,13 +1113,15 @@ def main():
     # `seed` only exists for the models whose spec adds it, so check what is there
     # rather than assuming every model took every optional flag.
     for name, lo in (("fps", 1), ("port", 1), ("workers", 1), ("max_message_mb", 1), ("seed", 0),
-                     ("bench", 0), ("soak", 0)):
-        if not hasattr(args, name):
+                     ("bench", 0), ("soak", 0), ("rtc_horizon", 0), ("rtc_delay", 0)):
+        if getattr(args, name, None) is None:
             continue
         if getattr(args, name) < lo:
             p.error(f"--{name.replace('_', '-')} must be >= {lo}")
     if args.obs_queue_timeout <= 0:
         p.error("--obs-queue-timeout must be > 0")
+    if not 0 < getattr(args, "rtc_max_guidance", 1.0) < math.inf:
+        p.error("--rtc-max-guidance must be > 0 and finite")
 
     logging.basicConfig(
         level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

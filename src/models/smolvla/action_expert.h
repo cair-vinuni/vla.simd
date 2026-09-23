@@ -87,7 +87,8 @@ struct ActionExpert {
     // Full flow-matching denoise. noise:[chunk,max_action_dim]. mask_full/pos_full as dumped
     // by the reference (pos_rebased and mask_prefix are derived here). Writes actions to out.
     void denoise(const std::vector<VlmKV>& kv, int n_prefix, const float* noise,
-                 const float* mask_full, const int* pos_full, float* out) const;
+                 const float* mask_full, const int* pos_full, float* out,
+                 const float* prev, const float* weights, float max_guidance) const;
 };
 
 } // namespace tcpu

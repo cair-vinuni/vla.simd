@@ -17,6 +17,7 @@
 #include "models/smolvla/smolvla_model.h"
 #include "preprocess/image.h"
 #include "tokenizer/tokenizer.h"
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -108,19 +109,26 @@ int32_t vla_smolvla_tokenize(void* h, const char* text, int32_t* ids, int32_t* m
     return VLA_ERR_EXCEPTION;
 }
 
-int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_views,
-                            int32_t height, int32_t width,
-                            const int32_t* lang_tokens, const int32_t* lang_mask, int32_t n_lang,
-                            const float* state, const float* noise, uint64_t seed,
-                            float* actions) try {
+int32_t vla_smolvla_predict_rtc(void* h, const uint8_t* frames, int32_t n_views,
+                                int32_t height, int32_t width,
+                                const int32_t* lang_tokens, const int32_t* lang_mask, int32_t n_lang,
+                                const float* state, const float* noise, uint64_t seed,
+                                float* actions, const float* prev, int32_t n_prev,
+                                const float* weights, float max_guidance) try {
     if (!h || !frames || !lang_tokens || !lang_mask || !state || !actions) return VLA_ERR_ARG;
     // A camera driver that fails can hand back a (0,0,3) frame; resize_with_pad
     // would then divide by zero and the model would infer on a black image.
-    if (height <= 0 || width <= 0 || n_lang < 0) return VLA_ERR_ARG;
+    if (height <= 0 || width <= 0 || n_lang < 0 || n_prev < 0) return VLA_ERR_ARG;
+    if (!prev) n_prev = 0;
+    if (n_prev > 0 && (!weights || !(std::isfinite(max_guidance) && max_guidance > 0))) return VLA_ERR_ARG;
 
     auto* hh = static_cast<Handle*>(h);
     const SmolvlaModel& m = hh->m;
-    if (n_views != m.n_views) return VLA_ERR_SHAPE;
+    if (n_views != m.n_views || n_prev > m.aex.cfg.chunk) return VLA_ERR_SHAPE;
+    for (int i = 0; n_prev > 0 && i < m.aex.cfg.chunk; i++)
+        if (!std::isfinite(weights[i])) return VLA_ERR_ARG;
+    for (size_t i = 0; i < (size_t)n_prev*m.real_action_dim; i++)
+        if (!std::isfinite(prev[i])) return VLA_ERR_ARG;
 
     const int S = m.vit.cfg.img, C = m.aex.cfg.chunk, MAD = m.aex.cfg.max_action_dim;
     const size_t per_view = (size_t)3*S*S;
@@ -139,7 +147,8 @@ int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_views,
         noise = noise_buf.data();
     }
 
-    auto out = m.predict(pixels.data(), n_views, lang_tokens, lang_mask, n_lang, state, noise);
+    auto out = m.predict(pixels.data(), n_views, lang_tokens, lang_mask, n_lang, state, noise,
+                         prev, n_prev, weights, max_guidance);
     if (out.empty()) return VLA_ERR_SHAPE;
 
     const int adim = m.real_action_dim;
@@ -148,6 +157,15 @@ int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_views,
     return VLA_OK;
 } catch (...) {
     return VLA_ERR_EXCEPTION;
+}
+
+int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_views,
+                            int32_t height, int32_t width,
+                            const int32_t* lang_tokens, const int32_t* lang_mask, int32_t n_lang,
+                            const float* state, const float* noise, uint64_t seed,
+                            float* actions) {
+    return vla_smolvla_predict_rtc(h, frames, n_views, height, width, lang_tokens, lang_mask, n_lang,
+                                   state, noise, seed, actions, nullptr, 0, nullptr, 0.0f);
 }
 
 } // extern "C"

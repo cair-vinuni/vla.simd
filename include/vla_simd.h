@@ -102,6 +102,14 @@ VLA_API int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_vi
                                     int32_t n_lang, const float* state,
                                     const float* noise, uint64_t seed, float* actions);
 
+VLA_API int32_t vla_smolvla_predict_rtc(void* h, const uint8_t* frames, int32_t n_views,
+                                        int32_t height, int32_t width,
+                                        const int32_t* lang_tokens, const int32_t* lang_mask,
+                                        int32_t n_lang, const float* state,
+                                        const float* noise, uint64_t seed, float* actions,
+                                        const float* prev, int32_t n_prev,
+                                        const float* weights, float max_guidance);
+
 /* --------------------------------------------------------------- Octo ----- */
 
 VLA_API void* vla_octo_load(const char* model_dir, const char* tok_dir);

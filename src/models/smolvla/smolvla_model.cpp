@@ -155,7 +155,8 @@ void SmolvlaModel::apply_int8() {
 std::vector<float> SmolvlaModel::predict_normalized(
         const float* pixels_all, int nv,
         const int32_t* lang_tokens, const int32_t* lang_mask, int n_lang,
-        const float* state, const float* noise) const {
+        const float* state, const float* noise,
+        const float* prev, const float* weights, float max_guidance) const {
     const int H = hidden, TOK = vit.cfg.n_img_tok;
     const int n_img = nv * TOK, n_prefix = n_img + n_lang + 1;
     const int C = aex.cfg.chunk, MAD = aex.cfg.max_action_dim;
@@ -239,14 +240,17 @@ std::vector<float> SmolvlaModel::predict_normalized(
     }
 
     std::vector<float> actions((size_t)C * MAD);
-    aex.denoise(kv, n_prefix, noise, dmask.data(), pos_full.data(), actions.data());
+    aex.denoise(kv, n_prefix, noise, dmask.data(), pos_full.data(), actions.data(),
+                prev, weights, max_guidance);
     lap("denoise");
     return actions;
 }
 
 std::vector<float> SmolvlaModel::predict(const float* pixels_all, int nv,
                                          const int32_t* lang_tokens, const int32_t* lang_mask, int n_lang,
-                                         const float* raw_state, const float* noise) const {
+                                         const float* raw_state, const float* noise,
+                                         const float* prev, int n_prev, const float* weights,
+                                         float max_guidance) const {
     const int C = aex.cfg.chunk, MAD = aex.cfg.max_action_dim;
 
     // normalize state (first real_state_dim dims), pad rest with 0
@@ -254,7 +258,17 @@ std::vector<float> SmolvlaModel::predict(const float* pixels_all, int nv,
     for (int i = 0; i < real_state_dim; i++)
         state[i] = (raw_state[i] - state_mean[i]) / (state_std[i] + norm_eps);
 
-    std::vector<float> a = predict_normalized(pixels_all, nv, lang_tokens, lang_mask, n_lang, state.data(), noise);
+    std::vector<float> guide;
+    if (n_prev > 0) {
+        guide.assign((size_t)C * MAD, 0.0f);
+        for (int r = 0; r < n_prev; r++)
+            for (int j = 0; j < real_action_dim; j++)
+                guide[(size_t)r * MAD + j] =
+                    (prev[(size_t)r * real_action_dim + j] - action_mean[j]) / (action_std[j] + norm_eps);
+    }
+
+    std::vector<float> a = predict_normalized(pixels_all, nv, lang_tokens, lang_mask, n_lang, state.data(), noise,
+                                              guide.empty() ? nullptr : guide.data(), weights, max_guidance);
     if (a.empty()) return a;   // rejected input; the C ABI turns this into an error
 
     // un-normalize actions (first real_action_dim dims of each chunk row)
