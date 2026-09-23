@@ -170,7 +170,9 @@ warmup and exits, reporting the backend it ran on.
 The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
 so the robot side runs lerobot unchanged except for its client,
 `lerobot-vla-simd`, which ships in the
-[lerobot fork](https://github.com/khanhnd61-vr/lerobot):
+[lerobot fork](https://github.com/khanhnd61-vr/lerobot). It installs into
+`.serve`, or into any Python 3.12 venv on the robot when the server runs in
+Docker or on another machine:
 
 ```sh
 uv pip install --python .serve \
@@ -183,6 +185,20 @@ uv pip install --python .serve \
     --actions_per_chunk=50 \
     --task="pick up the tape"
 ```
+
+### Docker
+
+The image builds the package for the platform it is built on, x86-64 with AVX2
+or aarch64 (a Raspberry Pi 5):
+
+```sh
+docker build -t vla-simd .
+docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/build/act:/m:ro" vla-simd \
+    --model act --model-dir /m --host 0.0.0.0
+```
+
+`docker build --platform linux/arm64 -t vla-simd .` builds the Pi image on an
+x86-64 host under QEMU.
 
 ## Citation
 

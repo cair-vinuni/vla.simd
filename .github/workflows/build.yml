@@ -131,3 +131,23 @@ jobs:
               s._open_lib(spec.default_lib, f"vla_simd_{name}")
               print(name, spec.default_lib)
           EOF
+
+  docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t vla-simd .
+      - run: docker run --rm vla-simd --model act --help
+      - name: the image opens every library
+        run: |
+          docker run --rm -i --entrypoint python vla-simd - <<'EOF'
+          from vla_simd import policy_server as s
+          for name, spec in s.MODELS.items():
+              s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              print(name, spec.default_lib)
+          EOF

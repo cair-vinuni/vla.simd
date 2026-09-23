@@ -1,0 +1,9 @@
+*
+!CMakeLists.txt
+!LICENSE
+!README.md
+!include
+!pyproject.toml
+!src
+!vla_simd
+**/__pycache__
