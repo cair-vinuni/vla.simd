@@ -57,7 +57,7 @@ struct OctoTransformer {
 
     // Boolean keep mask (1 = attend, 0 = block): block-causal rules AND key-side pad.
     // timestep_mask[t] = 1 for a real timestep, 0 for history padding.
-    void build_mask(int wnd, const uint8_t* timestep_mask, uint8_t* keep) const;
+    void build_mask(int wnd, const uint8_t* timestep_mask, bool wrist, uint8_t* keep) const;
 
     // t5_out [n_task, t5_dim]; stem_p [wnd, tok_primary, stem_dim]; stem_w [wnd,
     // tok_wrist, stem_dim] -> out [total_tokens(wnd), d] (post final LayerNorm).

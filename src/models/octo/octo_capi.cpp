@@ -41,7 +41,7 @@ int32_t vla_octo_predict_ex(void* h, const uint8_t* primary, const uint8_t* wris
                             int32_t wnd, const uint8_t* timestep_mask,
                             const char* instruction, const float* noise, const float* z,
                             uint64_t seed, int32_t unnormalize, float* actions) try {
-    if (!h || !primary || !wrist || !timestep_mask || !instruction || !actions)
+    if (!h || !primary || !timestep_mask || !instruction || !actions)
         return VLA_ERR_ARG;
     auto* m = static_cast<OctoModel*>(h);
     // The position tables are sized [max_horizon, tokens, d]; a larger window

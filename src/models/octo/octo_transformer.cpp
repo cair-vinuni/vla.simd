@@ -106,7 +106,7 @@ static bool attends(int gi, int ti, int gj, int tj) {
     return gi == 4 && gj == 4 && tj <= ti;             // readout -> own readout only
 }
 
-void OctoTransformer::build_mask(int wnd, const uint8_t* timestep_mask, uint8_t* keep) const {
+void OctoTransformer::build_mask(int wnd, const uint8_t* timestep_mask, bool wrist, uint8_t* keep) const {
     const int per   = tokens_per_step();
     const int total = total_tokens(wnd);
 
@@ -129,7 +129,7 @@ void OctoTransformer::build_mask(int wnd, const uint8_t* timestep_mask, uint8_t*
             ts[idx]  = t;
             // obs_primary/wrist keys are masked at padded timesteps; the repeated
             // task tokens and readouts are not (matches octo_module.py).
-            pad[idx] = (grp[idx] == 1 || grp[idx] == 2) ? timestep_mask[t] : 1;
+            pad[idx] = grp[idx] == 1 ? timestep_mask[t] : grp[idx] == 2 ? wrist && timestep_mask[t] : 1;
         }
 
     for (int i=0; i<total; i++)
@@ -167,11 +167,12 @@ void OctoTransformer::forward(const float* t5_out, const float* stem_p, const fl
             row[i] += pp[i];
 
         row += (size_t)cfg.tok_primary*D;
-        proj_wrist.forward(row, stem_w+(size_t)t*cfg.tok_wrist*cfg.stem_dim, cfg.tok_wrist);
-
-        const float* pw = pos_wrist+(size_t)t*cfg.tok_wrist*D;
-        for (size_t i = 0; i < (size_t)cfg.tok_wrist*D; i++)
-            row[i] += pw[i];
+        if (stem_w) {
+            proj_wrist.forward(row, stem_w+(size_t)t*cfg.tok_wrist*cfg.stem_dim, cfg.tok_wrist);
+            const float* pw = pos_wrist+(size_t)t*cfg.tok_wrist*D;
+            for (size_t i = 0; i < (size_t)cfg.tok_wrist*D; i++)
+                row[i] += pw[i];
+        }
 
         row += (size_t)cfg.tok_wrist*D;
         std::memcpy(row, task.data(), task.size()*sizeof(float));   // repeated task tokens
@@ -186,11 +187,12 @@ void OctoTransformer::forward(const float* t5_out, const float* stem_p, const fl
     int mask_key = wnd;
     for (int t=0; t<wnd; t++)
         mask_key = mask_key*2+(timestep_mask[t] ? 1 : 0);
+    mask_key = mask_key*2+(stem_w ? 1 : 0);
 
     std::vector<float>& mask = mask_cache[mask_key];
     if (mask.empty()) {
         std::vector<uint8_t> keep((size_t)total*total);
-        build_mask(wnd, timestep_mask, keep.data());
+        build_mask(wnd, timestep_mask, stem_w != nullptr, keep.data());
 
         const float NEG = std::numeric_limits<float>::lowest();
         mask.resize((size_t)total*total);

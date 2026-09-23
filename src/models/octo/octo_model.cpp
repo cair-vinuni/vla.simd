@@ -179,16 +179,17 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
 
     // vision (goal images absent -> zeros, language-conditioned)
     std::vector<float> sp ((size_t)wnd*tf.cfg.tok_primary*tf.cfg.stem_dim);
-    std::vector<float> sw ((size_t)wnd*tf.cfg.tok_wrist  *tf.cfg.stem_dim);
+    std::vector<float> sw (wrist ? (size_t)wnd*tf.cfg.tok_wrist*tf.cfg.stem_dim : 0);
     for (int t=0; t<wnd; t++) {
         stem_primary.encode(primary+(size_t)t*256*256*3, nullptr, 256, 256,
                             sp.data()+(size_t)t*tf.cfg.tok_primary*tf.cfg.stem_dim);
-        stem_wrist.encode(wrist+(size_t)t*128*128*3, nullptr, 128, 128,
-                          sw.data()+(size_t)t*tf.cfg.tok_wrist*tf.cfg.stem_dim);
+        if (wrist)
+            stem_wrist.encode(wrist+(size_t)t*128*128*3, nullptr, 128, 128,
+                              sw.data()+(size_t)t*tf.cfg.tok_wrist*tf.cfg.stem_dim);
     }
     prof.tick("stems");
 
-    run_from_stems(sp.data(), sw.data(), wnd, timestep_mask, instruction,
+    run_from_stems(sp.data(), wrist ? sw.data() : nullptr, wnd, timestep_mask, instruction,
                    noise, z, seed, unnormalize, actions);
 }
 
