@@ -13,10 +13,11 @@ compile_commands.json
 .venv*/
 .numpy/
 .lerobot/
+.impact/
 .turbovla/
 .octo/
 .serve/
 __pycache__/
 *.py[cod]
-# plain `pip install -e .` builds in-tree; uv does not
 *.egg-info/
+dist/

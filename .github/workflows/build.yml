@@ -115,3 +115,19 @@ jobs:
             nm -D --defined-only "stage/lib/libvla_simd_$l.so" | grep -q vla_abi_version \
               || { echo "libvla_simd_$l.so is missing vla_abi_version"; exit 1; }
           done
+
+  wheel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m pip wheel --no-deps -w dist .
+      - run: python3 -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
+      - name: the installed server opens every library
+        run: |
+          /tmp/w/bin/python -I - <<'EOF'
+          from vla_simd import policy_server as s
+          for name, spec in s.MODELS.items():
+              s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              print(name, spec.default_lib)
+          EOF

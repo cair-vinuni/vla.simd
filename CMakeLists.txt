@@ -222,7 +222,9 @@ function(vla_add_shared name capi_src)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   add_library(vla::${name} ALIAS ${name})
-  set_target_properties(${name} PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
+  if(NOT SKBUILD)
+    set_target_properties(${name} PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
+  endif()
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(${name} PRIVATE -fno-semantic-interposition)
   endif()
@@ -235,7 +237,7 @@ vla_add_shared(vla_simd_turbovla src/models/turbovla/turbovla_capi.cpp tcpu_turb
 vla_add_shared(vla_simd_impact  src/models/impact/impact_capi.cpp    tcpu_impact)
 vla_add_shared(vla_simd_diffusion src/models/diffusion/diffusion_capi.cpp tcpu_diffusion)
 
-if(PROJECT_IS_TOP_LEVEL)
+if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   enable_testing()
   add_executable(test_ops tests/test_ops.cpp)
   target_link_libraries(test_ops PRIVATE tcpu_ops)
@@ -278,6 +280,13 @@ elseif(VLA_LTO)
   message(STATUS "vla_simd: LTO unavailable (${VLA_IPO_WHY})")
 endif()
 
+
+if(SKBUILD)
+  install(TARGETS vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla
+                  vla_simd_impact vla_simd_diffusion
+          LIBRARY DESTINATION vla_simd)
+  return()
+endif()
 
 # ---------------------------------------------------------------------------
 # Install / export for find_package(vla_simd). Only the shared libs and the C

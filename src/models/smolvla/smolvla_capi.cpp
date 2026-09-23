@@ -42,7 +42,7 @@ struct Handle {
 // whitespace-separated token *pairs*, which desynchronizes on the very first
 // line - `instruction <free text>` - for any instruction with an odd word count,
 // after which no key ever matched and these settings silently kept their
-// defaults. The Python readers (serve/, tools/) already split this way.
+// defaults. The Python readers (vla_simd/, tools/) already split this way.
 void read_config(const std::string& dir, Handle* hh) {
     std::ifstream f(dir + "/config.txt");
     if (!f) return;

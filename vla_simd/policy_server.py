@@ -4,12 +4,12 @@ policy_server.py
 
 One server for every policy in the tree:
 
-    python serve/policy_server.py --model act       --model-dir build/act
-    python serve/policy_server.py --model octo      --model-dir build/octo
-    python serve/policy_server.py --model impact    --model-dir build/impact
-    python serve/policy_server.py --model turbovla  --model-dir build/turbovla
-    python serve/policy_server.py --model smolvla   --model-dir build/smolvla
-    python serve/policy_server.py --model diffusion --model-dir build/diffusion
+    vla-simd-serve --model act       --model-dir build/act
+    vla-simd-serve --model octo      --model-dir build/octo
+    vla-simd-serve --model impact    --model-dir build/impact
+    vla-simd-serve --model turbovla  --model-dir build/turbovla
+    vla-simd-serve --model smolvla   --model-dir build/smolvla
+    vla-simd-serve --model diffusion --model-dir build/diffusion
 
 It speaks lerobot's async-inference protocol and is a drop-in replacement for
 `lerobot.async_inference.policy_server`: same gRPC service, same messages, same
@@ -64,6 +64,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_EXT = ".dylib" if sys.platform == "darwin" else ".so"
+LIB_DIRS = (*(sys.modules[__package__].__path__ if __package__ else ()), os.path.join(HERE, "build"))
 
 U8P = ctypes.POINTER(ctypes.c_uint8)
 F32P = ctypes.POINTER(ctypes.c_float)
@@ -748,14 +749,14 @@ class DiffusionAdapter(ActAdapter):
 # model specs: everything the shared server needs to know about a model
 # ---------------------------------------------------------------------------
 class ModelSpec:
-    def __init__(self, name, policy_type, engine_cls, adapter_cls, lib, model_dir,
+    def __init__(self, name, policy_type, engine_cls, adapter_cls, lib,
                  omp_threads, obs_queue_timeout, extra_args=()):
         self.name = name
         self.policy_type = policy_type
         self.engine_cls = engine_cls
         self.adapter_cls = adapter_cls
-        self.default_lib = os.path.join(HERE, "build", lib + LIB_EXT)
-        self.default_model_dir = os.path.join(HERE, "build", model_dir)
+        paths = [os.path.join(d, lib + LIB_EXT) for d in LIB_DIRS]
+        self.default_lib = next((p for p in paths if os.path.exists(p)), paths[-1])
         self.omp_threads = omp_threads
         self.obs_queue_timeout = obs_queue_timeout
         self.extra_args = extra_args
@@ -775,10 +776,10 @@ def _smolvla_extra(p):
                    help="RTC inference delay in actions (default: measured from latency and --fps)")
 
 
-ACT = ModelSpec("ACT", "act", ActEngine, ActAdapter, "libvla_simd_act", "act",
+ACT = ModelSpec("ACT", "act", ActEngine, ActAdapter, "libvla_simd_act",
                 omp_threads="6", obs_queue_timeout=2.0)
 SMOLVLA = ModelSpec("SmolVLA", "smolvla", SmolvlaEngine, SmolvlaAdapter,
-                    "libvla_simd_smolvla", "smolvla",
+                    "libvla_simd_smolvla",
                     omp_threads="4", obs_queue_timeout=5.0, extra_args=(_smolvla_extra,))
 
 
@@ -788,7 +789,7 @@ def _lang_extra(p):
 
 
 IMPACT = ModelSpec("IMPACT", "impact", ImpactEngine, ImpactAdapter,
-                   "libvla_simd_impact", "impact",
+                   "libvla_simd_impact",
                    omp_threads="6", obs_queue_timeout=2.0, extra_args=(_lang_extra,))
 
 
@@ -809,13 +810,13 @@ def _diffusion_extra(p):
 
 
 OCTO = ModelSpec("Octo-Small", "octo", OctoEngine, OctoAdapter,
-                 "libvla_simd_octo", "octo",
+                 "libvla_simd_octo",
                  omp_threads="8", obs_queue_timeout=2.0, extra_args=(_octo_extra,))
 TURBOVLA = ModelSpec("TurboVLA", "turbovla", TurboVlaEngine, TurboVlaAdapter,
-                     "libvla_simd_turbovla", "turbovla",
+                     "libvla_simd_turbovla",
                      omp_threads="8", obs_queue_timeout=2.0, extra_args=(_lang_extra,))
 DIFFUSION = ModelSpec("Diffusion Policy", "diffusion", DiffusionEngine, DiffusionAdapter,
-                      "libvla_simd_diffusion", "diffusion",
+                      "libvla_simd_diffusion",
                       omp_threads="6", obs_queue_timeout=5.0, extra_args=(_diffusion_extra,))
 
 MODELS = {
@@ -1058,7 +1059,7 @@ def main():
     if not known.model:
         sys.exit(
             "pass --model: " + ", ".join(sorted(MODELS)) + "\n"
-            "  python serve/policy_server.py --model act --model-dir build/act"
+            "  vla-simd-serve --model act --model-dir build/act"
         )
     spec = MODELS[known.model]
 
@@ -1079,7 +1080,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", choices=sorted(MODELS), default=spec.policy_type,
                    help="which policy to serve")
-    p.add_argument("--model-dir", default=spec.default_model_dir,
+    p.add_argument("--model-dir", required=True,
                    help="converted checkpoint (.meta/.bin + stats + config.txt)")
     p.add_argument("--lib", default=spec.default_lib,
                    help=f"path to {os.path.basename(spec.default_lib)}")
@@ -1195,7 +1196,7 @@ def main():
             sys.exit(
                 f"lerobot is required for the async-inference wire types ({e}).\n"
                 "Install it in this environment:\n"
-                "  uv pip install --python .serve -e '.[serve]'"
+                "  uv pip install --python .serve '.[serve]' --torch-backend cpu"
             )
 
         server = grpc.server(

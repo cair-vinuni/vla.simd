@@ -33,6 +33,11 @@ Presets (`cmake --preset <name>`): `release`, `debug`, `ci` (release plus
 `-Werror`). Configure with `-DVLA_SANITIZE=address,undefined` for a sanitizer
 build.
 
+`pip install .` builds the same libraries through scikit-build-core into the
+`vla-simd` Python package, next to the policy server; [Serve](#serve) installs it
+that way. From a checkout, `python vla_simd/policy_server.py` runs the server
+against `build/` instead.
+
 ## Convert
 
 The engine loads flat `.meta`/`.bin` arenas, not framework checkpoints, so every
@@ -41,30 +46,31 @@ still installs torch for lerobot's wire types, but builds no torch model.
 
 **A torch converter must run in the environment its checkpoint was trained in**,
 not one shared venv. Five environments cover the six policies, all of them
-extras in [pyproject.toml](pyproject.toml):
+dependency groups in [pyproject.toml](pyproject.toml), which install without
+building the engine:
 
 | venv | install | Python | converts |
 | --- | --- | --- | --- |
-| `.lerobot` | `-e '.[lerobot]'` | >=3.12 | ACT, Diffusion Policy, SmolVLA |
-| `.impact` | `-e '.[impact]'` | >=3.12 | IMPACT (from the lerobot fork) |
-| `.turbovla` | `-e '.[turbovla]'` | >=3.10 | TurboVLA |
-| `.octo` | `-e '.[octo]'` | 3.10 or 3.11 | Octo (x86-64 or macOS) |
-| `.numpy` | `-e '.[numpy]'` | >=3.10 | SmolVLA (torch-free) |
+| `.lerobot` | `--group lerobot` | >=3.12 | ACT, Diffusion Policy, SmolVLA |
+| `.impact` | `--group impact` | >=3.12 | IMPACT (from the lerobot fork) |
+| `.turbovla` | `--group turbovla` | >=3.10 | TurboVLA |
+| `.octo` | `--group octo` | 3.10 or 3.11 | Octo (x86-64 or macOS) |
+| `.numpy` | `--group numpy` | >=3.10 | SmolVLA (torch-free) |
 
 Create only the one you need:
 
 ```sh
-uv venv .numpy --prompt numpy                   && uv pip install --python .numpy    -e '.[numpy]'
-uv venv .lerobot --prompt lerobot --python 3.12 && uv pip install --python .lerobot  -e '.[lerobot]'  --torch-backend cpu
-uv venv .impact --prompt impact --python 3.12   && uv pip install --python .impact   -e '.[impact]'   --torch-backend cpu
-uv venv .turbovla --prompt turbovla             && uv pip install --python .turbovla -e '.[turbovla]' --torch-backend cpu
+uv venv .numpy --prompt numpy                   && uv pip install --python .numpy    --group numpy
+uv venv .lerobot --prompt lerobot --python 3.12 && uv pip install --python .lerobot  --group lerobot  --torch-backend cpu
+uv venv .impact --prompt impact --python 3.12   && uv pip install --python .impact   --group impact   --torch-backend cpu
+uv venv .turbovla --prompt turbovla             && uv pip install --python .turbovla --group turbovla --torch-backend cpu
 
 # TurboVLA also needs the upstream checkout and its released checkpoint
 git clone https://github.com/H-EmbodVis/TurboVLA third_party/TurboVLA
 .turbovla/bin/hf download H-EmbodVis/TurboVLA checkpoints/libero/turbovla_libero.pth --local-dir build/turbovla_ckpt
 
 # Octo also needs the upstream checkout, installed without its own pins
-uv venv .octo --prompt octo --python 3.10 && uv pip install --python .octo -e '.[octo]'
+uv venv .octo --prompt octo --python 3.10 && uv pip install --python .octo --group octo
 git clone https://github.com/octo-models/octo third_party/octo
 uv pip install --python .octo -e third_party/octo --no-deps
 ```
@@ -113,20 +119,21 @@ The policies evaluated in the paper are public on the Hugging Face Hub:
 
 ## Serve
 
-Serving is one environment for every policy, and the only one the robot needs:
+Serving is one environment for every policy, and the only one the robot needs.
+Installing the package builds the engine:
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
-uv pip install --python .serve -e '.[serve]' --torch-backend cpu
+uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
-One `serve/policy_server.py` serves every policy; `--model` picks which, and
-`$CORES` is the OpenMP thread count:
+One `vla-simd-serve` serves every policy; `--model` picks which, `--model-dir`
+is the converted directory, and `$CORES` is the OpenMP thread count:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
 
-OMP_NUM_THREADS=$CORES .serve/bin/python serve/policy_server.py \
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve \
     --model <name> --model-dir build/<name> --port 8080
 ```
 

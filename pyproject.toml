@@ -1,22 +1,18 @@
 [project]
-name = "vla-simd-tooling"
-version = "0.1.0"
-description = "Python tooling for vla.simd: checkpoint converters and the policy server."
+name = "vla-simd"
+dynamic = ["version"]
+description = "CPU inference engine for Vision-Language-Action policies, with a lerobot-compatible policy server."
 readme = "README.md"
-# Floor only. The extras disagree on the ceiling: serve/lerobot need >=3.12,
-# octo stops resolving at 3.12. Per-extra ranges are in the README table.
+# Floor only. The environments disagree on the ceiling: serve/lerobot need >=3.12,
+# octo stops resolving at 3.12. Per-environment ranges are in the README table.
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+dependencies = ["numpy>=2.1,<3"]
 
-# Empty on purpose: a base dependency applies to every extra, and octo pins
-# numpy 1.24.3 against everyone else's >=2.1. Each extra declares its own.
-dependencies = []
-
-# One venv per extra, never combined: uv pip install -e '.[<name>]'
 [project.optional-dependencies]
 
-# serve/policy_server.py. Python >=3.12.
+# vla_simd/policy_server.py. Python >=3.12.
 #
 # lerobot is here for the wire types only: the payloads are pickled lerobot
 # dataclasses. No policy is built, inference is libvla_simd_<model>.so.
@@ -25,10 +21,15 @@ dependencies = []
 # reinstall CPU torch after, not before, since lerobot overwrites it:
 #   uv pip install --index-url https://download.pytorch.org/whl/cpu torch
 serve = [
-    "numpy>=2.1,<3",
     "lerobot[async]>=0.6.1,<0.7",
     "torch>=2.8,<3",
 ]
+
+[project.scripts]
+vla-simd-serve = "vla_simd.policy_server:main"
+
+# One venv per group, never combined: uv pip install --group <name>
+[dependency-groups]
 
 # Torch-free convert path
 numpy = [
@@ -78,11 +79,16 @@ octo = [
     "huggingface_hub==0.20.3",     # transformers 4.36 predates the hub 1.0 rename
 ]
 
-# Metadata-only: the code in tools/ and serve/ is run by path, never imported.
-# This exists to carry the extras, and installs under plain pip as well as uv.
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=1.0"]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools]
-py-modules = []             # installs the pinned deps, no package
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.py-api = "py3"
+
+[[tool.dynamic-metadata]]
+provider = "scikit_build_core.metadata.regex"
+field = "version"
+input = "CMakeLists.txt"
+regex = 'project\(vla_simd VERSION (?P<value>[0-9.]+)'

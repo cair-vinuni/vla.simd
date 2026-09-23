@@ -49,7 +49,7 @@ if not os.path.isdir(OCTO_SRC):
         "which is a separate checkout:\n"
         "  git clone https://github.com/octo-models/octo third_party/octo\n"
         "  uv pip install -e third_party/octo --no-deps\n"
-        "See the `octo` extra in pyproject.toml for the rest of the frozen environment."
+        "See the `octo` dependency group in pyproject.toml for the rest of the frozen environment."
     )
 sys.path.insert(0, OCTO_SRC)
 

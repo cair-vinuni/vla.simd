@@ -3,7 +3,7 @@
 convert_lerobot_ckpt.py
 
 Convert a finetuned lerobot SmolVLA checkpoint into the flat .meta/.bin weight
-format of the vla.simd engine, so serve/policy_server.py can run it.
+format of the vla.simd engine, so vla_simd/policy_server.py can run it.
 
 Same output layout as convert_hf_safetensors.py (which converts the HuggingFaceVLA
 base models), but reads the checkpoint through the lerobot factories a torch
