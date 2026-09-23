@@ -6,7 +6,8 @@ readme = "README.md"
 # Floor only. The extras disagree on the ceiling: serve/lerobot need >=3.12,
 # octo stops resolving at 3.12. Per-extra ranges are in the README table.
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 # Empty on purpose: a base dependency applies to every extra, and octo pins
 # numpy 1.24.3 against everyone else's >=2.1. Each extra declares its own.
@@ -20,15 +21,12 @@ dependencies = []
 # lerobot is here for the wire types only: the payloads are pickled lerobot
 # dataclasses. No policy is built, inference is libvla_simd_<model>.so.
 #
-# protobuf is absent from lerobot's own deps (`No module named 'google'`). On
-# aarch64 lerobot resolves torch to the CUDA build (~3.5 GB of nvidia-* wheels);
+# On aarch64 lerobot resolves torch to the CUDA build (~3.5 GB of nvidia-* wheels);
 # reinstall CPU torch after, not before, since lerobot overwrites it:
 #   uv pip install --index-url https://download.pytorch.org/whl/cpu torch
 serve = [
     "numpy>=2.1,<3",
-    "lerobot>=0.6.1,<0.7",   # 0.6.0 fixes CVE-2026-25874
-    "grpcio>=1.68,<2",
-    "protobuf>=5.29,<8",
+    "lerobot[async]>=0.6.1,<0.7",
     "torch>=2.8,<3",
 ]
 
@@ -39,27 +37,36 @@ numpy = [
                                  # the converter parses the header itself
 ]
 
-# ACT, IMPACT, Diffusion, and the torch SmolVLA/Octo paths.
+# ACT, Diffusion and the torch SmolVLA path.
 lerobot = [
-    "lerobot[smolvla]>=0.6.1,<0.7",   # [smolvla] is what pulls transformers, which
-                                      # convert_lerobot_ckpt.py needs
+    "lerobot[smolvla,diffusion]>=0.6.1,<0.7",
     "numpy>=2.1,<3",
     "safetensors>=0.6,<1",            # direct import in convert_impact.py and
                                       # convert_diffusion.py
+]
+
+impact = [
+    "lerobot[impact] @ git+https://github.com/khanhnd61-vr/lerobot@4b33b84296c0880ebce778d69f16a38d33825575",
+    "numpy>=2.1,<3",
+    "safetensors>=0.6,<1",
 ]
 
 # TurboVLA
 turbovla = [
     "numpy>=2.1,<3",
     "torch>=2.8,<3",
-    "transformers>=4.57,<5",
+    "transformers>=4.56,<4.57.2",
 ]
 
 # Jax Octo
 octo = [
     "jax==0.4.20",                 # what octo-small-1.5 was released against
+    "jaxlib==0.4.20",
     "flax==0.7.5",                 # jax 0.4.20-compatible
-    "tensorflow-cpu==2.15.0",      # only for tf.io.gfile, which orbax reads through
+    "tensorflow-cpu==2.15.0; platform_machine == 'x86_64'",   # only for tf.io.gfile, which orbax reads through
+    "tensorflow==2.15.0; platform_machine != 'x86_64'",
+    "orbax-checkpoint==0.4.4",
+    "tensorstore==0.1.45",
     "distrax==0.1.5",              # octo's action head imports it
     "chex==0.1.85",                # distrax/optax dependency, pinned with them
     "optax==0.1.5",
@@ -75,12 +82,8 @@ octo = [
 
 # Metadata-only: the code in tools/ and serve/ is run by path, never imported.
 # This exists to carry the extras, and installs under plain pip as well as uv.
-#
-# `uv lock` would resolve every extra together and bake in the 0.3.3 backsolve
-# above; it would need [tool.uv] conflicts for numpy/turbovla and
-# lerobot/turbovla.
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
