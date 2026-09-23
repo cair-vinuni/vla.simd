@@ -53,7 +53,7 @@ struct DPResBlock {
 
 struct DPUNet1d {
     DPConfig cfg;
-    std::vector<float> data;
+    std::vector<std::vector<float>> data;
 
     // diffusion timestep encoder: sinusoidal -> Linear -> Mish -> Linear
     nn::Linear step1, step2;

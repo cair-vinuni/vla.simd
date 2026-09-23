@@ -5,11 +5,11 @@
  */
 
 #include "models/diffusion/unet1d.h"
-#include "models/arena.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include <cmath>
 #include <cstring>
+#include <fstream>
 
 namespace tcpu {
 
@@ -34,18 +34,38 @@ namespace tcpu {
 bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c) {
     cfg = c;
     if (cfg.down_dims.empty()) return false;
-    if (!read_arena(dir + "/" + name + ".bin", data)) return false;
+    std::ifstream bin(dir + "/" + name + ".bin", std::ios::binary | std::ios::ate);
+    if (!bin) return false;
+    size_t left = (size_t)bin.tellg();
+    bin.seekg(0);
 
     const int A  = cfg.action_dim;
     const int D  = cfg.step_embed_dim;
     const int CD = cfg.cond_dim();
     const int k  = cfg.kernel_size;
-    ArenaCursor<float> take{data};
+    data.clear();
+    auto take = [&](size_t n) {
+        const bool fits = bin && n <= left/sizeof(float);
+        data.emplace_back(fits ? n : 0);
+        if (!fits) {
+            bin.setstate(std::ios::failbit);
+        } else {
+            bin.read(reinterpret_cast<char*>(data.back().data()), (std::streamsize)(n*sizeof(float)));
+            left -= n*sizeof(float);
+        }
+        return (const float*)data.back().data();
+    };
 
     auto lin = [&](nn::Linear& L, int N, int K, nn::Linear::Role r) {
         const float* w = take((size_t)N*K);
         const float* b = take(N);
-        if (take.ok) L.init(w, b, N, K, r);
+        if (!bin) return;
+        L.init(w, b, N, K, r);
+        if (L.drop_raw()) {
+            std::vector<float>& raw = data[data.size()-2];
+            raw.clear();
+            raw.shrink_to_fit();
+        }
     };
 
     auto conv_block = [&](DPConvBlock& cb, int cin, int cout, int kk) {
@@ -115,7 +135,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
     conv_block(final_block, cfg.down_dims[0], cfg.down_dims[0], k);
     lin(final_conv, A, cfg.down_dims[0], nn::Linear::Role::Generic);
 
-    return take.done();
+    return bin && left == 0;
 }
 
 void DPConvBlock::forward(float* out, const float* x, int T, int groups, float eps,
