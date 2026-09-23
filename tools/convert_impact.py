@@ -425,11 +425,10 @@ def dump_tokenizer(out_dir, vocab_full):
         if i >= vocab_full:
             break
         table[i] = (entry[0], float(entry[1]))
-    # The 100 extra_id sentinels live in added_tokens, past the unigram table.
     for i in range(len(pieces), vocab_full):
-        table[i] = (fast.convert_ids_to_tokens(i), 0.0)
+        table[i] = (fast.convert_ids_to_tokens(i) or "", 0.0)
 
-    with open(os.path.join(out_dir, "vocab.txt"), "w") as f:
+    with open(os.path.join(out_dir, "vocab.txt"), "w", encoding="utf-8") as f:
         for piece, score in table:
             f.write(f"{piece}\t{score}\n")
 
@@ -451,19 +450,16 @@ def load_dataset_stats(ckpt_dir):
     import glob
     if not ckpt_dir:
         return {}
+    from safetensors import safe_open
     stats, want = {}, ("mean", "std")
     for f in sorted(glob.glob(os.path.join(ckpt_dir, "*normalizer*.safetensors"))):
-        try:
-            from safetensors import safe_open
-        except ImportError:
-            return {}
         with safe_open(f, "pt") as sf:
             for k in sf.keys():
                 feat, _, field = k.rpartition(".")
                 if field in want:
                     stats.setdefault(feat, {})[field] = _to_numpy(sf.get_tensor(k))
         if stats:
-            break                      # preprocessor sorts first and holds them all
+            break
     return stats
 
 
@@ -510,6 +506,9 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     if args.ckpt:
+        if not os.path.isdir(args.ckpt):
+            from huggingface_hub import snapshot_download
+            args.ckpt = snapshot_download(args.ckpt)
         from lerobot.policies.impact.modeling_impact import IMPACTPolicy
         log(f"loading {args.ckpt}")
         policy = IMPACTPolicy.from_pretrained(args.ckpt)
@@ -528,6 +527,13 @@ def main():
 
     policy.eval()
     sd = policy.state_dict()
+    cfg = policy.config
+    if getattr(cfg, "pre_norm", False) or "model.encoder.norm.weight" in sd:
+        sys.exit("pre_norm checkpoints are not supported by the engine (post-norm only)")
+    if getattr(cfg, "feedforward_activation", "relu") != "relu":
+        sys.exit(f"only relu feedforward is supported, got {cfg.feedforward_activation}")
+    if sd["model.encoder_1d_feature_pos_embed.weight"].shape[0] != 2:
+        sys.exit("the engine builds exactly [latent, state] 1-D tokens; env_state is not supported")
     log(f"converting -> {args.out}  ({img_h}x{img_w}, cams {cam_keys})")
 
     film_after = dump_vision(sd, policy, args.out)
@@ -538,6 +544,8 @@ def main():
     state_dim = policy.config.robot_state_feature.shape[0]
     action_dim = policy.config.action_feature.shape[0]
     stats = load_dataset_stats(args.ckpt)
+    if args.ckpt and not {"observation.state", "action"} <= stats.keys():
+        sys.exit(f"no state/action mean+std in *normalizer*.safetensors under {args.ckpt}")
     if stats:
         log(f"  stats           dataset statistics from the checkpoint's normalizer "
             f"({len(stats)} features)")

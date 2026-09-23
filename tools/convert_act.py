@@ -319,11 +319,17 @@ def main():
         sys.exit("pre_norm checkpoints are not supported by the engine (post-norm only)")
     if cfg.feedforward_activation != "relu":
         sys.exit(f"only relu feedforward is supported, got {cfg.feedforward_activation}")
+    if cfg.env_state_feature or not cfg.robot_state_feature:
+        sys.exit("ACT export needs a robot state and no environment state")
+    want = dict.fromkeys(("VISUAL", "STATE", "ACTION"), "MEAN_STD")
+    got = {k: cfg.normalization_mapping.get(k) for k in want}
+    if got != want:
+        sys.exit(f"normalization_mapping {got} != {want}, which the engine hard-codes")
 
     sd = policy.state_dict()
-    cam_keys = [k for k in cfg.input_features if k.startswith("observation.images.")]
+    cam_keys = list(cfg.image_features)
     cam_names = [k.rsplit(".", 1)[-1] for k in cam_keys]
-    _, img_h, img_w = cfg.input_features[cam_keys[0]].shape
+    _, img_h, img_w = cfg.image_features[cam_keys[0]].shape
     log(f"  {len(cam_keys)} cameras {cam_names} at {img_h}x{img_w}, chunk {cfg.chunk_size}")
 
     dump_backbone(sd, args.out, policy)

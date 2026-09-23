@@ -10,7 +10,7 @@ reference; this one exists so a serving box (a Raspberry Pi, here) can convert a
 checkpoint it could never load through the training stack.
 
     python3 tools/convert_hf_safetensors.py khanhnd61/smolvla_so101_tape_prune6 \
-        build/smolvla --task "pick up the tape"
+        build/smolvla --task "pick up the tape" --pos-ids identity
 
 Accepts a Hub id (downloaded to ~/.cache/vla_simd) or a local directory holding
 config.json / model.safetensors / policy_*.json / the two normalizer
@@ -24,13 +24,12 @@ What it must reproduce, and cannot read off the checkpoint:
     count comes from the tensor names in the safetensors header, never from the
     config.
   * **SigLIP position ids.** SmolVLM buckets fractional patch coordinates rather
-    than indexing 0..n-1, and transformers 4.57 shifted every bucket down by one
-    (`k/n*(1-1e-6)` replaced `arange(0, 1-1e-6, 1/n)`). The torch converter
-    captures the mapping from the installed transformers with a forward hook; with
-    no transformers to ask, `--pos-ids` selects it and defaults to `shifted`
-    (4.57+). Getting this wrong loads, runs, and is quietly wrong - the ViT alone
-    drops to cos=0.86. `tools/check_dataset.py` discriminates the two
-    empirically against recorded actions.
+    than indexing 0..n-1, and transformers 4.55-4.57 shifted every bucket down by
+    one (`k/n*(1-1e-6)` replaced `arange(0, 1-1e-6, 1/n)`); 5.0 restored the
+    identity. The torch converter captures the mapping from the installed
+    transformers with a forward hook; with no transformers to ask, `--pos-ids`
+    must be given. Getting this wrong loads, runs, and is quietly wrong - the ViT
+    alone drops to cos=0.86.
 
 Everything else is structural and is asserted against the header rather than
 assumed: dtypes, shapes, and which expert layers are cross-attention.
@@ -167,8 +166,8 @@ def position_ids(side, mode):
 
     boundaries = arange(1/n, 1, 1/n); the coordinate of patch k is bucketized with
     torch.bucketize(..., right=True), i.e. the first boundary strictly greater.
-      identity (<=4.56): coord = arange(0, 1-1e-6, 1/n)  -> [0, 1, ..., n-1]
-      shifted  (>=4.57): coord = k/n * (1-1e-6)          -> [0, 0, 1, ..., n-2]
+      identity (<=4.54, >=5.0): coord = arange(0, 1-1e-6, 1/n)  -> [0, 1, ..., n-1]
+      shifted  (4.55-4.57):     coord = k/n * (1-1e-6)          -> [0, 0, 1, ..., n-2]
     """
     boundaries = np.arange(1, side, dtype=np.float64) / side
     k = np.arange(side, dtype=np.float64)
@@ -251,12 +250,12 @@ def dump_vit(st, out, vc, n_img_tok, mm_out, pos_mode):
         st.bf16("model.vlm_with_expert.vlm.model.connector.modality_projection.proj.weight").tofile(f)
 
 
-def dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn):
+def dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn, san):
     with open(f"{out}/aex.meta", "w") as f:
         f.write(f"expert_h {expert_h}\nexpert_ffn {expert_ffn}\nn_q {cfg_text['n_q']}\n")
         f.write(f"n_kv {cfg_text['n_kv']}\nhead_dim {cfg_text['head_dim']}\n")
         f.write(f"eps {cfg_text['eps']}\nrope_base {ROPE_BASE}\nn_layers {n_layers}\n")
-        f.write(f"self_attn_every_n {cfg['self_attn_every_n_layers']}\n")
+        f.write(f"self_attn_every_n {san}\n")
         f.write(f"chunk {cfg['chunk_size']}\nnum_steps {cfg['num_steps']}\n")
         f.write(f"max_action_dim {cfg['max_action_dim']}\n")
         f.write(f"min_period {cfg['min_period']}\nmax_period {cfg['max_period']}\n")
@@ -320,8 +319,10 @@ def main():
     p.add_argument("out", help="Output dir for the .meta/.bin weights")
     p.add_argument("--task", default=None,
                    help="Instruction written to config.txt (the robot's default prompt)")
-    p.add_argument("--pos-ids", choices=("shifted", "identity"), default="shifted",
-                   help="SigLIP position-id mapping: shifted = transformers >=4.57 (default)")
+    p.add_argument("--pos-ids", choices=("shifted", "identity"), required=True,
+                   help="SigLIP position-id mapping of the transformers the checkpoint was "
+                        "trained with: shifted = 4.55-4.57.x, identity = <=4.54 or >=5.0 "
+                        "(lerobot >=0.5 trains with transformers 5.x -> identity)")
     p.add_argument("--tokenizer", default=None,
                    help="Override the tokenizer repo id named by the preprocessor")
     args = p.parse_args()
@@ -332,6 +333,9 @@ def main():
     log(f"Reading {ckpt}")
 
     cfg = json.loads((ckpt / "config.json").read_text())
+    for k in ("add_image_special_tokens", "adapt_to_pi_aloha"):
+        if cfg.get(k):
+            sys.exit(f"{k}=True is not implemented by the engine")
     pre = json.loads((ckpt / "policy_preprocessor.json").read_text())
     post = json.loads((ckpt / "policy_postprocessor.json").read_text())
     st = Safetensors(ckpt / "model.safetensors")
@@ -349,7 +353,10 @@ def main():
                 "eps": 1e-5}
     expert_h = st.shape(f"{AEX}.layers.0.self_attn.q_proj.weight")[1]
     expert_ffn = st.shape(f"{AEX}.layers.0.mlp.gate_proj.weight")[0]
-    san = cfg["self_attn_every_n_layers"]
+    san = cfg["self_attn_every_n_layers"] if "cross" in cfg.get("attention_mode", "cross_attn") else 1
+    if san <= 0:
+        sys.exit(f"attention_mode={cfg.get('attention_mode')} with self_attn_every_n_layers={san} "
+                 "(all-cross expert) is not supported")
     check_expert_attn(st, n_layers, san, expert_h, kv_full)
 
     vh = st.shape(f"{VIT}.encoder.layers.0.self_attn.q_proj.weight")[0]
@@ -360,7 +367,9 @@ def main():
         sys.exit(f"position table {n_pos} != {(img // patch) ** 2} patches at {img}/{patch}")
     sf = st.shape("model.vlm_with_expert.vlm.model.connector.modality_projection.proj.weight")[1]
     sf = int(round((sf / vh) ** 0.5))                # shuffled_dim = hidden * sf^2
-    vc = {"hidden": vh, "n_heads": vh // 64, "inter": st.shape(f"{VIT}.encoder.layers.0.mlp.fc1.weight")[0],
+    vit_heads = {768: 12, 1152: 16}.get(vh) or sys.exit(
+        f"unknown SigLIP width {vh}: head count not derivable")
+    vc = {"hidden": vh, "n_heads": vit_heads, "inter": st.shape(f"{VIT}.encoder.layers.0.mlp.fc1.weight")[0],
           "n_layers": n_layers_of(st, f"{VIT}.encoder"), "patch": patch, "img": img,
           "ln_eps": 1e-6, "scale_factor": sf}
     n_img_tok = n_pos // (sf * sf)
@@ -368,7 +377,8 @@ def main():
     # cameras actually fed: the rename map is what the robot's keys become
     rename = next((s["config"]["rename_map"] for s in pre["steps"]
                    if s["registry_name"] == "rename_observations_processor"), {})
-    cams = [rename[k] for k in rename] or [k for k in cfg["input_features"] if "images" in k]
+    cams = [k for k, v in cfg["input_features"].items()
+            if v["type"] == "VISUAL" and (not rename or k in rename.values())]
     n_views = len(cams)
 
     log(f"  vlm layers={n_layers} (config says {cfg['num_vlm_layers']} pre-prune"
@@ -382,20 +392,23 @@ def main():
     log("Dumping weights ...")
     dump_vlm(st, out, cfg_text, n_layers)
     dump_vit(st, out, vc, n_img_tok, hidden, args.pos_ids)
-    dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn)
+    dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn, san)
     st.bf16(f"{VLM}.embed_tokens.weight").tofile(f"{out}/emb.bin")
     with open(f"{out}/heads.bin", "wb") as f:
         st.f32("model.state_proj.weight").tofile(f)
         st.f32("model.state_proj.bias").tofile(f)
 
     # ---- normalization statistics ----
-    def stats(spec, base, key):
-        sf_ = next(s["state_file"] for s in spec["steps"] if s.get("state_file"))
-        n = Safetensors(base / sf_)
+    def stats(spec, base, key, ftype):
+        step = next(s for s in spec["steps"] if s.get("state_file"))
+        mode = step["config"].get("norm_map", {}).get(ftype, "IDENTITY")
+        if mode != "MEAN_STD":
+            sys.exit(f"{key} is normalized {mode}; the engine implements MEAN_STD only")
+        n = Safetensors(base / step["state_file"])
         return n.f32(f"{key}.mean").reshape(-1), n.f32(f"{key}.std").reshape(-1)
 
-    smean, sstd = stats(pre, ckpt, "observation.state")
-    amean, astd = stats(post, ckpt, "action")
+    smean, sstd = stats(pre, ckpt, "observation.state", "STATE")
+    amean, astd = stats(post, ckpt, "action", "ACTION")
     smean.tofile(f"{out}/stats_state_mean.bin"); sstd.tofile(f"{out}/stats_state_std.bin")
     amean.tofile(f"{out}/stats_action_mean.bin"); astd.tofile(f"{out}/stats_action_std.bin")
     log(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")

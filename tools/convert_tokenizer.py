@@ -11,7 +11,7 @@ REPO = "HuggingFaceTB/SmolVLM2-500M-Instruct"
 OUT = "build/smolvla_tok"
 os.makedirs(OUT, exist_ok=True)
 
-tk = json.load(open(hf_hub_download(REPO, "tokenizer.json")))
+tk = json.load(open(hf_hub_download(REPO, "tokenizer.json"), encoding="utf-8"))
 model = tk["model"]
 vocab = model["vocab"]
 merges = model["merges"]

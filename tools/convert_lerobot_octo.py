@@ -145,12 +145,12 @@ def dump_transformer(sd, cfg, out, n_layers, d, n_heads, mlp, window):
     print(f"  octo: d={d} layers={n_layers} heads={n_heads} mlp={mlp} window={window}")
 
 
-def dump_head(sd, head, out, cfg):
+def dump_head(sd, head, out, cfg, d):
     dm = "model.heads.action.diffusion_model"
     rn = f"{dm}.reverse_network"
     action_dim = int(sd[f"{rn}.linear2.weight"].shape[0]) // cfg.chunk_size
     with open(f"{out}/head.meta", "w") as f:
-        f.write(f"emb 384\naction_dim {action_dim}\nhorizon {cfg.chunk_size}\ntime_dim 32\n")
+        f.write(f"emb {d}\naction_dim {action_dim}\nhorizon {cfg.chunk_size}\ntime_dim 32\n")
         f.write(f"num_blocks 3\nhidden 256\nsteps {cfg.num_diffusion_steps}\n")
         f.write(f"max_action {float(cfg.max_action)}\n")
     with open(f"{out}/head.bin", "wb") as f:
@@ -236,7 +236,7 @@ def main():
     dump_stem(sd, f"{ot}.observation_tokenizers.wrist.encoder", out, "stem_wrist")
     dump_transformer(sd, cfg, out, n_layers, d, n_heads, mlp, window)
     head = policy.model.heads["action"]
-    action_dim = dump_head(sd, head, out, cfg)
+    action_dim = dump_head(sd, head, out, cfg, d)
 
     # frozen language tower + tokenizer, copied from the base dump
     src = os.path.expanduser(args.t5_from)
@@ -244,7 +244,11 @@ def main():
         if not os.path.exists(os.path.join(src, fn)):
             sys.exit(f"missing {fn} in --t5-from {src}; run convert_octo.py once")
         shutil.copy2(os.path.join(src, fn), os.path.join(out, fn))
-    print(f"  t5: copied from {src} (frozen, absent from the checkpoint)")
+    if not os.path.isfile(os.path.join(src, "tok", "vocab.txt")):
+        sys.exit(f"missing tok/vocab.txt in --t5-from {src}; "
+                 f"run convert_t5_tokenizer.py {os.path.join(src, 'tok')}")
+    shutil.copytree(os.path.join(src, "tok"), os.path.join(out, "tok"), dirs_exist_ok=True)
+    print(f"  t5 + tok: copied from {src} (frozen, absent from the checkpoint)")
 
     amean, astd = stats_of(pre, "action")
     amean.tofile(f"{out}/stats_action_mean.bin")

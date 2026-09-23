@@ -23,7 +23,7 @@ real checkpoint weights. Two substitutions make that possible without HF access:
     ungated download.
 
 Written into <out>/:
-    config.txt    dims, epsilons, image normalization, special token ids
+    config.meta   dims, epsilons, image normalization, special token ids
     stats.bin     proprio mean/std, action min/max (LIBERO eval protocol)
     vocab.txt     BERT WordPiece vocabulary, one token per line
     text_pad.txt  instruction -> padded text length (see the note below)
@@ -136,10 +136,17 @@ def build_reference(ckpt_path, bert_dir, dinov3_config_path):
         from turbovla.models.configuration import TurboVLAConfig
         from turbovla.models.turbovla import build_turbovla
 
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "model_config" not in checkpoint:
             sys.exit(f"{ckpt_path} has no model_config -- not a released TurboVLA checkpoint")
         config = TurboVLAConfig.from_mapping(checkpoint["model_config"])
+        if ((config.interaction.residual_style, config.interaction.padding_strategy,
+             config.vision.position_embedding) != ("normalized", "key_padding_mask", "view")
+                or config.text.zero_padded_tokens or not isinstance(config.text.padding_length, int)):
+            sys.exit(f"{ckpt_path}: unsupported TurboVLA variant; the engine implements "
+                     "residual_style=normalized, padding_strategy=key_padding_mask, "
+                     "position_embedding=view, zero_padded_tokens=False and an integer "
+                     "text.padding_length")
         model = build_turbovla(config)
         state = {k[len("module."):] if k.startswith("module.") else k: v
                  for k, v in checkpoint["model_state_dict"].items()}
@@ -320,9 +327,10 @@ def dump_fusion(model, out_dir):
     arena = Arena()
 
     proj = model.vision_projection
+    M = proj.mlp[0].out_features
     layernorm(arena, proj.input_norm)
-    linear(arena, proj.mlp[0], (E, vis_dim))
-    linear(arena, proj.mlp[3], (D, E))
+    linear(arena, proj.mlp[0], (M, vis_dim))
+    linear(arena, proj.mlp[3], (D, M))
     arena.add(proj.skip.weight, (D, vis_dim))          # skip has no bias
     layernorm(arena, proj.output_norm)
     arena.add(model.view_embedding, (1, model.num_views, D))
@@ -356,7 +364,7 @@ def dump_fusion(model, out_dir):
         f"text_heads {max(1, icfg.nheads // 2)}",
         f"text_ff {icfg.enhancer_inner_dim}",
         f"vis_dim {vis_dim}",
-        f"vis_mlp {E}",
+        f"vis_mlp {M}",
         f"n_views {model.num_views}",
         "ln_eps 1e-05",
     ]
@@ -465,7 +473,7 @@ def dump_config(model, out_dir, image_mean, image_std, tokenizer, stats_path, st
     with open(os.path.join(out_dir, "text_pad.txt"), "w", encoding="utf-8") as f:
         for instruction, length in sorted(layout.items()):
             f.write(f"{length}\t{instruction}\n")
-    log(f"  config.txt, stats.bin, vocab.txt ({len(ordered)} tokens), "
+    log(f"  config.meta, stats.bin, vocab.txt ({len(ordered)} tokens), "
         f"text_pad.txt ({len(layout)} instructions)")
 
 
@@ -475,18 +483,24 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True, help="TurboVLA LIBERO .pth")
     p.add_argument("--out", required=True, help="output directory for the engine files")
-    p.add_argument("--bert", default=os.path.join(ROOT, "build", "turbovla_ckpt", "bert"),
-                   help="local bert-base-uncased directory (config + tokenizer)")
+    p.add_argument("--bert", default="google-bert/bert-base-uncased",
+                   help="bert-base-uncased hub id or local directory (config + tokenizer)")
     p.add_argument("--dinov3-config",
                    default=os.path.join(HERE, "assets", "dinov3_vitb16_config.json"))
     p.add_argument("--stats", default=os.path.join(REF, "experiments", "libero", "configs",
                                                    "libero_all4_stats.json"),
                    help="dataset statistics the official LIBERO eval normalizes with")
     p.add_argument("--stats-key", default="libero_all4_no_noops")
+    p.add_argument("--cams", default="agentview,wrist",
+                   help="camera names in view order, recorded in config.txt for the server")
+    p.add_argument("--task", default=None, help="instruction to record in config.txt")
     args = p.parse_args()
 
+    cams = args.cams.split(",")
     os.makedirs(args.out, exist_ok=True)
     model, _, _ = build_reference(args.ckpt, args.bert, args.dinov3_config)
+    if len(cams) != model.num_views:
+        sys.exit(f"--cams names {len(cams)} views, the checkpoint has {model.num_views}")
 
     with open(os.path.join(os.path.dirname(args.dinov3_config),
                            "dinov3_vitb16_preprocessor.json")) as f:
@@ -501,6 +515,10 @@ def main():
     dump_head(model, args.out)
     dump_config(model, args.out, image_mean, image_std, model.text_encoder.tokenizer,
                 args.stats, args.stats_key)
+    with open(os.path.join(args.out, "config.txt"), "w") as f:
+        f.write("".join(f"cam{i} {c}\n" for i, c in enumerate(cams)))
+        if args.task:
+            f.write(f"instruction {args.task}\n")
 
 
 

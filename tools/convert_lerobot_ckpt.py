@@ -62,11 +62,15 @@ def wb(t):
     return t.detach().cpu().to(torch.bfloat16).view(torch.uint16).contiguous().numpy()
 
 
-def stats_of(pipeline, key):
+def stats_of(pipeline, key, ftype):
     """(mean, std) as recorded in the checkpoint's normalization statistics."""
     for step in pipeline.steps:
         s = getattr(step, "stats", None)
         if s and key in s and s[key].get("mean") is not None:
+            mode = step.norm_map.get(ftype, "IDENTITY")
+            if mode != "MEAN_STD":
+                sys.exit(f"{key} is normalized {getattr(mode, 'value', mode)}; "
+                         "the engine implements MEAN_STD only")
             return (np.asarray(torch.as_tensor(s[key]["mean"]).reshape(-1).float().cpu(), np.float32),
                     np.asarray(torch.as_tensor(s[key]["std"]).reshape(-1).float().cpu(), np.float32))
     sys.exit(f"No normalization statistics for {key!r} in the checkpoint.")
@@ -114,8 +118,8 @@ def capture_position_ids(vlmx, img_size):
     """The SigLIP position-id per patch, as the installed transformers computes it.
 
     SmolVLM buckets fractional patch coordinates instead of indexing 0..n-1, and the
-    formula changed in transformers 4.57 (`k/n*(1-1e-6)` replaced
-    `arange(0, 1-1e-6, 1/n)`), which lands every coordinate one bucket lower:
+    formula was shifted in transformers 4.55-4.57 and restored in 5.0 (`k/n*(1-1e-6)`
+    replaced `arange(0, 1-1e-6, 1/n)`), which lands every coordinate one bucket lower:
     32 patches per side map to rows [0,0,1,...,30] instead of [0,...,31].
     This checkpoint was trained and is served on 4.57.6, so that is the mapping to
     reproduce. The engine adds position row p to patch p, so the mapping is baked
@@ -175,7 +179,7 @@ def dump_vit(vlmx, out, n_img_tok, hidden):
 
     return pos_mode
 
-def dump_aex(model, vlmx, cfg, out, n_layers):
+def dump_aex(model, vlmx, cfg, out, n_layers, san):
     aex = vlmx.lm_expert
     tc = vlmx.config.text_config
     expert_h = vlmx.expert_hidden_size
@@ -184,7 +188,7 @@ def dump_aex(model, vlmx, cfg, out, n_layers):
         f.write(f"expert_h {expert_h}\nexpert_ffn {expert_ffn}\nn_q {tc.num_attention_heads}\n")
         f.write(f"n_kv {tc.num_key_value_heads}\nhead_dim {tc.head_dim}\n")
         f.write(f"eps {tc.rms_norm_eps}\nrope_base {ROPE_BASE}\nn_layers {n_layers}\n")
-        f.write(f"self_attn_every_n {cfg.self_attn_every_n_layers}\n")
+        f.write(f"self_attn_every_n {san}\n")
         f.write(f"chunk {cfg.chunk_size}\nnum_steps {cfg.num_steps}\n")
         f.write(f"max_action_dim {cfg.max_action_dim}\n")
         f.write(f"min_period {cfg.min_period}\nmax_period {cfg.max_period}\n")
@@ -230,12 +234,11 @@ def camera_keys(pre, cfg):
 
     A finetune declares one PolicyFeature per camera slot (camera1..camera3) but
     the preprocessor's rename_observations_processor maps the real camera names
-    onto only the slots that are ever populated - the rest stay empty. Inverting
-    that map therefore gives both the true names and the true view count; without
+    onto only the slots that are ever populated - the rest stay empty. Without
     a rename step the declared image features are already the real keys.
     """
     rename = rename_map(pre)
-    return list(rename) if rename else list(cfg.image_features)
+    return [k for k in cfg.image_features if not rename or k in rename.values()]
 
 
 def rename_map(pre):
@@ -267,6 +270,13 @@ def main():
 
     print(f"Loading {ckpt} on cpu ...")
     cfg = PreTrainedConfig.from_pretrained(ckpt)
+    for k in ("add_image_special_tokens", "adapt_to_pi_aloha"):
+        if getattr(cfg, k, False):
+            sys.exit(f"{k}=True is not implemented by the engine")
+    san = cfg.self_attn_every_n_layers if "cross" in cfg.attention_mode else 1
+    if san <= 0:
+        sys.exit(f"attention_mode={cfg.attention_mode} with self_attn_every_n_layers={san} "
+                 "(all-cross expert) is not supported")
     cfg.device = "cpu"
     cfg.use_amp = False
     policy = get_policy_class(cfg.type).from_pretrained(ckpt, config=cfg)
@@ -293,7 +303,7 @@ def main():
     print("Dumping weights ...")
     dump_vlm(vlmx, out, n_layers)
     pos_mode = dump_vit(vlmx, out, n_img_tok, hidden)
-    dump_aex(model, vlmx, cfg, out, n_layers)
+    dump_aex(model, vlmx, cfg, out, n_layers, san)
 
     tm = vlmx.get_vlm_model().text_model
     wb(tm.embed_tokens.weight).tofile(f"{out}/emb.bin")
@@ -301,8 +311,8 @@ def main():
         w(model.state_proj.weight).tofile(f)
         w(model.state_proj.bias).tofile(f)
 
-    smean, sstd = stats_of(pre, "observation.state")
-    amean, astd = stats_of(post, "action")
+    smean, sstd = stats_of(pre, "observation.state", "STATE")
+    amean, astd = stats_of(post, "action", "ACTION")
     smean.tofile(f"{out}/stats_state_mean.bin"); sstd.tofile(f"{out}/stats_state_std.bin")
     amean.tofile(f"{out}/stats_action_mean.bin"); astd.tofile(f"{out}/stats_action_std.bin")
     print(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")
@@ -332,7 +342,7 @@ def main():
         # convention reproduces the whole vision tower wrongly with no local symptom.
         f.write(f"pos_ids {pos_mode}\n")
         rename = rename_map(pre)
-        for i, dst in enumerate(rename.values() if rename else cfg.image_features):
+        for i, dst in enumerate(camera_keys(pre, cfg)):
             f.write(f"cam{i} {dst.split('.')[-1] if '.' in dst else dst}\n")
         for src, dst in rename.items():
             f.write(f"rename {src.split('.')[-1]} {dst.split('.')[-1]}\n")

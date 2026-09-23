@@ -225,8 +225,7 @@ def dump_stats(stats, cam_keys, cfg, out_dir):
     def get(key, field):
         s = stats.get(key)
         if s is None or field not in s:
-            sys.exit(f"stats for {key!r} have no {field!r}: this checkpoint's normalizer "
-                     f"is not MIN_MAX for {key}, which the engine assumes")
+            sys.exit(f"stats for {key!r} have no {field!r}")
         return np.asarray(_np(s[field]), dtype=np.float32).reshape(-1)
 
     parts = [get("observation.state", "min"), get("observation.state", "max"),
@@ -283,6 +282,8 @@ def dump_meta(cfg, cam_names, img_hw, out_dir, scheduler, steps):
     ] + [f"cam {n}" for n in cam_names]
     with open(os.path.join(out_dir, "diffusion.meta"), "w") as f:
         f.write("\n".join(lines) + "\n")
+    with open(os.path.join(out_dir, "config.txt"), "w") as f:
+        f.write("".join(f"cam{i} {n.rsplit('.', 1)[-1]}\n" for i, n in enumerate(cam_names)))
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +430,20 @@ def main():
     else:
         log(f"loading {args.ckpt}")
         policy, cfg, cams, img_hw, stats = load_checkpoint(args.ckpt)
+
+    if cfg.resize_shape and tuple(cfg.resize_shape) != tuple(img_hw):
+        sys.exit(f"resize_shape {tuple(cfg.resize_shape)} != image size {tuple(img_hw)}: "
+                 "the engine does not resize")
+    if cfg.use_group_norm:
+        sys.exit("use_group_norm=True: the engine folds BatchNorm running stats into the "
+                 "convs, and a GroupNorm backbone has none")
+    if cfg.horizon < cfg.n_obs_steps - 1 + cfg.n_action_steps:
+        sys.exit(f"horizon {cfg.horizon} < n_obs_steps - 1 + n_action_steps "
+                 f"({cfg.n_obs_steps} - 1 + {cfg.n_action_steps})")
+    want = {"VISUAL": "MEAN_STD", "STATE": "MIN_MAX", "ACTION": "MIN_MAX"}
+    got = {k: cfg.normalization_mapping.get(k) for k in want}
+    if got != want:
+        sys.exit(f"normalization_mapping {got} != {want}, which the engine hard-codes")
 
     scheduler = args.scheduler or ("DDIM" if cfg.noise_scheduler_type == "DDIM" else "DDPM")
     steps = args.steps or cfg.num_inference_steps or cfg.num_train_timesteps
