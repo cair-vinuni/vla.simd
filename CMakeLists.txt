@@ -265,6 +265,14 @@ vla_add_shared(vla_simd_turbovla src/models/turbovla/turbovla_capi.cpp tcpu_turb
 vla_add_shared(vla_simd_impact  src/models/impact/impact_capi.cpp    tcpu_impact)
 vla_add_shared(vla_simd_diffusion src/models/diffusion/diffusion_capi.cpp tcpu_diffusion)
 
+if(PROJECT_IS_TOP_LEVEL)
+  enable_testing()
+  add_executable(test_ops tests/test_ops.cpp)
+  target_link_libraries(test_ops PRIVATE tcpu_ops)
+  add_test(NAME ops COMMAND test_ops)
+  set_tests_properties(ops PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
+endif()
+
 # ---------------------------------------------------------------------------
 # Warnings, first-party targets only so vendored headers (stb_image) stay quiet.
 # ---------------------------------------------------------------------------
@@ -273,6 +281,9 @@ set(VLA_FIRST_PARTY
   tcpu_impact tcpu_diffusion
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
+if(TARGET test_ops)
+  list(APPEND VLA_FIRST_PARTY test_ops)
+endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   foreach(tgt IN LISTS VLA_FIRST_PARTY)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wshadow)
