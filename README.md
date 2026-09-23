@@ -105,6 +105,11 @@ Convert once per checkpoint:
 python tools/convert_lerobot_octo.py --ckpt <hub-id-or-dir> --t5-from build/octo --out build/octo_so101
 ```
 
+A converted directory is shared through the Hugging Face Hub:
+`.serve/bin/hf upload <user>/<repo> build/<name>` uploads it, and
+`--model-dir hf://<user>/<repo>` serves it from there (`@<commit>` pins a
+revision).
+
 ## Checkpoints
 
 The policies evaluated in the paper are public on the Hugging Face Hub:
@@ -128,7 +133,8 @@ uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
 One `vla-simd-serve` serves every policy; `--model` picks which, `--model-dir`
-is the converted directory, and `$CORES` is the OpenMP thread count:
+is the converted directory or its `hf://` Hub repo, and `$CORES` is the OpenMP
+thread count:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5

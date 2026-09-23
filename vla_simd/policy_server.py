@@ -1081,7 +1081,8 @@ def main():
     p.add_argument("--model", choices=sorted(MODELS), default=spec.policy_type,
                    help="which policy to serve")
     p.add_argument("--model-dir", required=True,
-                   help="converted checkpoint (.meta/.bin + stats + config.txt)")
+                   help="converted checkpoint (.meta/.bin + stats + config.txt), "
+                        "or hf://<user>/<repo>[@<revision>] for one uploaded to the Hugging Face Hub")
     p.add_argument("--lib", default=spec.default_lib,
                    help=f"path to {os.path.basename(spec.default_lib)}")
     # Loopback by default: the payload codec is pickle over an unauthenticated
@@ -1132,6 +1133,14 @@ def main():
         if spec.policy_type not in ("act", "impact", "octo", "smolvla"):
             p.error(f"--int8 is not implemented for {spec.policy_type}")
         os.environ[f"{spec.policy_type.upper()}_INT8"] = str(args.int8)
+
+    if args.model_dir.startswith("hf://"):
+        repo, _, rev = args.model_dir[5:].partition("@")
+        try:
+            from huggingface_hub import snapshot_download
+            args.model_dir = snapshot_download(repo, revision=rev or None)
+        except Exception as e:
+            sys.exit(f"--model-dir {args.model_dir}: Hub download failed ({e})")
 
     t0 = time.time()
     engine = spec.engine_cls(args)
