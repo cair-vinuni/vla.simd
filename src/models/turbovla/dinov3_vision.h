@@ -20,8 +20,7 @@
 //
 // LayerScale is folded into o_proj / down_proj by the converter (lambda1 is a
 // per-channel scale on exactly the channels those two write), so a block here is
-// plain pre-norm shape. The backbone's final LayerNorm is NOT loaded: TurboVLA
-// reads hidden_states[-1], which transformers records before it.
+// plain pre-norm shape.
 //
 // The token sequence is [cls | 4 registers | 256 patches]; only the patch rows
 // are returned, and only they carry RoPE.
@@ -42,6 +41,7 @@ struct Dinov3Vision {
     const float* reg_tokens = nullptr;       // [prefix-1, hidden]
     nn::Linear patch;                        // conv 16x16 stride 16 == linear over patches
     std::vector<Dinov3Layer> layers;
+    const float *norm_w = nullptr, *norm_b = nullptr;
 
     // RoPE tables for the fixed grid, built once at load: [n_patches, head_dim].
     std::vector<float> rope_cos, rope_sin;

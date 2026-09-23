@@ -5,6 +5,7 @@
 
 #include "turbovla_model.h"
 #include "models/arena.h"
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -195,6 +196,11 @@ void TurboVlaModel::predict(const uint8_t* frames, const float* state,
     // then per-channel mean/std). The reference refuses anything but a
     // pre-rotated img x img frame, so there is no resize here either.
     pf.tic();
+    static const std::array<float, 256> rescaled = [] {
+        std::array<float, 256> r{};
+        for (int i = 0; i < 256; i++) r[(size_t)i] = (float)i*(1.0f/255.0f);
+        return r;
+    }();
     tr.pixel_values.resize((size_t)V*3*IMG*IMG);
     for (int w = 0; w < V; w++) {
         const uint8_t* src = frames + (size_t)w*IMG*IMG*3;
@@ -202,7 +208,7 @@ void TurboVlaModel::predict(const uint8_t* frames, const float* state,
         for (int c = 0; c < 3; c++) {
             const float m = cfg.img_mean[c], s = cfg.img_std[c];
             for (int i = 0; i < IMG*IMG; i++)
-                dst[(size_t)c*IMG*IMG + i] = (src[(size_t)i*3 + c]/255.0f - m)/s;
+                dst[(size_t)c*IMG*IMG + i] = (rescaled[src[(size_t)i*3 + c]] - m)/s;
         }
     }
     pf.toc(t_pre);

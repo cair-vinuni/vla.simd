@@ -215,18 +215,12 @@ def mha(arena, mod, dim):
 def dump_vision(model, out_dir):
     """DINOv3 ViT-B/16.
 
-    Two liberties, both exact-in-intent and documented in the design notes:
-
       * LayerScale is folded into the projection in front of it. lambda1 is a
         per-channel scale on the block output, and o_proj / down_proj write
         exactly those channels, so scaling their weight rows and biases is the
         same function (one extra fp32 rounding per weight). What is left is
         precisely nn::EncoderLayer's shape: LN -> attn -> residual -> LN -> MLP
         -> residual.
-      * backbone.norm is NOT exported. The TurboVLA vision encoder reads
-        outputs.hidden_states[-1], which transformers records at the last
-        DINOv3ViTLayer -- before the final LayerNorm. Those weights are dead in
-        this model.
     """
     backbone = model.vision_encoder.backbone
     cfg = backbone.config
@@ -256,6 +250,7 @@ def dump_vision(model, out_dir):
         linear(arena, layer.mlp.up_proj, (I, H))
         arena.add(layer.mlp.down_proj.weight * lam2[:, None], (H, I))
         arena.add(layer.mlp.down_proj.bias * lam2, (H,))
+    layernorm(arena, backbone.norm)
 
     meta = [
         f"hidden {H}",
@@ -421,11 +416,9 @@ def write_meta(out_dir, name, lines):
         f.write("\n".join(lines) + "\n")
 
 
-def dump_config(model, out_dir, image_mean, image_std, tokenizer):
+def dump_config(model, out_dir, image_mean, image_std, tokenizer, stats_path, stats_key):
     """Scalars the engine needs that are not weights: shapes, the image
     normalization, and the WordPiece ids the sub-sentence mask keys off."""
-    from turbovla.evaluation import policy as ref_policy
-
     vcfg = model.config.vision
     tcfg = model.config.text
     cls_id, sep_id, dot_id, q_id = model.text_encoder.special_tokens
@@ -451,13 +444,13 @@ def dump_config(model, out_dir, image_mean, image_std, tokenizer):
     ]
     write_meta(out_dir, "config", lines)
 
-    # stats.bin: proprio mean, proprio std, action min, action max -- the LIBERO
-    # eval protocol from turbovla/evaluation/policy.py, not the checkpoint.
+    with open(stats_path) as f:
+        st = json.load(f)[stats_key]
     stats = Arena()
-    stats.add(ref_policy.PROPRIO_MEAN, (model.state_dim,))
-    stats.add(ref_policy.PROPRIO_STD, (model.state_dim,))
-    stats.add(ref_policy.ACTION_MIN, (model.action_dim,))
-    stats.add(ref_policy.ACTION_MAX, (model.action_dim,))
+    stats.add(np.asarray(st["proprio"]["mean"], np.float32), (model.state_dim,))
+    stats.add(np.asarray(st["proprio"]["std"], np.float32), (model.state_dim,))
+    stats.add(np.asarray(st["action"]["min"], np.float32), (model.action_dim,))
+    stats.add(np.asarray(st["action"]["max"], np.float32), (model.action_dim,))
     stats.write(os.path.join(out_dir, "stats.bin"))
 
     vocab = tokenizer.get_vocab()
@@ -486,6 +479,10 @@ def main():
                    help="local bert-base-uncased directory (config + tokenizer)")
     p.add_argument("--dinov3-config",
                    default=os.path.join(HERE, "assets", "dinov3_vitb16_config.json"))
+    p.add_argument("--stats", default=os.path.join(REF, "experiments", "libero", "configs",
+                                                   "libero_all4_stats.json"),
+                   help="dataset statistics the official LIBERO eval normalizes with")
+    p.add_argument("--stats-key", default="libero_all4_no_noops")
     args = p.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -502,7 +499,8 @@ def main():
     dump_text(model, args.out)
     dump_fusion(model, args.out)
     dump_head(model, args.out)
-    dump_config(model, args.out, image_mean, image_std, model.text_encoder.tokenizer)
+    dump_config(model, args.out, image_mean, image_std, model.text_encoder.tokenizer,
+                args.stats, args.stats_key)
 
 
 

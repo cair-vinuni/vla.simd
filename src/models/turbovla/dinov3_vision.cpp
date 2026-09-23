@@ -60,7 +60,8 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
                                               + H*H + H            // o(+b)
                                               + 2*H                // ln2
                                               + I*H + I            // up
-                                              + H*I + H);          // down
+                                              + H*I + H)           // down
+                      + 2*H;
     if (data.size() != want) {
         std::fprintf(stderr, "turbovla: %s/vision.bin has %zu floats, expected %zu\n",
                      dir.c_str(), data.size(), want);
@@ -95,6 +96,8 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
         l.up.init(uw, ub, cfg.inter, cfg.hidden, Role::Mlp);
         l.down.init(dw, db, cfg.hidden, cfg.inter, Role::Mlp);
     }
+    norm_w = take(H);
+    norm_b = take(H);
 
     // RoPE table for the fixed grid. Patch centers are normalized to [-1, 1]:
     // the model was trained with random rescale, so transformers recomputes this
@@ -285,11 +288,9 @@ void Dinov3Vision::encode(const float* pixels, int n_views, float* out) const {
         }
     }
 
-    // hidden_states[-1] with the prefix dropped; backbone.norm is never applied.
     for (int w = 0; w < B; w++)
-        std::memcpy(out + (size_t)w*NP*H,
-                    tok.data() + (size_t)w*T*H + (size_t)cfg.prefix*H,
-                    (size_t)NP*H*sizeof(float));
+        layernorm(out + (size_t)w*NP*H, tok.data() + ((size_t)w*T + cfg.prefix)*H,
+                  norm_w, norm_b, NP, H, cfg.ln_eps);
 
     if (vp.on) {
         const double wall = VitProf::now_ms() - t_start;
