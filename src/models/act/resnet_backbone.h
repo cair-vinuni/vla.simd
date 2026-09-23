@@ -12,7 +12,7 @@
 // ResNet-18 image backbone truncated at layer4 (torchvision IntermediateLayerGetter,
 // as ACT uses it): 7x7/s2 stem + 3x3/s2 maxpool, then 4 stages of 2 basic blocks.
 // Every BatchNorm is frozen in the checkpoint, so the converter folds it into the
-// conv in front of it - what runs here is conv + bias + relu only. FiLM cannot be
+// conv in front of it. FiLM cannot be
 // folded the same way: its scale/shift come from the instruction at runtime. It
 // is applied at the output of a stage, after the residual add and its ReLU, as
 //
@@ -34,10 +34,12 @@ struct ResNetConfig {
     int stem_k = 7, stem_stride = 2, stem_pad = 3;
     int pool_k = 3, pool_stride = 2, pool_pad = 1;
     int block_k = 3;   // basic block (resnet18/34); bottlenecks are not supported
+    int gn_group_size = 0;
 };
 
 struct BasicBlock {
     nn::Conv2d conv1, conv2, down;
+    const float *gn1[2] = {}, *gn2[2] = {}, *gnd[2] = {};
     int cin = 0, cout = 0, stride = 1;
     bool has_down = false;
 };
@@ -52,6 +54,7 @@ struct ResNetBackbone {
     ResNetConfig cfg;
     std::vector<float> data;
     nn::Conv2d stem;
+    const float* stem_gn[2] = {};
     std::vector<BasicBlock> blocks;
     std::vector<int> film_after;
     const char* tag = "act";

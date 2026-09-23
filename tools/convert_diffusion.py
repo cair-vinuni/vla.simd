@@ -13,7 +13,7 @@ flat .meta/.bin arenas the vla.simd engine loads.
 Writes, into --out:
 
     diffusion.meta          shapes + sampler settings the C++ loader reads
-    rgb_encoder{i}_backbone.{meta,bin}   ResNet-18, BatchNorm folded into the conv
+    rgb_encoder{i}_backbone.{meta,bin}   ResNet-18
     rgb_encoder{i}.bin      1x1 keypoint conv + the output projection
     unet.bin                the whole conditional UNet1d, in loader order
     stats.bin               state/action MIN-MAX and per-camera image MEAN/STD
@@ -63,19 +63,19 @@ def convT1d_rows(arena, w, b):
 # ---------------------------------------------------------------------------
 # ResNet-18 backbone (nn.Sequential of torchvision children[:-2])
 # ---------------------------------------------------------------------------
-def dump_backbone(sd, prefix, out_dir, name):
+def dump_backbone(sd, prefix, out_dir, name, gn_group_size):
     """The encoder's backbone is Sequential(conv1, bn1, relu, maxpool, layer1..4),
     so the stages sit at indices 4..7 rather than under .layerN names."""
     arena = Arena()
     meta = dump_resnet18(arena, sd, f"{prefix}.0", f"{prefix}.1",
-                         [f"{prefix}.{stage}" for stage in range(4, 8)])
+                         [f"{prefix}.{stage}" for stage in range(4, 8)], gn_group_size)
     write_meta(out_dir, name, meta)
     n = arena.write(os.path.join(out_dir, f"{name}.bin"))
     log(f"  {name}.bin {n * 4 / 1e6:.1f} MB")
 
 
-def dump_rgb_encoder(sd, prefix, out_dir, name):
-    dump_backbone(sd, f"{prefix}.backbone", out_dir, f"{name}_backbone")
+def dump_rgb_encoder(sd, prefix, out_dir, name, gn_group_size):
+    dump_backbone(sd, f"{prefix}.backbone", out_dir, f"{name}_backbone", gn_group_size)
     arena = Arena()
     # SpatialSoftmax's 1x1 conv, stored as a [K, C] linear.
     w = sd[f"{prefix}.pool.nets.weight"]
@@ -355,9 +355,6 @@ def main():
     if cfg.resize_shape and tuple(cfg.resize_shape) != tuple(img_hw):
         sys.exit(f"resize_shape {tuple(cfg.resize_shape)} != image size {tuple(img_hw)}: "
                  "the engine does not resize")
-    if cfg.use_group_norm:
-        sys.exit("use_group_norm=True: the engine folds BatchNorm running stats into the "
-                 "convs, and a GroupNorm backbone has none")
     if cfg.horizon < cfg.n_obs_steps - 1 + cfg.n_action_steps:
         sys.exit(f"horizon {cfg.horizon} < n_obs_steps - 1 + n_action_steps "
                  f"({cfg.n_obs_steps} - 1 + {cfg.n_action_steps})")
@@ -379,7 +376,7 @@ def main():
     for i in range(n_enc):
         prefix = f"diffusion.rgb_encoder.{i}" if cfg.use_separate_rgb_encoder_per_camera \
             else "diffusion.rgb_encoder"
-        dump_rgb_encoder(sd, prefix, args.out, f"rgb_encoder{i}")
+        dump_rgb_encoder(sd, prefix, args.out, f"rgb_encoder{i}", 16 if cfg.use_group_norm else 0)
 
     dump_unet(sd, args.out, cfg)
     dump_stats(stats, cams, args.out)

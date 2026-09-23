@@ -86,10 +86,17 @@ def conv_nhwc(arena, w, b):
     arena.add(w.permute(0, 2, 3, 1).contiguous()).add(b)
 
 
-def dump_resnet18(arena, sd, stem_conv, stem_bn, stages):
+def dump_resnet18(arena, sd, stem_conv, stem_bn, stages, gn_group_size=0):
+    def conv_norm(w, norm):
+        if gn_group_size:
+            arena.add(w.permute(0, 2, 3, 1).contiguous())
+            arena.add(sd[f"{norm}.weight"]).add(sd[f"{norm}.bias"])
+        else:
+            conv_nhwc(arena, *fold_bn(w, norm, sd))
+
     stem_w = sd[f"{stem_conv}.weight"]
     cout, cin, k, _ = stem_w.shape
-    conv_nhwc(arena, *fold_bn(stem_w, stem_bn, sd))
+    conv_norm(stem_w, stem_bn)
     meta = [
         f"in_ch {cin}",
         f"stem_out {cout}",
@@ -117,12 +124,14 @@ def dump_resnet18(arena, sd, stem_conv, stem_bn, stages):
             stride = 2 if (si > 0 and blk == 0) else 1
             has_down = f"{p}.downsample.0.weight" in sd
 
-            conv_nhwc(arena, *fold_bn(c1, f"{p}.bn1", sd))
-            conv_nhwc(arena, *fold_bn(sd[f"{p}.conv2.weight"], f"{p}.bn2", sd))
+            conv_norm(c1, f"{p}.bn1")
+            conv_norm(sd[f"{p}.conv2.weight"], f"{p}.bn2")
             if has_down:
-                conv_nhwc(arena, *fold_bn(sd[f"{p}.downsample.0.weight"], f"{p}.downsample.1", sd))
+                conv_norm(sd[f"{p}.downsample.0.weight"], f"{p}.downsample.1")
 
             meta.append(f"block {bcin} {bcout} {stride} {int(has_down)}")
+    if gn_group_size:
+        meta.append(f"gn_group_size {gn_group_size}")
     return meta
 
 

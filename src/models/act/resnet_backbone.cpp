@@ -64,6 +64,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
         else if (key == "pool_k"     ) ss >> cfg.pool_k;
         else if (key == "pool_stride") ss >> cfg.pool_stride;
         else if (key == "pool_pad"   ) ss >> cfg.pool_pad;
+        else if (key == "gn_group_size") ss >> cfg.gn_group_size;
         else if (key == "block") {
             BlockMeta b{};
             ss >> b.cin >> b.cout >> b.stride >> b.has_down;
@@ -84,9 +85,18 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
     // the end, which only runs once every layer has already read past the array.
     ArenaCursor<float> take{data};
 
-    if (cfg.in_ch != 3) return false;
+    const int gs = cfg.gn_group_size;
+    auto norm = [&](const float** gn, int c) -> const float* {
+        if (!gs) return take(c);
+        if (c % gs) take.ok = false;
+        gn[0] = take(c);
+        gn[1] = take(c);
+        return nullptr;
+    };
+
+    if (cfg.in_ch != 3 || gs < 0) return false;
     const float* w = take((size_t)cfg.stem_out*cfg.stem_k*cfg.stem_k*cfg.in_ch);
-    const float* b = take(cfg.stem_out);
+    const float* b = norm(stem_gn, cfg.stem_out);
     if (!take.ok) return false;
     stem.init(w, b, cfg.stem_out, cfg.stem_k, cfg.in_ch);
 
@@ -109,18 +119,18 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
         }
 
         w = take((size_t)blk.cout*k*k*blk.cin);
-        b = take(blk.cout);
+        b = norm(blk.gn1, blk.cout);
         if (!take.ok) return false;
         blk.conv1.init(w, b, blk.cout, k, blk.cin);
 
         w = take((size_t)blk.cout*k*k*blk.cout);
-        b = take(blk.cout);
+        b = norm(blk.gn2, blk.cout);
         if (!take.ok) return false;
         blk.conv2.init(w, b, blk.cout, k, blk.cout);
 
         if (blk.has_down) {
             w = take((size_t)blk.cout*blk.cin);
-            b = take(blk.cout);
+            b = norm(blk.gnd, blk.cout);
             if (!take.ok) return false;
             blk.down.init(w, b, blk.cout, 1, blk.cin);
         }
@@ -190,11 +200,16 @@ void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, f
     auto gflop = [](long long npix, int cout, int K) {
         return 2.0*(double)npix*cout*K/1e9;
     };
+    const int gs = cfg.gn_group_size;
+    auto norm = [gs](float* v, const float* const* gn, int npx, int C, bool relu_out) {
+        groupnorm(v, v, gn[0], gn[1], npx, C, C/gs, 1e-5f, relu_out);
+    };
 
     int h = conv_out(H, cfg.stem_k, cfg.stem_stride, cfg.stem_pad);
     int w = conv_out(W, cfg.stem_k, cfg.stem_stride, cfg.stem_pad);
     s.a.resize((size_t)h*w*cfg.stem_out);
     stem.forward(s.a.data(), x, H, W, cfg.stem_stride, cfg.stem_pad);
+    if (gs) norm(s.a.data(), stem_gn, h*w, cfg.stem_out, false);
     tm.lap("stem 7x7/s2", gflop((long long)h*w, cfg.stem_out, cfg.stem_k*cfg.stem_k*cfg.in_ch));
 
     const int ph = conv_out(h, cfg.pool_k, cfg.pool_stride, cfg.pool_pad);
@@ -219,15 +234,18 @@ void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, f
         if (blk.has_down) {
             s.res.resize(n);
             blk.down.forward(s.res.data(), s.b.data(), h, w, blk.stride, 0);
+            if (gs) norm(s.res.data(), blk.gnd, oh*ow, blk.cout, false);
             idn = s.res.data();
         }
 
         s.a.resize(n);
         blk.conv1.forward(s.a.data(), s.b.data(), h, w, blk.stride, 1);
-        relu(s.a.data(), (int)n);
+        if (gs) norm(s.a.data(), blk.gn1, oh*ow, blk.cout, true);
+        else relu(s.a.data(), (int)n);
 
         s.c.resize(n);
         blk.conv2.forward(s.c.data(), s.a.data(), oh, ow, 1, 1);
+        if (gs) norm(s.c.data(), blk.gn2, oh*ow, blk.cout, false);
 
         const float *fg = nullptr, *fb = nullptr;
         if (film_next < film_after.size() && film_after[film_next] == bi) {
