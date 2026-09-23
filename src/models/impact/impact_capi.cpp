@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// C ABI for ImpactModel, for ctypes/FFI callers such as
-// serve/impact_policy_server.py. Built as the shared lib vla_simd_impact.
+// C ABI for ImpactModel, for ctypes/FFI callers. Built as the shared lib
+// vla_simd_impact.
 // Contract: include/vla_simd.h.
 //
 // The instruction is passed on every predict() to match the other

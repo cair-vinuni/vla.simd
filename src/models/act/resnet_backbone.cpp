@@ -8,10 +8,10 @@
 #include "resnet_backbone.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
-#include <chrono>
+#include "nn/encoder.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -23,67 +23,26 @@ static inline int conv_out(int in, int k, int stride, int pad) {
     return (in+2*pad-k)/stride + 1;
 }
 
-// ACT_PROFILE=2 breaks the backbone down per conv. The clock reads are behind a
-// constant so the default path keeps the tight loop it had.
-static int prof_level() {
-    static const int v = [] {
-        const char* e = std::getenv("ACT_PROFILE");
-        return e ? std::atoi(e) : 0;
-    }();
-    return v;
-}
-
 namespace {
 struct StageTimer {
+    const char* tag;
     bool on;
-    std::chrono::steady_clock::time_point t;
-    explicit StageTimer(bool enabled) : on(enabled) {
-        if (on) t = std::chrono::steady_clock::now();
+    double t = 0;
+    StageTimer(const char* tag_, bool enabled) : tag(tag_), on(enabled) {
+        if (on) t = nn::now_ms();
     }
     // GFLOP/s alongside the wall time: a conv that is merely big looks the same as
     // one that is running badly until the rate is next to it.
     void lap(const char* what, double gflop) {
         if (!on) return;
-        auto now = std::chrono::steady_clock::now();
-        const double ms = std::chrono::duration<double, std::milli>(now-t).count();
-        std::fprintf(stderr, "[act]   %-22s %6.2f ms  %6.1f GFLOP/s\n",
-                     what, ms, ms > 0 ? gflop/(ms*1e-3) : 0.0);
+        const double now = nn::now_ms();
+        const double ms = now-t;
+        std::fprintf(stderr, "[%s]   %-22s %6.2f ms  %6.1f GFLOP/s\n",
+                     tag, what, ms, ms > 0 ? gflop/(ms*1e-3) : 0.0);
         t = now;
     }
 };
 } // namespace
-
-// ACT_INT8 bit 32 routes every backbone conv through the W8A8 kernel. The stem
-// is included: it is the one conv reading real camera pixels, and those are
-// already a quantized 8-bit signal to begin with.
-static bool conv_int8_enabled() {
-    static const bool v = [] {
-        const char* e = std::getenv("ACT_INT8");
-        return e && (std::atoi(e) & 32) != 0;
-    }();
-    return v;
-}
-
-// ACT_I8_CONV_FROM=N keeps the first N conv stages (0 = the stem, 1.. = the
-// basic blocks) in fp32 and quantizes the rest. A per-tensor activation scale
-// costs more precision the sparser and more outlier-heavy a feature map is, so
-// which end of the network to protect is a measurement, not a guess.
-static int conv_int8_from() {
-    static const int v = [] {
-        const char* e = std::getenv("ACT_I8_CONV_FROM");
-        return e ? std::atoi(e) : 0;
-    }();
-    return v;
-}
-
-// ACT_I8_CONV_TO=N stops quantizing at stage N (exclusive); -1 = to the end.
-static int conv_int8_to() {
-    static const int v = [] {
-        const char* e = std::getenv("ACT_I8_CONV_TO");
-        return e ? std::atoi(e) : -1;
-    }();
-    return v;
-}
 
 bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
     std::ifstream meta(dir + "/" + name + ".meta");
@@ -91,6 +50,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
 
     struct BlockMeta { int cin, cout, stride, has_down; };
     std::vector<BlockMeta> bm;
+    film_after.clear();
     std::string line;
     while (std::getline(meta, line)) {
         std::istringstream ss(line);
@@ -109,6 +69,11 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
             ss >> b.cin >> b.cout >> b.stride >> b.has_down;
             bm.push_back(b);
         }
+        else if (key == "film_after") {
+            int idx = -1;
+            ss >> idx;
+            film_after.push_back(idx);
+        }
     }
 
     if (!read_arena(dir + "/" + name + ".bin", data)) return false;
@@ -117,19 +82,12 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
     // and Conv2d::init COPIES its weights immediately - so a stale meta beside a
     // shorter bin has to be caught here, not by the off == data.size() check at
     // the end, which only runs once every layer has already read past the array.
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
 
     if (cfg.in_ch != 3) return false;
     const float* w = take((size_t)cfg.stem_out*cfg.stem_k*cfg.stem_k*cfg.in_ch);
     const float* b = take(cfg.stem_out);
-    if (!ok) return false;
+    if (!take.ok) return false;
     stem.init(w, b, cfg.stem_out, cfg.stem_k, cfg.in_ch);
 
     const int k = cfg.block_k;
@@ -144,50 +102,72 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
         // Without a downsample the residual reads the block input in place.
         if (blk.cin != (i ? blocks[i-1].cout : cfg.stem_out) || blk.cout < 1 || blk.stride < 1) return false;
         if (!blk.has_down && (blk.stride != 1 || blk.cin != blk.cout)) {
-            std::fprintf(stderr, "act backbone: block %zu has no downsample but "
+            std::fprintf(stderr, "%s backbone: block %zu has no downsample but "
                          "changes shape (cin %d cout %d stride %d)\n",
-                         i, blk.cin, blk.cout, blk.stride);
+                         tag, i, blk.cin, blk.cout, blk.stride);
             return false;
         }
 
         w = take((size_t)blk.cout*k*k*blk.cin);
         b = take(blk.cout);
-        if (!ok) return false;
+        if (!take.ok) return false;
         blk.conv1.init(w, b, blk.cout, k, blk.cin);
 
         w = take((size_t)blk.cout*k*k*blk.cout);
         b = take(blk.cout);
-        if (!ok) return false;
+        if (!take.ok) return false;
         blk.conv2.init(w, b, blk.cout, k, blk.cout);
 
         if (blk.has_down) {
             w = take((size_t)blk.cout*blk.cin);
             b = take(blk.cout);
-            if (!ok) return false;
+            if (!take.ok) return false;
             blk.down.init(w, b, blk.cout, 1, blk.cin);
         }
     }
-    if (off != data.size()) return false;
+    if (!take.done()) return false;
 
-    if (conv_int8_enabled()) {
-        const int from = conv_int8_from();
-        const int to   = conv_int8_to() < 0 ? (int)blocks.size()+1 : conv_int8_to();
-        auto want = [&](int stage) { return stage >= from && stage < to; };
-
-        int n = 0;
-        if (want(0)) n += stem.init_int8();
-        for (size_t i=0; i<blocks.size(); i++) {
-            if (!want((int)i+1)) continue;
-            BasicBlock& blk = blocks[i];
-            n += blk.conv1.init_int8();
-            n += blk.conv2.init_int8();
-            if (blk.has_down) n += blk.down.init_int8();
+    // A FiLM point that names a block this backbone does not have would silently
+    // modulate nothing (or read past the gamma buffer), so reject it at load.
+    for (int idx : film_after) {
+        if (idx < 0 || idx >= (int)blocks.size()) {
+            std::fprintf(stderr, "%s backbone: film_after %d out of range "
+                         "(%zu blocks)\n", tag, idx, blocks.size());
+            return false;
         }
-        if (prof_level() >= 2 || n == 0)
-            std::fprintf(stderr, "[act] int8 backbone convs: %d%s\n", n,
-                         n ? "" : " (no int8 kernel on this CPU - staying fp32)");
+    }
+    if (std::adjacent_find(film_after.begin(), film_after.end(),
+                           [](int x, int y) { return x >= y; }) != film_after.end()) {
+        std::fprintf(stderr, "%s backbone: film_after must be strictly ascending - the "
+                     "gamma/beta buffer is cut up in that order\n", tag);
+        return false;
     }
     return true;
+}
+
+void ResNetBackbone::quantize_convs(int from, int to) {
+    if (to < 0) to = (int)blocks.size()+1;
+    auto want = [&](int stage) { return stage >= from && stage < to; };
+
+    int n = 0;
+    if (want(0)) n += stem.init_int8();
+    for (size_t i=0; i<blocks.size(); i++) {
+        if (!want((int)i+1)) continue;
+        BasicBlock& blk = blocks[i];
+        n += blk.conv1.init_int8();
+        n += blk.conv2.init_int8();
+        if (blk.has_down) n += blk.down.init_int8();
+    }
+    if (prof >= 2 || n == 0)
+        std::fprintf(stderr, "[%s] int8 backbone convs: %d%s\n", tag, n,
+                     n ? "" : " (no int8 kernel on this CPU - staying fp32)");
+}
+
+int ResNetBackbone::film_total() const {
+    int n = 0;
+    for (int idx : film_after)
+        n += blocks[(size_t)idx].cout;
+    return n;
 }
 
 void ResNetBackbone::feat_size(int H, int W, int* fh, int* fw) const {
@@ -204,8 +184,9 @@ void ResNetBackbone::feat_size(int H, int W, int* fh, int* fw) const {
     *fw = w;
 }
 
-void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, float* out) const {
-    StageTimer tm(prof_level() >= 2);
+void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, float* out,
+                             const float* gamma, const float* beta) const {
+    StageTimer tm(tag, prof >= 2);
     auto gflop = [](long long npix, int cout, int K) {
         return 2.0*(double)npix*cout*K/1e9;
     };
@@ -227,6 +208,7 @@ void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, f
     // s.b carries the block input; conv2 writes s.c and the two swap, so the
     // residual identity is read in place (only a strided block copies, via down).
     const int k = cfg.block_k;
+    size_t film_off = 0, film_next = 0;
     int bi = 0;
     for (const BasicBlock& blk : blocks) {
         const int oh = conv_out(h, k, blk.stride, 1);
@@ -247,13 +229,39 @@ void ResNetBackbone::forward(const float* x, int H, int W, BackboneScratch& s, f
         s.c.resize(n);
         blk.conv2.forward(s.c.data(), s.a.data(), oh, ow, 1, 1);
 
+        const float *fg = nullptr, *fb = nullptr;
+        if (film_next < film_after.size() && film_after[film_next] == bi) {
+            if (gamma && beta) {
+                fg = gamma+film_off;
+                fb = beta +film_off;
+            }
+            film_off += (size_t)blk.cout;
+            film_next++;
+        }
+
         float* o = s.c.data();
+        if (fg) {
+            const int C = blk.cout;
+            const long long npx = (long long)oh*ow;
 #if defined(_OPENMP)
-        #pragma omp parallel for schedule(static)
+            #pragma omp parallel for schedule(static)
 #endif
-        for (size_t i=0; i<n; i++) {
-            const float v = o[i]+idn[i];
-            o[i] = v > 0.0f ? v : 0.0f;
+            for (long long p=0; p<npx; p++) {
+                float* row = o+(size_t)p*C;
+                const float* id = idn+(size_t)p*C;
+                for (int c=0; c<C; c++) {
+                    const float v = row[c]+id[c];
+                    row[c] = (1.0f+fg[c])*(v > 0.0f ? v : 0.0f) + fb[c];
+                }
+            }
+        } else {
+#if defined(_OPENMP)
+            #pragma omp parallel for schedule(static)
+#endif
+            for (size_t i=0; i<n; i++) {
+                const float v = o[i]+idn[i];
+                o[i] = v > 0.0f ? v : 0.0f;
+            }
         }
 
         s.b.swap(s.c);

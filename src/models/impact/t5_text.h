@@ -5,7 +5,6 @@
  */
 
 #pragma once
-#include "config.h"
 #include "nn/linear.h"
 #include "nn/t5_encoder.h"
 #include <string>
@@ -24,19 +23,25 @@
 // The FiLM head reads a mask-aware mean-pool of the T5 output, so padded
 // positions do not drag the pooled vector, and it is zero-initialized: with
 // (1 + gamma) modulation in the backbone that makes an untrained head exactly
-// the identity. See docs/14-impact-design.md section 3.
+// the identity.
 //
-// The pruned vocabulary is MicroVLA's, for MicroVLA's reason: a fixed instruction
-// corpus tokenizes to a few dozen sentencepiece pieces, so training can re-index
-// the 32,128-row embedding table down to those and carry the mapping. A word
-// outside it is a word the language pathway cannot see, so the degradation warns
-// rather than passing silently.
+// A fixed instruction corpus tokenizes to a few dozen sentencepiece pieces, so
+// training can re-index the 32,128-row embedding table down to those and carry
+// the mapping. A word outside it is a word the language pathway cannot see, so
+// the degradation warns rather than passing silently.
 //
 // Everything here is an EPISODE constant. The instruction does not change within
 // an episode, so ImpactModel calls encode() once from set_instruction() and every
 // predict() in that episode reuses the result.
 
 namespace tcpu {
+
+struct ImpactTextConfig {
+    int proj_dim = 512;
+    int n_text = 32;
+    int film_total = 960;
+    long encoder_floats = 0;  // what nn::T5Encoder itself consumed
+};
 
 struct ImpactText {
     ImpactTextConfig cfg;
@@ -49,7 +54,6 @@ struct ImpactText {
 
     bool load(const std::string& dir, int vocab_full, int unk_id);
 
-    int d_model() const { return t5.cfg.d_model; }
     int proj_dim() const { return cfg.proj_dim; }
     int n_text() const { return cfg.n_text; }
     int film_total() const { return cfg.film_total; }
@@ -61,10 +65,8 @@ struct ImpactText {
     // compact ids + attn_mask [seq] (1 = real token, 0 = pad) ->
     //   tokens [seq, proj_dim]   text tokens for the encoder sequence
     //   gamma / beta [film_total]  the backbone's per-stage modulation
-    // hidden, when given, receives the T5 output [seq, d_model] before the heads,
-    // which is what the golden dump records.
     void encode(const int* compact, const int* attn_mask, int seq,
-                float* tokens, float* gamma, float* beta, float* hidden = nullptr) const;
+                float* tokens, float* gamma, float* beta) const;
 
   private:
     int unk_compact = 0;

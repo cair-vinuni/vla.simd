@@ -6,17 +6,13 @@
 
 #include "act_model.h"
 #include "hal/common/env.h"
-#include <chrono>
+#include "hal/common/threads.h"
+#include "nn/encoder.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
-#include <exception>
-#include <thread>
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
 using std::size_t;
 
 namespace tcpu {
@@ -41,8 +37,22 @@ bool ActModel::load(const std::string& dir) {
         }
     }
 
+    backbone.prof = tf.prof = hal::env::int_env("ACT_PROFILE", 0);
     if (!backbone.load(dir)) return false;
-    if (!tf.load(dir, backbone.out_channels())) return false;
+
+    // ACT_INT8 bit 32 routes every backbone conv through the W8A8 kernel. The stem
+    // is included: it is the one conv reading real camera pixels, and those are
+    // already a quantized 8-bit signal to begin with.
+    // ACT_I8_CONV_FROM=N keeps the first N conv stages (0 = the stem, 1.. = the
+    // basic blocks) in fp32 and quantizes the rest. A per-tensor activation scale
+    // costs more precision the sparser and more outlier-heavy a feature map is, so
+    // which end of the network to protect is a measurement, not a guess.
+    // ACT_I8_CONV_TO=N stops quantizing at stage N (exclusive); -1 = to the end.
+    const int i8 = hal::env::int_env("ACT_INT8", 0);
+    if (i8 & 32)
+        backbone.quantize_convs(hal::env::int_env("ACT_I8_CONV_FROM", 0),
+                                hal::env::int_env("ACT_I8_CONV_TO", -1));
+    if (!tf.load(dir, backbone.out_channels(), i8)) return false;
 
     std::ifstream st(dir + "/stats.bin", std::ios::binary);
     if (!st) return false;
@@ -98,11 +108,7 @@ void ActModel::predict(const uint8_t* const* images, const float* state,
                        bool unnormalize, float* actions) const {
     // ACT_PROFILE=1: per-stage latency on stderr
     static const bool prof = std::getenv("ACT_PROFILE") != nullptr;
-    using clk = std::chrono::steady_clock;
-    auto ms = [](clk::time_point a, clk::time_point b) {
-        return std::chrono::duration<double, std::milli>(b-a).count();
-    };
-    auto t0 = clk::now();
+    const double t0 = nn::now_ms();
 
     int fh = 0, fw = 0;
     backbone.feat_size(img_h, img_w, &fh, &fw);
@@ -119,39 +125,16 @@ void ActModel::predict(const uint8_t* const* images, const float* state,
     // whole team; each view already owns its own scratch, so the math is
     // untouched either way. Default off - measured on i5-12400F, the tiled convs
     // already fill the machine and splitting the team only costs efficiency.
-    const int vt = hal::env::view_threads();
-    if (vt > 0 && n_cams > 1) {
-        std::vector<std::exception_ptr> err(n_cams);
-        std::vector<std::thread> workers;
-        workers.reserve(n_cams);
-        try {
-            for (int c=0; c<n_cams; c++) {
-                workers.emplace_back([&, c] {
-#if defined(_OPENMP)
-                    omp_set_num_threads(vt);
-#endif
-                    try { encode_view(images[c], c, feats[c].data()); }
-                    catch (...) { err[c] = std::current_exception(); }
-                });
-            }
-        } catch (...) {
-            for (std::thread& w : workers) w.join();
-            throw;
-        }
-        for (std::thread& w : workers) w.join();
-        for (std::exception_ptr& e : err) if (e) std::rethrow_exception(e);
-    } else {
-        for (int c=0; c<n_cams; c++)
-            encode_view(images[c], c, feats[c].data());
-    }
-    auto t1 = clk::now();
+    hal::for_each_view(n_cams, hal::env::view_threads(),
+                       [&](int c) { encode_view(images[c], c, feats[c].data()); });
+    const double t1 = nn::now_ms();
 
     std::vector<float> sn(tf.cfg.state_dim);
     for (int i=0; i<tf.cfg.state_dim; i++)
         sn[i] = (state[i]-state_mean[i])/(state_std[i]+norm_eps);
 
     tf.forward(fp.data(), n_cams, fh, fw, sn.data(), actions);
-    auto t2 = clk::now();
+    const double t2 = nn::now_ms();
 
     if (unnormalize) {
         for (int h=0; h<tf.cfg.chunk; h++)
@@ -163,7 +146,7 @@ void ActModel::predict(const uint8_t* const* images, const float* state,
 
     if (prof)
         std::fprintf(stderr, "[act] backbone %.1f ms (%d cams)  transformer %.1f ms  total %.1f ms\n",
-                     ms(t0, t1), n_cams, ms(t1, t2), ms(t0, t2));
+                     t1-t0, n_cams, t2-t1, t2-t0);
 }
 
 } // namespace tcpu

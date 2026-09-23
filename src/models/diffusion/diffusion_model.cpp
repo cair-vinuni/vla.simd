@@ -6,7 +6,7 @@
 
 #include "models/diffusion/diffusion_model.h"
 #include "models/arena.h"
-#include <cmath>
+#include "hal/common/env.h"
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -69,10 +69,8 @@ bool DiffusionModel::load(const std::string& dir) {
     // The step count is a deployment knob and the env override is how the
     // ablation drives it. Read once per process: the engine caches nothing here,
     // but a caller that changes it mid-process would silently mix two ladders.
-    if (const char* e = std::getenv("DP_STEPS")) {
-        const int v = std::atoi(e);
-        if (v > 0) cfg.num_inference_steps = v;
-    }
+    const int steps = hal::env::int_env("DP_STEPS", 0);
+    if (steps > 0) cfg.num_inference_steps = steps;
     if (const char* e = std::getenv("DP_SCHEDULER")) {
         cfg.scheduler = (std::string(e) == "DDIM") ? DPScheduler::DDIM : DPScheduler::DDPM;
     }
@@ -126,8 +124,6 @@ bool DiffusionModel::load(const std::string& dir) {
 void DiffusionModel::preprocess(const uint8_t* src, int cam, float* dst) const {
     // Normalize first, then crop -- the reference normalizes in the processor,
     // before the encoder's crop ever runs.
-    const int mc = cfg.separate_encoder_per_camera ? cam : 0;
-    (void)mc;
     const float* mean = img_mean.data()+(size_t)cam*3;
     const float* sd   = img_std .data()+(size_t)cam*3;
 

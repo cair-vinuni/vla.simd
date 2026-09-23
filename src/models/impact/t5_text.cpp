@@ -27,7 +27,6 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
     while (meta >> key >> val) {
         if      (key == "proj_dim"      ) cfg.proj_dim  = (int)val;
         else if (key == "n_text"        ) cfg.n_text    = (int)val;
-        else if (key == "n_film"        ) cfg.n_film    = (int)val;
         else if (key == "film_total"    ) cfg.film_total= (int)val;
         else if (key == "encoder_floats") cfg.encoder_floats = (long)val;
     }
@@ -107,13 +106,12 @@ int ImpactText::remap(const int* ids, int seq, int* compact) const {
 }
 
 void ImpactText::encode(const int* compact, const int* attn_mask, int seq,
-                        float* tokens, float* gamma, float* beta, float* hidden) const {
+                        float* tokens, float* gamma, float* beta) const {
     const size_t D = (size_t)t5.cfg.d_model;
     const size_t F = (size_t)cfg.film_total;
 
     if (h.size() < (size_t)seq*D) h.resize((size_t)seq*D);
     t5.encode(compact, attn_mask, seq, h.data());
-    if (hidden) std::copy(h.begin(), h.begin() + (size_t)seq*D, hidden);
 
     // Text tokens: the projection only. The learned text position lives in the
     // transformer's pos array, not in the token, because ACT's DETR blocks add

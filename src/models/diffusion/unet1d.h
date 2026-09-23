@@ -61,7 +61,7 @@ struct DPUNet1d {
     // Downsample is a strided Conv1d (k3 s2 p1); upsample a ConvTranspose1d
     // (k4 s2 p1). The last down block and, in the stock 3-stage config, neither
     // up block, is an Identity -- `has` records which.
-    struct Down { DPResBlock r1, r2; nn::Linear ds; bool has = false; int dc = 0; };
+    struct Down { DPResBlock r1, r2; nn::Linear ds; bool has = false; };
     struct Up   { DPResBlock r1, r2; const float *uw = nullptr, *ub = nullptr;
                   bool has = false; int uc = 0; };
     std::vector<Down> down;

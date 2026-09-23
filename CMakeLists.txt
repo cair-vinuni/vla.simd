@@ -224,11 +224,9 @@ add_library(tcpu_turbovla STATIC
 target_link_libraries(tcpu_turbovla PUBLIC tcpu_ops tcpu_tokenizer)
 
 add_library(tcpu_impact STATIC
-  src/models/impact/resnet_film.cpp
   src/models/impact/t5_text.cpp
-  src/models/impact/impact_transformer.cpp
   src/models/impact/impact_model.cpp)
-target_link_libraries(tcpu_impact PUBLIC tcpu_ops tcpu_tokenizer)
+target_link_libraries(tcpu_impact PUBLIC tcpu_act tcpu_ops tcpu_tokenizer)
 
 add_library(tcpu_diffusion STATIC
   src/models/diffusion/rgb_encoder.cpp

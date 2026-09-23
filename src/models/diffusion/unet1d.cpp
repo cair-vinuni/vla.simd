@@ -10,8 +10,6 @@
 #include "ops/lm_ops.h"
 #include <cmath>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 namespace tcpu {
 
@@ -33,20 +31,6 @@ namespace tcpu {
 //     conv2.W [cout, k*cout]  conv2.b  gn_s  gn_b
 //     res.W   [cout, cin]  res.b                 (only when cin != cout)
 
-namespace {
-struct Take {
-    const std::vector<float>& d;
-    size_t off = 0;
-    bool ok = true;
-    const float* operator()(size_t n) {
-        if (!ok || n > d.size() - off) { ok = false; return nullptr; }
-        const float* p = d.data() + off;
-        off += n;
-        return p;
-    }
-};
-} // namespace
-
 bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c) {
     cfg = c;
     if (cfg.down_dims.empty()) return false;
@@ -56,7 +40,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
     const int D  = cfg.step_embed_dim;
     const int CD = cfg.cond_dim();
     const int k  = cfg.kernel_size;
-    Take take{data};
+    ArenaCursor<float> take{data};
 
     auto lin = [&](nn::Linear& L, int N, int K, nn::Linear::Role r) {
         const float* w = take((size_t)N*K);
@@ -97,10 +81,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
         res_block(d.r1, in_out[i].first, in_out[i].second);
         res_block(d.r2, in_out[i].second, in_out[i].second);
         d.has = (i + 1 < in_out.size());
-        if (d.has) {
-            d.dc = in_out[i].second;
-            lin(d.ds, d.dc, 3*d.dc, nn::Linear::Role::Gemm);
-        }
+        if (d.has) lin(d.ds, in_out[i].second, 3*in_out[i].second, nn::Linear::Role::Gemm);
     }
 
     const int mid = cfg.down_dims.back();
@@ -134,7 +115,7 @@ bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPCon
     conv_block(final_block, cfg.down_dims[0], cfg.down_dims[0], k);
     lin(final_conv, A, cfg.down_dims[0], nn::Linear::Role::Generic);
 
-    return take.ok && take.off == data.size();
+    return take.done();
 }
 
 void DPConvBlock::forward(float* out, const float* x, int T, int groups, float eps,
@@ -221,7 +202,7 @@ void DPUNet1d::forward(float* eps_out, const float* sample, const float* gc, int
 
     int T = H, C = A;
     std::vector<std::vector<float>> skips;
-    std::vector<int> skipT, skipC;
+    std::vector<int> skipC;
 
     for (const Down& d : down) {
         std::vector<float> a((size_t)T*d.r1.cout);
@@ -231,7 +212,6 @@ void DPUNet1d::forward(float* eps_out, const float* sample, const float* gc, int
         C = d.r2.cout;
 
         skips.push_back(b);
-        skipT.push_back(T);
         skipC.push_back(C);
 
         if (d.has) {
@@ -256,7 +236,7 @@ void DPUNet1d::forward(float* eps_out, const float* sample, const float* gc, int
     for (const Up& u : up) {
         // Channel-concat with the matching encoder skip. Both are [T, C] so the
         // concat is a per-timestep splice, not a memcpy of two halves.
-        const int sC = skipC.back(), sT = skipT.back();
+        const int sC = skipC.back();
         std::vector<float> cat((size_t)T*(C + sC));
         for (int tt=0; tt<T; tt++) {
             std::memcpy(cat.data() + (size_t)tt*(C+sC), x.data() + (size_t)tt*C,
@@ -264,8 +244,7 @@ void DPUNet1d::forward(float* eps_out, const float* sample, const float* gc, int
             std::memcpy(cat.data() + (size_t)tt*(C+sC) + C,
                         skips.back().data() + (size_t)tt*sC, sizeof(float)*(size_t)sC);
         }
-        (void)sT;
-        skips.pop_back(); skipT.pop_back(); skipC.pop_back();
+        skips.pop_back(); skipC.pop_back();
 
         std::vector<float> a((size_t)T*u.r1.cout);
         u.r1.forward(a.data(), cat.data(), gm.data(), T, G, ge, col, scratch);

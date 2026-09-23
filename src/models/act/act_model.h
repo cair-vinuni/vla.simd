@@ -45,8 +45,6 @@ struct ActModel {
     // [fh*fw, backbone.out_channels()]. predict() calls this per camera.
     void encode_view(const uint8_t* image, int cam, float* feat) const;
 
-    void feat_size(int* fh, int* fw) const { backbone.feat_size(img_h, img_w, fh, fw); }
-
   private:
     mutable std::vector<BackboneScratch> bscratch;
     mutable std::vector<std::vector<float>> norm, feats;

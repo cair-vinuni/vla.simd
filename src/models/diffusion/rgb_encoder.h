@@ -39,8 +39,6 @@ struct DPRgbEncoder {
 
     // x [crop_h, crop_w, 3] normalized image (NHWC) -> feat [2*num_keypoints].
     void forward(const float* x, BackboneScratch& s, float* feat) const;
-
-    int feature_dim() const { return cfg.num_keypoints*2; }
 };
 
 } // namespace tcpu

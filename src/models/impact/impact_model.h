@@ -5,8 +5,8 @@
  */
 
 #pragma once
-#include "impact_transformer.h"
-#include "resnet_film.h"
+#include "models/act/act_transformer.h"
+#include "models/act/resnet_backbone.h"
 #include "t5_text.h"
 #include "tokenizer/t5_tokenizer.h"
 #include <cstdint>
@@ -33,10 +33,10 @@ struct ImpactModel {
     float norm_eps = 1e-8f;
     std::vector<std::string> cam_names;
 
-    ResNetFilm backbone;      // shared by every camera
+    ResNetBackbone backbone;  // shared by every camera
     ImpactText text;
     T5Tokenizer tok;
-    ImpactTransformer tf;
+    ActTransformer tf;
     std::vector<float> state_mean, state_std, action_mean, action_std;
     std::vector<float> img_mean, img_std;   // [n_cams, 3]
 
@@ -59,7 +59,6 @@ struct ImpactModel {
     const std::vector<int>& token_ids() const { return ids; }
     const std::vector<int>& compact_ids() const { return compact; }
     const std::vector<int>& token_mask() const { return mask; }
-    int n_real_text() const { return n_real; }
     const std::vector<float>& film_gamma() const { return gamma; }
     const std::vector<float>& film_beta() const { return beta; }
 
@@ -73,8 +72,6 @@ struct ImpactModel {
     // [fh*fw, backbone.out_channels()]. predict() calls this per camera.
     void encode_view(const uint8_t* image, int cam, float* feat) const;
 
-    void feat_size(int* fh, int* fw) const { backbone.feat_size(img_h, img_w, fh, fw); }
-
   private:
     // The episode's language state. `have_text` is what makes a missing
     // set_instruction() loud instead of a zero-conditioned rollout.
@@ -82,9 +79,9 @@ struct ImpactModel {
     std::string cached_instruction;
     std::vector<int> ids, compact, mask;
     int n_real = 0;
-    std::vector<float> text_tok, gamma, beta, text_hidden;
+    std::vector<float> text_tok, gamma, beta;
 
-    mutable std::vector<ImpactBackboneScratch> bscratch;
+    mutable std::vector<BackboneScratch> bscratch;
     mutable std::vector<std::vector<float>> norm, feats;
 };
 

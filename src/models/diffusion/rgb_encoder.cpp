@@ -8,7 +8,6 @@
 #include "models/arena.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
-#include <cmath>
 #include <vector>
 
 namespace tcpu {
@@ -46,14 +45,7 @@ bool DPRgbEncoder::load(const std::string& dir, const std::string& name,
     const int K  = cfg.num_keypoints;
     const int F  = K*2;
 
-    size_t off = 0;
-    bool ok = true;
-    auto take = [&](size_t n) -> const float* {
-        if (n > data.size() - off) { ok = false; return nullptr; }
-        const float* p = data.data()+off;
-        off += n;
-        return p;
-    };
+    ArenaCursor<float> take{data};
 
     // 1x1 conv to keypoint channels, stored as a plain [K, C] linear.
     const float* kw = take((size_t)K*C);
@@ -61,7 +53,7 @@ bool DPRgbEncoder::load(const std::string& dir, const std::string& name,
     // Output projection over the flattened keypoint coordinates.
     const float* ow = take((size_t)F*F);
     const float* ob = take(F);
-    if (!ok || off != data.size()) return false;
+    if (!take.done()) return false;
 
     to_keypoints.init(kw, kb, K, C, nn::Linear::Role::Generic);
     out.init(ow, ob, F, F, nn::Linear::Role::Generic);
