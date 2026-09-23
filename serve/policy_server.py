@@ -146,7 +146,73 @@ def _open_lib(lib_path, target):
 # ---------------------------------------------------------------------------
 # engines: per-model, because the C ABIs differ
 # ---------------------------------------------------------------------------
-class ActEngine:
+class _Engine:
+    def __init__(self, args, name, converter, ints, predict_argtypes, with_tok=False):
+        self.lib = _open_lib(args.lib, f"vla_simd_{name}")
+        self.name = name
+        self.model_dir = os.path.expanduser(args.model_dir)
+        dirs = [self.model_dir]
+        if with_tok:
+            dirs.append(os.path.expanduser(args.tok_dir or os.path.join(self.model_dir, "tok")))
+
+        self._fn("load").argtypes = [ctypes.c_char_p] * len(dirs)
+        self._fn("load").restype = ctypes.c_void_p
+        self._fn("free").argtypes = [ctypes.c_void_p]
+        for i in ints:
+            self._fn(i).argtypes = [ctypes.c_void_p]
+            self._fn(i).restype = ctypes.c_int32
+        self._fn("predict").argtypes = [ctypes.c_void_p, *predict_argtypes]
+        self._fn("predict").restype = ctypes.c_int32
+
+        self.h = self._fn("load")(*(d.encode() for d in dirs))
+        if not self.h:
+            sys.exit(f"vla_{name}_load failed for {' + '.join(dirs)} (run {converter})")
+        for i in ints:
+            setattr(self, i, self._fn(i)(self.h))
+
+        self.cfg = read_config(self.model_dir)
+        self.cam_names = self.cfg.get("cams", [])
+        # The model owns mutable scratch and is not reentrant; gRPC serves on a pool.
+        self.lock = threading.Lock()
+
+    def _fn(self, suffix):
+        return getattr(self.lib, f"vla_{self.name}_{suffix}")
+
+    def _task(self, task):
+        task = task or self.task
+        if not task:
+            raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
+        return task
+
+    def _state(self, state):
+        state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
+        if state.size != self.state_dim:
+            raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
+        return state
+
+    @staticmethod
+    def _frames(frames, want):
+        frames = np.ascontiguousarray(frames, np.uint8)
+        if frames.shape != want:
+            raise ValueError(f"frames {frames.shape} != {want}")
+        return frames
+
+    def _run(self, *argv, after=()):
+        out = np.empty((self.chunk, self.action_dim), np.float32)
+        with self.lock:
+            rc = self._fn("predict")(self.h, *argv, out.ctypes.data_as(F32P), *after)
+        if rc != 0:
+            raise RuntimeError(f"vla_{self.name}_predict failed (rc={rc})")
+        return out
+
+    def close(self):
+        with self.lock:
+            if self.h:
+                self._fn("free")(self.h)
+                self.h = None
+
+
+class ActEngine(_Engine):
     """ctypes binding for libvla_simd_act.so (src/models/act/act_capi.cpp).
 
     The engine owns the whole processor pipeline: image rescale + per-channel
@@ -157,38 +223,10 @@ class ActEngine:
     """
 
     def __init__(self, args):
-        lib = _open_lib(args.lib, "vla_simd_act")
-        model_dir = os.path.expanduser(args.model_dir)
-
-        lib.vla_act_load.argtypes = [ctypes.c_char_p]
-        lib.vla_act_load.restype = ctypes.c_void_p
-        lib.vla_act_free.argtypes = [ctypes.c_void_p]
-        for name in ("chunk", "action_dim", "state_dim", "n_cams", "img_h", "img_w"):
-            fn = getattr(lib, f"vla_act_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        lib.vla_act_predict.argtypes = [ctypes.c_void_p, U8P, F32P, ctypes.c_int32, F32P]
-        lib.vla_act_predict.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = lib.vla_act_load(model_dir.encode())
-        if not self.h:
-            sys.exit(f"vla_act_load failed for {model_dir} (run tools/convert_act.py)")
-
-        self.chunk = lib.vla_act_chunk(self.h)
-        self.action_dim = lib.vla_act_action_dim(self.h)
-        self.state_dim = lib.vla_act_state_dim(self.h)
-        self.n_cams = lib.vla_act_n_cams(self.h)
-        self.img_h = lib.vla_act_img_h(self.h)
-        self.img_w = lib.vla_act_img_w(self.h)
-
-        self.cfg = read_config(model_dir)
-        self.cam_names = self.cfg.get("cams", [])
+        super().__init__(args, "act", "tools/convert_act.py",
+                         ("chunk", "action_dim", "state_dim", "n_cams", "img_h", "img_w"),
+                         [U8P, F32P, ctypes.c_int32, F32P])
         self.n_views = self.n_cams
-        # ActModel is stateful scratch, not reentrant; gRPC serves on a thread pool.
-        self.lock = threading.Lock()
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
         return (f"{self.n_cams} cams {self.cam_names or '(unnamed)'} at "
@@ -197,35 +235,17 @@ class ActEngine:
 
     def predict(self, adapted, seed):
         """frames [n_cams, H, W, 3] uint8, state [state_dim] -> [chunk, action_dim]."""
-        frames, state = adapted[0], adapted[1]
-        frames = np.ascontiguousarray(frames, np.uint8)
-        state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
-        if state.size != self.state_dim:
-            raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
-        if frames.shape != (self.n_cams, self.img_h, self.img_w, 3):
-            raise ValueError(f"frames {frames.shape} != {(self.n_cams, self.img_h, self.img_w, 3)}")
-
-        with self.lock:
-            rc = self.lib.vla_act_predict(
-                self.h, frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
-                1,  # un-normalize: actions come back in robot units
-                self._out.ctypes.data_as(F32P))
-            if rc != 0:
-                raise RuntimeError(f"vla_act_predict failed (rc={rc})")
-            return self._out.copy()
+        state = self._state(adapted[1])
+        frames = self._frames(adapted[0], (self.n_cams, self.img_h, self.img_w, 3))
+        return self._run(frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
+                         1)  # un-normalize: actions come back in robot units
 
     def warmup_input(self):
         return (np.zeros((self.n_cams, self.img_h, self.img_w, 3), np.uint8),
                 np.zeros(self.state_dim, np.float32))
 
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                self.lib.vla_act_free(self.h)
-                self.h = None
 
-
-class ImpactEngine:
+class ImpactEngine(_Engine):
     """ctypes binding for libvla_simd_impact.so (src/models/impact/impact_capi.cpp).
 
     ACT's contract plus an instruction. As with ACT the engine owns the whole
@@ -238,97 +258,32 @@ class ImpactEngine:
     FiLM head once per episode rather than once per query.
     """
 
-    prefix = "vla_impact"
-    lib_name = "vla_simd_impact"
-    converter = "tools/convert_impact.py"
-    extra_predict_args = ()
-
     def __init__(self, args):
-        lib = _open_lib(args.lib, self.lib_name)
-        model_dir = os.path.expanduser(args.model_dir)
-        p = self.prefix
-
-        getattr(lib, f"{p}_load").argtypes = [ctypes.c_char_p]
-        getattr(lib, f"{p}_load").restype = ctypes.c_void_p
-        getattr(lib, f"{p}_free").argtypes = [ctypes.c_void_p]
-        for name in ("chunk", "action_dim", "state_dim", "n_cams", "img_h", "img_w",
-                     "n_text") + self.extra_ints:
-            fn = getattr(lib, f"{p}_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        pr = getattr(lib, f"{p}_predict")
-        pr.argtypes = ([ctypes.c_void_p, U8P, F32P, ctypes.c_char_p, ctypes.c_int32, F32P]
-                       + list(self.extra_predict_args))
-        pr.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = getattr(lib, f"{p}_load")(model_dir.encode())
-        if not self.h:
-            sys.exit(f"{p}_load failed for {model_dir} (run {self.converter})")
-
-        self.chunk = getattr(lib, f"{p}_chunk")(self.h)
-        self.action_dim = getattr(lib, f"{p}_action_dim")(self.h)
-        self.state_dim = getattr(lib, f"{p}_state_dim")(self.h)
-        self.n_cams = getattr(lib, f"{p}_n_cams")(self.h)
-        self.img_h = getattr(lib, f"{p}_img_h")(self.h)
-        self.img_w = getattr(lib, f"{p}_img_w")(self.h)
-        self.n_text = getattr(lib, f"{p}_n_text")(self.h)
-
-        self.cfg = read_config(model_dir)
-        self.cam_names = self.cfg.get("cams", [])
+        super().__init__(args, "impact", "tools/convert_impact.py",
+                         ("chunk", "action_dim", "state_dim", "n_cams", "img_h", "img_w", "n_text"),
+                         [U8P, F32P, ctypes.c_char_p, ctypes.c_int32, F32P])
         self.n_views = self.n_cams
         self.task = None   # set by main() from --task or config.txt
-        # The model owns mutable scratch and is not reentrant; gRPC serves on a pool.
-        self.lock = threading.Lock()
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
-
-    extra_ints = ()
 
     def describe(self):
         return (f"{self.n_cams} cams {self.cam_names or '(unnamed)'} at "
                 f"{self.img_h}x{self.img_w} | chunk {self.chunk}x{self.action_dim} "
                 f"| state {self.state_dim} | text {self.n_text}")
 
-    def _predict_tail(self, seed):
-        """Extra ctypes arguments after `actions`, for engines that take more."""
-        return ()
-
     def predict(self, adapted, seed):
         """frames [n_cams, H, W, 3] uint8, state, task -> [chunk, action_dim]."""
-        frames, state, task = adapted[0], adapted[1], adapted[2]
-        task = task or self.task
-        if not task:
-            raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
-        frames = np.ascontiguousarray(frames, np.uint8)
-        state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
-        if state.size != self.state_dim:
-            raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
-        if frames.shape != (self.n_cams, self.img_h, self.img_w, 3):
-            raise ValueError(f"frames {frames.shape} != {(self.n_cams, self.img_h, self.img_w, 3)}")
-
-        with self.lock:
-            rc = getattr(self.lib, f"{self.prefix}_predict")(
-                self.h, frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
-                task.encode(),
-                1,  # un-normalize: actions come back in robot units
-                self._out.ctypes.data_as(F32P), *self._predict_tail(seed))
-            if rc != 0:
-                raise RuntimeError(f"{self.prefix}_predict failed (rc={rc})")
-            return self._out.copy()
+        task = self._task(adapted[2])
+        state = self._state(adapted[1])
+        frames = self._frames(adapted[0], (self.n_cams, self.img_h, self.img_w, 3))
+        return self._run(frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P), task.encode(),
+                         1)  # un-normalize: actions come back in robot units
 
     def warmup_input(self):
         return (np.zeros((self.n_cams, self.img_h, self.img_w, 3), np.uint8),
                 np.zeros(self.state_dim, np.float32), self.task)
 
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                getattr(self.lib, f"{self.prefix}_free")(self.h)
-                self.h = None
 
-
-class SmolvlaEngine:
+class SmolvlaEngine(_Engine):
     """ctypes binding for libvla_simd_smolvla.so (src/models/smolvla/smolvla_capi.cpp).
 
     The engine owns the whole preprocessing pipeline: resize-with-pad, the
@@ -339,49 +294,15 @@ class SmolvlaEngine:
     """
 
     def __init__(self, args):
-        lib = _open_lib(args.lib, "vla_simd_smolvla")
-        model_dir = os.path.expanduser(args.model_dir)
-        tok_dir = os.path.expanduser(args.tok_dir or os.path.join(model_dir, "tok"))
-
-        lib.vla_smolvla_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-        lib.vla_smolvla_load.restype = ctypes.c_void_p
-        lib.vla_smolvla_free.argtypes = [ctypes.c_void_p]
-        for name in ("chunk", "action_dim", "state_dim", "n_views", "img_size", "tok_maxlen"):
-            fn = getattr(lib, f"vla_smolvla_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        lib.vla_smolvla_tokenize.argtypes = [ctypes.c_void_p, ctypes.c_char_p, I32P, I32P]
-        lib.vla_smolvla_tokenize.restype = ctypes.c_int32
-        lib.vla_smolvla_predict.argtypes = [
-            ctypes.c_void_p, U8P, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
-            I32P, I32P, ctypes.c_int32, F32P, F32P, ctypes.c_uint64, F32P,
-        ]
-        lib.vla_smolvla_predict.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = lib.vla_smolvla_load(model_dir.encode(), tok_dir.encode())
-        if not self.h:
-            sys.exit(
-                f"vla_smolvla_load failed for {model_dir} + {tok_dir} "
-                "(run tools/convert_hf_safetensors.py)"
-            )
-
-        self.chunk = lib.vla_smolvla_chunk(self.h)
-        self.action_dim = lib.vla_smolvla_action_dim(self.h)
-        self.state_dim = lib.vla_smolvla_state_dim(self.h)
-        self.n_views = lib.vla_smolvla_n_views(self.h)
-        self.img_size = lib.vla_smolvla_img_size(self.h)
-        self.tok_maxlen = lib.vla_smolvla_tok_maxlen(self.h)
-
-        self.cfg = read_config(model_dir)
-        self.cam_names = self.cfg.get("cams", [])
+        super().__init__(args, "smolvla", "tools/convert_hf_safetensors.py",
+                         ("chunk", "action_dim", "state_dim", "n_views", "img_size", "tok_maxlen"),
+                         [U8P, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                          I32P, I32P, ctypes.c_int32, F32P, F32P, ctypes.c_uint64, F32P],
+                         with_tok=True)
+        self.lib.vla_smolvla_tokenize.argtypes = [ctypes.c_void_p, ctypes.c_char_p, I32P, I32P]
+        self.lib.vla_smolvla_tokenize.restype = ctypes.c_int32
         self.task = None   # set by main() from --task or config.txt
-        # SmolvlaModel carries mutable scratch; one handle is one inference at a
-        # time, and gRPC serves on a thread pool.
-        self.lock = threading.Lock()
         self._tokens = {}
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
         return (f"{self.n_views} views {self.cam_names or '(unnamed)'} -> {self.img_size}px "
@@ -410,43 +331,25 @@ class SmolvlaEngine:
     def predict(self, adapted, seed):
         """frames [n_views, H, W, 3] uint8 native res -> [chunk, action_dim]."""
         frames, state, task = adapted
-        task = task or self.task
-        if not task:
-            raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
+        task = self._task(task)
         frames = np.ascontiguousarray(frames, np.uint8)
-        state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
-        if state.size != self.state_dim:
-            raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
+        state = self._state(state)
         if frames.ndim != 4 or frames.shape[0] != self.n_views or frames.shape[3] != 3:
             raise ValueError(f"frames {frames.shape} != ({self.n_views}, H, W, 3)")
         if frames.shape[1] <= 0 or frames.shape[2] <= 0:
             raise ValueError(f"frames have a zero dimension: {frames.shape}")
         ids, mask = self.tokenize(task)
-
-        with self.lock:
-            rc = self.lib.vla_smolvla_predict(
-                self.h, frames.ctypes.data_as(U8P), self.n_views,
-                frames.shape[1], frames.shape[2],
-                ids.ctypes.data_as(I32P), mask.ctypes.data_as(I32P), self.tok_maxlen,
-                state.ctypes.data_as(F32P), None, seed,
-                self._out.ctypes.data_as(F32P))
-            if rc != 0:
-                raise RuntimeError(f"vla_smolvla_predict failed (rc={rc})")
-            return self._out.copy()
+        return self._run(frames.ctypes.data_as(U8P), self.n_views,
+                         frames.shape[1], frames.shape[2],
+                         ids.ctypes.data_as(I32P), mask.ctypes.data_as(I32P), self.tok_maxlen,
+                         state.ctypes.data_as(F32P), None, seed)
 
     def warmup_input(self):
         return (np.zeros((self.n_views, 480, 640, 3), np.uint8),
                 np.zeros(self.state_dim, np.float32), self.task)
 
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                self.lib.vla_smolvla_free(self.h)
-                self.h = None
 
-
-
-class OctoEngine:
+class OctoEngine(_Engine):
     """ctypes binding for libvla_simd_octo.so (src/models/octo/octo_capi.cpp).
 
     Two differences from every other engine here. Octo takes no proprioceptive
@@ -462,43 +365,16 @@ class OctoEngine:
     WRIST_HW = (128, 128)
 
     def __init__(self, args):
-        lib = _open_lib(args.lib, "vla_simd_octo")
-        model_dir = os.path.expanduser(args.model_dir)
-        tok_dir = os.path.expanduser(args.tok_dir or os.path.join(model_dir, "tok"))
-
-        lib.vla_octo_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-        lib.vla_octo_load.restype = ctypes.c_void_p
-        lib.vla_octo_free.argtypes = [ctypes.c_void_p]
-        for name in ("horizon", "action_dim", "max_window"):
-            fn = getattr(lib, f"vla_octo_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        lib.vla_octo_predict.argtypes = [
-            ctypes.c_void_p, U8P, U8P, ctypes.c_int32, U8P, ctypes.c_char_p,
-            ctypes.c_uint64, ctypes.c_int32, F32P,
-        ]
-        lib.vla_octo_predict.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = lib.vla_octo_load(model_dir.encode(), tok_dir.encode())
-        if not self.h:
-            sys.exit(
-                f"vla_octo_load failed for {model_dir} + {tok_dir} "
-                "(run tools/convert_octo.py)"
-            )
-
-        self.chunk = lib.vla_octo_horizon(self.h)
-        self.action_dim = lib.vla_octo_action_dim(self.h)
-        self.max_window = lib.vla_octo_max_window(self.h)
-
-        self.cfg = read_config(model_dir)
+        super().__init__(args, "octo", "tools/convert_octo.py",
+                         ("horizon", "action_dim", "max_window"),
+                         [U8P, U8P, ctypes.c_int32, U8P, ctypes.c_char_p,
+                          ctypes.c_uint64, ctypes.c_int32, F32P],
+                         with_tok=True)
+        self.chunk = self.horizon
         self.window = min(int(self.cfg.get("window", 2) or 2), self.max_window)
-        self.cam_names = self.cfg.get("cams", []) or _cam_list(args)
+        self.cam_names = self.cam_names or _cam_list(args)
         self.n_views = 1 if len(self.cam_names) == 1 else 2
         self.task = None
-        self.lock = threading.Lock()
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
         return (f"{self.n_views} cams {self.cam_names or '(unnamed)'} at 256/128 "
@@ -508,9 +384,7 @@ class OctoEngine:
     def predict(self, adapted, seed):
         """(primary [wnd,256,256,3], wrist [wnd,128,128,3], mask [wnd], task)."""
         primary, wrist, mask, task = adapted
-        task = task or self.task
-        if not task:
-            raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
+        task = self._task(task)
         primary = np.ascontiguousarray(primary, np.uint8)
         wrist = None if wrist is None else np.ascontiguousarray(wrist, np.uint8)
         mask = np.ascontiguousarray(mask, np.uint8)
@@ -521,17 +395,10 @@ class OctoEngine:
                              f"mask {mask.shape[0]}")
         if not 1 <= wnd <= self.max_window:
             raise ValueError(f"window {wnd} outside [1, {self.max_window}]")
-
-        with self.lock:
-            rc = self.lib.vla_octo_predict(
-                self.h, primary.ctypes.data_as(U8P),
-                None if wrist is None else wrist.ctypes.data_as(U8P),
-                wnd, mask.ctypes.data_as(U8P), task.encode(), seed,
-                1,  # un-normalize: actions come back in dataset units
-                self._out.ctypes.data_as(F32P))
-            if rc != 0:
-                raise RuntimeError(f"vla_octo_predict failed (rc={rc})")
-            return self._out.copy()
+        return self._run(primary.ctypes.data_as(U8P),
+                         None if wrist is None else wrist.ctypes.data_as(U8P),
+                         wnd, mask.ctypes.data_as(U8P), task.encode(), seed,
+                         1)  # un-normalize: actions come back in dataset units
 
     def warmup_input(self):
         w = self.window
@@ -539,14 +406,8 @@ class OctoEngine:
                 np.zeros((w, *self.WRIST_HW, 3), np.uint8) if self.n_views == 2 else None,
                 np.ones(w, np.uint8), self.task)
 
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                self.lib.vla_octo_free(self.h)
-                self.h = None
 
-
-class TurboVlaEngine:
+class TurboVlaEngine(_Engine):
     """ctypes binding for libvla_simd_turbovla.so (src/models/turbovla/turbovla_capi.cpp).
 
     IMPACT's shape - frames, state, instruction - but the frames are consumed as
@@ -555,38 +416,10 @@ class TurboVlaEngine:
     """
 
     def __init__(self, args):
-        lib = _open_lib(args.lib, "vla_simd_turbovla")
-        model_dir = os.path.expanduser(args.model_dir)
-
-        lib.vla_turbovla_load.argtypes = [ctypes.c_char_p]
-        lib.vla_turbovla_load.restype = ctypes.c_void_p
-        lib.vla_turbovla_free.argtypes = [ctypes.c_void_p]
-        for name in ("chunk", "action_dim", "state_dim", "n_views", "img_size"):
-            fn = getattr(lib, f"vla_turbovla_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        lib.vla_turbovla_predict.argtypes = [
-            ctypes.c_void_p, U8P, F32P, ctypes.c_char_p, ctypes.c_int32, F32P]
-        lib.vla_turbovla_predict.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = lib.vla_turbovla_load(model_dir.encode())
-        if not self.h:
-            sys.exit(f"vla_turbovla_load failed for {model_dir} "
-                     "(run tools/convert_turbovla.py)")
-
-        self.chunk = lib.vla_turbovla_chunk(self.h)
-        self.action_dim = lib.vla_turbovla_action_dim(self.h)
-        self.state_dim = lib.vla_turbovla_state_dim(self.h)
-        self.n_views = lib.vla_turbovla_n_views(self.h)
-        self.img_size = lib.vla_turbovla_img_size(self.h)
-
-        self.cfg = read_config(model_dir)
-        self.cam_names = self.cfg.get("cams", [])
+        super().__init__(args, "turbovla", "tools/convert_turbovla.py",
+                         ("chunk", "action_dim", "state_dim", "n_views", "img_size"),
+                         [U8P, F32P, ctypes.c_char_p, ctypes.c_int32, F32P])
         self.task = None
-        self.lock = threading.Lock()
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
         return (f"{self.n_views} views {self.cam_names or '(unnamed)'} at "
@@ -596,39 +429,18 @@ class TurboVlaEngine:
     def predict(self, adapted, seed):
         """frames [n_views, img, img, 3] uint8, state, task -> [chunk, action_dim]."""
         frames, state, task = adapted
-        task = task or self.task
-        if not task:
-            raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
-        frames = np.ascontiguousarray(frames, np.uint8)
-        state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
-        if state.size != self.state_dim:
-            raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
-        want = (self.n_views, self.img_size, self.img_size, 3)
-        if frames.shape != want:
-            raise ValueError(f"frames {frames.shape} != {want}")
-
-        with self.lock:
-            rc = self.lib.vla_turbovla_predict(
-                self.h, frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
-                task.encode(),
-                1,  # un-normalize: actions come back in env units
-                self._out.ctypes.data_as(F32P))
-            if rc != 0:
-                raise RuntimeError(f"vla_turbovla_predict failed (rc={rc})")
-            return self._out.copy()
+        task = self._task(task)
+        state = self._state(state)
+        frames = self._frames(frames, (self.n_views, self.img_size, self.img_size, 3))
+        return self._run(frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P), task.encode(),
+                         1)  # un-normalize: actions come back in env units
 
     def warmup_input(self):
         return (np.zeros((self.n_views, self.img_size, self.img_size, 3), np.uint8),
                 np.zeros(self.state_dim, np.float32), self.task)
 
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                self.lib.vla_turbovla_free(self.h)
-                self.h = None
 
-
-class DiffusionEngine:
+class DiffusionEngine(_Engine):
     """ctypes binding for libvla_simd_diffusion.so (src/models/diffusion/diffusion_capi.cpp).
 
     Takes an observation history: n_obs_steps frames per camera and n_obs_steps
@@ -639,44 +451,12 @@ class DiffusionEngine:
     """
 
     def __init__(self, args):
-        lib = _open_lib(args.lib, "vla_simd_diffusion")
-        model_dir = os.path.expanduser(args.model_dir)
-
-        lib.vla_diffusion_load.argtypes = [ctypes.c_char_p]
-        lib.vla_diffusion_load.restype = ctypes.c_void_p
-        lib.vla_diffusion_free.argtypes = [ctypes.c_void_p]
-        for name in ("chunk", "horizon", "action_dim", "state_dim", "n_cams",
-                     "n_obs_steps", "img_h", "img_w", "num_steps", "is_ddim"):
-            fn = getattr(lib, f"vla_diffusion_{name}")
-            fn.argtypes = [ctypes.c_void_p]
-            fn.restype = ctypes.c_int32
-        lib.vla_diffusion_predict.argtypes = [
-            ctypes.c_void_p, U8P, F32P, ctypes.c_int32, F32P, F32P]
-        lib.vla_diffusion_predict.restype = ctypes.c_int32
-
-        self.lib = lib
-        self.model_dir = model_dir
-        self.h = lib.vla_diffusion_load(model_dir.encode())
-        if not self.h:
-            sys.exit(f"vla_diffusion_load failed for {model_dir} "
-                     "(run tools/convert_diffusion.py)")
-
-        self.chunk = lib.vla_diffusion_chunk(self.h)
-        self.horizon = lib.vla_diffusion_horizon(self.h)
-        self.action_dim = lib.vla_diffusion_action_dim(self.h)
-        self.state_dim = lib.vla_diffusion_state_dim(self.h)
-        self.n_cams = lib.vla_diffusion_n_cams(self.h)
-        self.n_obs_steps = lib.vla_diffusion_n_obs_steps(self.h)
-        self.img_h = lib.vla_diffusion_img_h(self.h)
-        self.img_w = lib.vla_diffusion_img_w(self.h)
-        self.num_steps = lib.vla_diffusion_num_steps(self.h)
-        self.is_ddim = bool(lib.vla_diffusion_is_ddim(self.h))
-
-        self.cfg = read_config(model_dir)
-        self.cam_names = self.cfg.get("cams", [])
+        super().__init__(args, "diffusion", "tools/convert_diffusion.py",
+                         ("chunk", "horizon", "action_dim", "state_dim", "n_cams",
+                          "n_obs_steps", "img_h", "img_w", "num_steps", "is_ddim"),
+                         [U8P, F32P, ctypes.c_int32, F32P, F32P])
+        self.is_ddim = bool(self.is_ddim)
         self.n_views = self.n_cams
-        self.lock = threading.Lock()
-        self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
         return (f"{self.n_cams} cams {self.cam_names or '(unnamed)'} at "
@@ -687,12 +467,8 @@ class DiffusionEngine:
 
     def predict(self, adapted, seed):
         """frames [n_obs, n_cams, H, W, 3] uint8, state [n_obs, state_dim]."""
-        frames, state = adapted[0], adapted[1]
-        frames = np.ascontiguousarray(frames, np.uint8)
-        state = np.ascontiguousarray(np.asarray(state, np.float32))
-        want_f = (self.n_obs_steps, self.n_cams, self.img_h, self.img_w, 3)
-        if frames.shape != want_f:
-            raise ValueError(f"frames {frames.shape} != {want_f}")
+        frames = self._frames(adapted[0], (self.n_obs_steps, self.n_cams, self.img_h, self.img_w, 3))
+        state = np.ascontiguousarray(np.asarray(adapted[1], np.float32))
         if state.shape != (self.n_obs_steps, self.state_dim):
             raise ValueError(f"state {state.shape} != {(self.n_obs_steps, self.state_dim)}")
 
@@ -703,25 +479,13 @@ class DiffusionEngine:
         noise = np.ascontiguousarray(
             rng.standard_normal((1 + self.num_steps, self.horizon, self.action_dim),
                                 dtype=np.float32))
-
-        with self.lock:
-            rc = self.lib.vla_diffusion_predict(
-                self.h, frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
-                1,  # un-normalize: actions come back in robot units
-                self._out.ctypes.data_as(F32P), noise.ctypes.data_as(F32P))
-            if rc != 0:
-                raise RuntimeError(f"vla_diffusion_predict failed (rc={rc})")
-            return self._out.copy()
+        return self._run(frames.ctypes.data_as(U8P), state.ctypes.data_as(F32P),
+                         1,  # un-normalize: actions come back in robot units
+                         after=(noise.ctypes.data_as(F32P),))
 
     def warmup_input(self):
         return (np.zeros((self.n_obs_steps, self.n_cams, self.img_h, self.img_w, 3), np.uint8),
                 np.zeros((self.n_obs_steps, self.state_dim), np.float32))
-
-    def close(self):
-        with self.lock:
-            if getattr(self, "h", None):
-                self.lib.vla_diffusion_free(self.h)
-                self.h = None
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +561,6 @@ class ObservationAdapter:
         scale = 255.0 if float(img.max()) <= 1.0 else 1.0
         return np.clip(img * scale, 0, 255).astype(np.uint8)
 
-
     def _resize(self, img, h, w):
         """uint8 HWC at exactly h x w, resampling only when it has to."""
         img = self._as_uint8(img)
@@ -820,12 +583,9 @@ class ObservationAdapter:
         t = torch.nn.functional.interpolate(t, size=(h, w), mode="bilinear", align_corners=False)
         return t.squeeze(0).permute(1, 2, 0).round().clamp(0, 255).to(torch.uint8).numpy()
 
+
 class ActAdapter(ObservationAdapter):
     """ACT consumes frames at the checkpoint's resolution, so this one resizes."""
-
-    def __init__(self, engine, lerobot_features):
-        super().__init__(engine, lerobot_features)
-        self._warned_resize = False
 
     def __call__(self, raw_observation):
         frame = self._frame(raw_observation)
@@ -833,13 +593,8 @@ class ActAdapter(ObservationAdapter):
         frames = np.empty(
             (self.engine.n_cams, self.engine.img_h, self.engine.img_w, 3), np.uint8)
         for i, key in enumerate(self.camera_keys):
-            frames[i] = self._to_engine_frame(np.asarray(frame[key]))
+            frames[i] = self._resize(np.asarray(frame[key]), self.engine.img_h, self.engine.img_w)
         return frames, state
-
-    def _to_engine_frame(self, img):
-        return self._resize(img, self.engine.img_h, self.engine.img_w)
-
-
 
 
 class ImpactAdapter(ActAdapter):
@@ -863,7 +618,6 @@ class SmolvlaAdapter(ObservationAdapter):
         if len(shapes) != 1:
             raise ValueError(f"all views must share one resolution, got {shapes}")
         return np.stack(frames), state, raw_observation.get("task")
-
 
 
 class History:
@@ -947,6 +701,7 @@ class DiffusionAdapter(ActAdapter):
         window, _ = self.history.push((frames, state))
         return (np.stack([f for f, _ in window]), np.stack([s for _, s in window]))
 
+
 # ---------------------------------------------------------------------------
 # model specs: everything the shared server needs to know about a model
 # ---------------------------------------------------------------------------
@@ -964,10 +719,6 @@ class ModelSpec:
         self.extra_args = extra_args
 
 
-def _act_extra(p):
-    pass
-
-
 def _smolvla_extra(p):
     p.add_argument("--tok-dir", default=None, help="default: <model-dir>/tok")
     p.add_argument("--task", default=None,
@@ -977,7 +728,7 @@ def _smolvla_extra(p):
 
 
 ACT = ModelSpec("ACT", "act", ActEngine, ActAdapter, "libvla_simd_act", "act",
-                omp_threads="6", obs_queue_timeout=2.0, extra_args=(_act_extra,))
+                omp_threads="6", obs_queue_timeout=2.0)
 SMOLVLA = ModelSpec("SmolVLA", "smolvla", SmolvlaEngine, SmolvlaAdapter,
                     "libvla_simd_smolvla", "smolvla",
                     omp_threads="4", obs_queue_timeout=5.0, extra_args=(_smolvla_extra,))
@@ -1074,10 +825,6 @@ def build_servicer_class(spec):
             self.actions_per_chunk = engine.chunk
             self._query_lock = threading.Lock()
             self.n_queries = 0
-
-        @property
-        def running(self):
-            return not self.shutdown_event.is_set()
 
         def _reset(self):
             self.shutdown_event.set()
@@ -1249,19 +996,18 @@ class ServerConfig:
         self.seed = getattr(args, "seed", 0)
 
 
-def main(spec=None, doc=None):
-    if spec is None:
-        # Resolved before the real parser is built: the model decides the
-        # defaults, the extra flags and the OMP thread count below.
-        pre = argparse.ArgumentParser(add_help=False)
-        pre.add_argument("--model", choices=sorted(MODELS))
-        known, _ = pre.parse_known_args()
-        if not known.model:
-            sys.exit(
-                "pass --model: " + ", ".join(sorted(MODELS)) + "\n"
-                "  python serve/policy_server.py --model act --model-dir build/act"
-            )
-        spec = MODELS[known.model]
+def main():
+    # Resolved before the real parser is built: the model decides the
+    # defaults, the extra flags and the OMP thread count below.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--model", choices=sorted(MODELS))
+    known, _ = pre.parse_known_args()
+    if not known.model:
+        sys.exit(
+            "pass --model: " + ", ".join(sorted(MODELS)) + "\n"
+            "  python serve/policy_server.py --model act --model-dir build/act"
+        )
+    spec = MODELS[known.model]
 
     # libgomp reads this when the shared library loads, so set it before the
     # first import that pulls it in. OMP_PROC_BIND/OMP_PLACES are deliberately
@@ -1277,7 +1023,7 @@ def main(spec=None, doc=None):
     os.environ.setdefault("OMP_NUM_THREADS", str(min(int(spec.omp_threads), ncpu)))
 
     p = argparse.ArgumentParser(
-        description=doc or __doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", choices=sorted(MODELS), default=spec.policy_type,
                    help="which policy to serve")
     p.add_argument("--model-dir", default=spec.default_model_dir,

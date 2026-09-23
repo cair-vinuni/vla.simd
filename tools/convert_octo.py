@@ -13,7 +13,7 @@ Checkpoint: rail-berkeley/octo-small-1.5, fetched from the HF hub on first run;
 pass --ckpt, or set OCTO_CKPT, to use a local copy instead.
 
 Outputs (default build/octo/):
-  config.txt                 text KV: all dims
+  config.txt                 text KV: instruction, window, steps, dataset
   t5.meta / t5.bin           T5-base encoder (fp32: embedding, rel bias [32,12],
                              per layer ln1,q,k,v,o,ln2,wi,wo ; final ln)
   stem_primary.meta/.bin     SmallStem16 (per layer: conv w [Cout,3,3,Cin] WS-folded,

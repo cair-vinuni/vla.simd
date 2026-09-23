@@ -3,7 +3,7 @@
 convert_lerobot_ckpt.py
 
 Convert a finetuned lerobot SmolVLA checkpoint into the flat .meta/.bin weight
-format of the vla.simd engine, so serve/smolvla_policy_server.py can run it.
+format of the vla.simd engine, so serve/policy_server.py can run it.
 
 Same output layout as convert_hf_safetensors.py (which converts the HuggingFaceVLA
 base models), but reads the checkpoint through the lerobot factories a torch
@@ -16,7 +16,7 @@ that means:
   * the SmolVLM2 tokenizer named by the checkpoint's tokenizer_processor
 
 Run in the venv the checkpoint was trained with (lerobot + torch + the pinned
-transformers; DEPLOY.md explains why the version matters), from the repo root:
+transformers), from the repo root:
   ~/work/smolvla-sim/.venv/bin/python tools/convert_lerobot_ckpt.py
 """
 import argparse
@@ -212,10 +212,9 @@ def dump_aex(model, vlmx, cfg, out, n_layers, san):
 
 
 def dump_tokenizer(tokenizer, out):
-    """Flat vocab/merges/specials for the engine's byte-level BPE tokenizer."""
+    """Flat vocab/merges for the engine's byte-level BPE tokenizer."""
     tj = json.loads(tokenizer.backend_tokenizer.to_str())
     vocab, merges = tj["model"]["vocab"], tj["model"]["merges"]
-    added = tj.get("added_tokens", [])
     os.makedirs(out, exist_ok=True)
     with open(f"{out}/vocab.txt", "w", encoding="utf-8") as f:
         for tok, i in vocab.items():
@@ -223,10 +222,7 @@ def dump_tokenizer(tokenizer, out):
     with open(f"{out}/merges.txt", "w", encoding="utf-8") as f:
         for m in merges:
             f.write((m if isinstance(m, str) else f"{m[0]} {m[1]}") + "\n")
-    with open(f"{out}/specials.txt", "w", encoding="utf-8") as f:
-        for a in added:
-            f.write(f"{a['id']}\t{a['content']}\n")
-    return len(vocab), len(merges), len(added)
+    return len(vocab), len(merges)
 
 
 def camera_keys(pre, cfg):
@@ -328,8 +324,8 @@ def main():
         f.write(f"n_views {n_views}\n")
 
     tokenizer = pipeline_tokenizer(pre)
-    nv, nm, ns = dump_tokenizer(tokenizer, f"{out}/tok")
-    print(f"  tokenizer {tokenizer.name_or_path}: vocab={nv} merges={nm} specials={ns}")
+    nv, nm = dump_tokenizer(tokenizer, f"{out}/tok")
+    print(f"  tokenizer {tokenizer.name_or_path}: vocab={nv} merges={nm}")
 
     with open(f"{out}/config.txt", "w") as f:
         f.write(f"instruction {args.task}\n")

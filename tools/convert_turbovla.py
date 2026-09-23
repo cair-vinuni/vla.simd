@@ -7,7 +7,7 @@ convert_turbovla.py -- convert a TurboVLA LIBERO checkpoint into the flat
         --ckpt build/turbovla_ckpt/object.pth \
         --out  build/turbovla_object
 
-Run it in a venv with torch + transformers>=4.57 (see docs/12-turbovla-design.md).
+Run it in a venv with torch + transformers>=4.57.
 The engine itself needs none of that at runtime.
 
 The reference model is the upstream code in third_party/TurboVLA, driven with the
@@ -52,13 +52,11 @@ import types
 
 import numpy as np
 
+from _common import Arena, log, write_meta
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 REF = os.path.join(ROOT, "third_party", "TurboVLA")
-
-
-def log(msg):
-    print(msg, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -165,35 +163,6 @@ def build_reference(ckpt_path, bert_dir, dinov3_config_path):
 # ---------------------------------------------------------------------------
 # weight arena helpers -- mirror the take() cursor in the C++ loaders
 # ---------------------------------------------------------------------------
-class Arena:
-    """Append-only float32 blob."""
-
-    def __init__(self):
-        self.parts = []
-        self.n = 0
-
-    def add(self, t, shape=None):
-        a = np.ascontiguousarray(to_numpy(t), dtype=np.float32)
-        if shape is not None:
-            assert a.shape == tuple(shape), f"expected {tuple(shape)}, got {a.shape}"
-        self.parts.append(a.reshape(-1))
-        self.n += a.size
-        return self
-
-    def write(self, path):
-        blob = np.concatenate(self.parts) if self.parts else np.zeros(0, np.float32)
-        blob.tofile(path)
-        return blob.size
-
-
-def to_numpy(t):
-    import torch
-
-    if isinstance(t, torch.Tensor):
-        return t.detach().to(torch.float32).cpu().numpy()
-    return np.asarray(t)
-
-
 def linear(arena, mod, shape=None):
     """nn.Linear -> W [N, K] then bias [N] (the layout nn::Linear::init expects)."""
     arena.add(mod.weight, shape)
@@ -419,11 +388,6 @@ def dump_head(model, out_dir):
     log(f"  head.bin {n * 4 / 1e6:.1f} MB")
 
 
-def write_meta(out_dir, name, lines):
-    with open(os.path.join(out_dir, f"{name}.meta"), "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
 def dump_config(model, out_dir, image_mean, image_std, tokenizer, stats_path, stats_key):
     """Scalars the engine needs that are not weights: shapes, the image
     normalization, and the WordPiece ids the sub-sentence mask keys off."""
@@ -519,7 +483,6 @@ def main():
         f.write("".join(f"cam{i} {c}\n" for i, c in enumerate(cams)))
         if args.task:
             f.write(f"instruction {args.task}\n")
-
 
 
 if __name__ == "__main__":

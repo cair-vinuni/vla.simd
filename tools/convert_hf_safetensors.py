@@ -286,10 +286,9 @@ def check_expert_attn(st, n_layers, san, expert_h, kv_full):
 
 
 def dump_tokenizer(tok_json, out):
-    """Flat vocab/merges/specials for the engine's byte-level BPE tokenizer."""
+    """Flat vocab/merges for the engine's byte-level BPE tokenizer."""
     tj = json.loads(Path(tok_json).read_text(encoding="utf-8"))
     vocab, merges = tj["model"]["vocab"], tj["model"]["merges"]
-    added = tj.get("added_tokens", [])
     os.makedirs(out, exist_ok=True)
     with open(f"{out}/vocab.txt", "w", encoding="utf-8") as f:
         for tok, i in vocab.items():
@@ -297,10 +296,7 @@ def dump_tokenizer(tok_json, out):
     with open(f"{out}/merges.txt", "w", encoding="utf-8") as f:
         for m in merges:
             f.write((m if isinstance(m, str) else f"{m[0]} {m[1]}") + "\n")
-    with open(f"{out}/specials.txt", "w", encoding="utf-8") as f:
-        for a in added:
-            f.write(f"{a['id']}\t{a['content']}\n")
-    return len(vocab), len(merges), len(added), tj
+    return len(vocab), len(merges), tj
 
 
 def pad_token_id(tj, cfg_pad="<|im_end|>"):
@@ -424,8 +420,8 @@ def main():
     tok_repo = args.tokenizer or tok_step["config"]["tokenizer_name"]
     tok_path = Path(tok_repo).expanduser() / "tokenizer.json" if Path(tok_repo).is_dir() \
         else fetch(tok_repo, "tokenizer.json")
-    nv, nm, ns, tj = dump_tokenizer(tok_path, f"{out}/tok")
-    log(f"  tokenizer {tok_repo}: vocab={nv} merges={nm} specials={ns}")
+    nv, nm, tj = dump_tokenizer(tok_path, f"{out}/tok")
+    log(f"  tokenizer {tok_repo}: vocab={nv} merges={nm}")
 
     task = args.task or "do the task"
     with open(f"{out}/config.txt", "w") as f:

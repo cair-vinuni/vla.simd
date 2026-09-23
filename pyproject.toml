@@ -32,9 +32,7 @@ serve = [
 
 # Torch-free convert path
 numpy = [
-    "numpy>=2.1,<3",
-    "huggingface_hub>=1.0,<2",   # convert_tokenizer.py. safetensors is NOT needed:
-                                 # the converter parses the header itself
+    "numpy>=2.1,<3",   # safetensors is NOT needed: the converter parses the header itself
 ]
 
 # ACT, Diffusion and the torch SmolVLA path.
