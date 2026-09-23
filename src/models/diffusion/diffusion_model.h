@@ -18,8 +18,7 @@
 // Two things separate this from every other policy in the engine and both are
 // load-bearing:
 //   * it consumes a HISTORY. n_obs_steps frames per camera and n_obs_steps
-//     states, not one of each, so the vision tower runs n_cams*n_obs_steps times
-//     per query and that cost is real.
+//     states, not one of each.
 //   * the UNet runs once per denoising step. The step count is a deployment
 //     knob, not a weight, and DDPM-at-train-count vs DDIM-at-10 differ by an
 //     order of magnitude in latency for identical weights.
@@ -63,6 +62,8 @@ struct DiffusionModel {
     BackboneScratch scratch;
     std::vector<float> gcond;       // global conditioning vector
     std::vector<float> sample, eps; // [horizon, action_dim]
+    std::vector<std::vector<uint8_t>> enc_px;
+    std::vector<std::vector<float>> enc_ft;
 
     void preprocess(const uint8_t* src, int cam, float* dst) const;
 };

@@ -139,6 +139,9 @@ void DiffusionModel::preprocess(const uint8_t* src, int cam, float* dst) const {
     const int dh = in_h - out_h, dw = in_w - out_w;
     const int top  = dh/2 + ((dh & 3) == 3);
     const int left = dw/2 + ((dw & 3) == 3);
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(static)
+#endif
     for (int y=0; y<out_h; y++) {
         const uint8_t* srow = src + ((size_t)(y+top)*in_w + left)*3;
         float* drow = dst + (size_t)y*out_w*3;
@@ -164,6 +167,10 @@ void DiffusionModel::predict(const uint8_t* const* frames, const float* state,
     const int per_step = cfg.state_dim + N*F;
     gcond.assign((size_t)per_step*S, 0.f);
 
+    const size_t px = (size_t)cfg.img_h*cfg.img_w*3;
+    enc_px.resize((size_t)S*N);
+    enc_ft.resize((size_t)S*N);
+
     for (int s=0; s<S; s++) {
         float* g = gcond.data() + (size_t)s*per_step;
         for (int i=0; i<cfg.state_dim; i++) {
@@ -172,10 +179,28 @@ void DiffusionModel::predict(const uint8_t* const* frames, const float* state,
             g[i] = 2.0f*(state[(size_t)s*cfg.state_dim + i] - state_min[(size_t)i])/d - 1.0f;
         }
         for (int c=0; c<N; c++) {
-            preprocess(frames[(size_t)s*N + c], c, imgbuf.data());
-            const DPRgbEncoder& enc =
-                encoders[cfg.separate_encoder_per_camera ? (size_t)c : 0];
-            enc.forward(imgbuf.data(), scratch, g + cfg.state_dim + (size_t)c*F);
+            const uint8_t* f = frames[(size_t)s*N + c];
+            float* feat = g + cfg.state_dim + (size_t)c*F;
+            const std::vector<float>* hit = nullptr;
+            for (int k=0; k<S && !hit; k++) {
+                const std::vector<uint8_t>& p = enc_px[(size_t)k*N + c];
+                if (p.size() == px && !std::memcmp(p.data(), f, px)) hit = &enc_ft[(size_t)k*N + c];
+            }
+            if (hit) {
+                std::memcpy(feat, hit->data(), sizeof(float)*(size_t)F);
+            } else {
+                preprocess(f, c, imgbuf.data());
+                const DPRgbEncoder& enc =
+                    encoders[cfg.separate_encoder_per_camera ? (size_t)c : 0];
+                enc.forward(imgbuf.data(), scratch, feat);
+            }
+            std::vector<uint8_t>& slot_px = enc_px[(size_t)s*N + c];
+            std::vector<float>& slot_ft = enc_ft[(size_t)s*N + c];
+            if (hit != &slot_ft) {
+                slot_px.clear();
+                slot_ft.assign(feat, feat + F);
+                slot_px.assign(f, f + px);
+            }
         }
     }
 

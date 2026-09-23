@@ -26,7 +26,7 @@ void Conv2d::init(const float* W_, const float* bias_, int Cout_, int k_, int Ci
     // leaves those output channels unwritten and the caller reads uninitialized
     // memory. Linear::init and Conv2d::init_int8 both check this. Every shipped
     // backbone is a multiple of 16, so the unpacked fallback costs nothing.
-    if (Cout%16 != 0) {
+    if (Cout%16 != 0 || hal::accel_on()) {
         packed.clear();
         return;
     }

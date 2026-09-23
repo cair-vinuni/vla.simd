@@ -58,8 +58,10 @@ void resize_rgb_chw01(const uint8_t* src, int h, int w, int S, float* dst) {
 }
 
 void resize_with_pad(const uint8_t* src, int h, int w, int S, float* dst) {
-    for (size_t i = 0; i < (size_t)3*S*S; i++) dst[i] = -1.0f;   // pad 0 -> *2-1 = -1
-    if (h <= 0 || w <= 0 || S <= 0) return;                      // all-pad, never 0/0
+    if (h <= 0 || w <= 0 || S <= 0) {                            // all-pad, never 0/0
+        for (size_t i = 0; i < (size_t)3*S*S; i++) dst[i] = -1.0f;
+        return;
+    }
 
     const double ratio = std::max((double)w/S, (double)h/S);
     int rw = (int)(w/ratio), rh = (int)(h/ratio);
@@ -68,7 +70,14 @@ void resize_with_pad(const uint8_t* src, int h, int w, int S, float* dst) {
     const int pad_w = S-rw, pad_h = S-rh;
     const double sx = (double)w/rw, sy = (double)h/rh;
 
-    for (int oy = 0; oy < rh; oy++) {
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int y = 0; y < S; y++) {
+        const int oy = y - pad_h;
+        for (int c = 0; c < 3; c++)                              // pad 0 -> *2-1 = -1
+            std::fill_n(dst + (size_t)c*S*S + (size_t)y*S, oy < 0 ? S : pad_w, -1.0f);
+        if (oy < 0) continue;
         const double fy = (oy+0.5)*sy - 0.5;
         int y0 = (int)std::floor(fy); const double dy = fy - y0;
         const int y1 = std::min(y0+1, h-1); y0 = std::max(y0, 0);

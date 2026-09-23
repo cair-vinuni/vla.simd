@@ -35,16 +35,14 @@ struct SmollmVlm {
     std::vector<float> fnorms;        // fp32 region: per-layer norms + output norm
     std::vector<uint16_t> wbf;        // bf16 region (freed after init unless the backend keeps raw)
     std::vector<VlmLayerW> layers;
-    const float* out_norm = nullptr;  // [hidden]
 
     // Reads <dir>/vlm.meta and <dir>/vlm.bin (produced by tools/convert_hf_safetensors.py).
     bool load(const std::string& dir);
 
     // Prefix forward. embs:[seq,hidden] row-major. mask:[seq,seq] additive (0 keep, -inf block).
-    // pos[seq] token positions. Writes final post-norm hidden to out:[seq,hidden] and fills the
-    // per-layer K/V cache. embs is not modified.
+    // pos[seq] token positions. Fills the per-layer K/V cache. embs is not modified.
     void prefix_forward(const float* embs, const float* mask, const int* pos, int seq,
-                        float* out, std::vector<VlmKV>& kv_out) const;
+                        std::vector<VlmKV>& kv_out) const;
 };
 
 } // namespace tcpu

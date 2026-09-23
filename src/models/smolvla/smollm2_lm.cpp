@@ -54,7 +54,6 @@ bool SmollmVlm::load(const std::string& dir) {
         layers[L].ln_in   = tf(H);
         layers[L].ln_post = tf(H);
     }
-    out_norm = tf(H);
 
     using Role = nn::Linear::Role;
     for (int L = 0; L < NL; L++) {
@@ -76,7 +75,7 @@ bool SmollmVlm::load(const std::string& dir) {
 }
 
 void SmollmVlm::prefix_forward(const float* embs, const float* mask, const int* pos, int seq,
-                               float* out, std::vector<VlmKV>& kv_out) const {
+                               std::vector<VlmKV>& kv_out) const {
     const int H = cfg.hidden, QF = cfg.q_full(), KV = cfg.kv_full(), F = cfg.ffn;
     const float scale = 1.0f/std::sqrt((float)cfg.head_dim);
 
@@ -95,26 +94,33 @@ void SmollmVlm::prefix_forward(const float* embs, const float* mask, const int* 
 
         // attention
         rmsnorm(xn.data(), h.data(), w.ln_in, seq, H, cfg.rms_eps);
-        w.q.forward(q.data(),    xn.data(), seq);
         w.k.forward(kv.k.data(), xn.data(), seq);
         w.v.forward(kv.v.data(), xn.data(), seq);
-        rope_neox(q.data(),    pos, seq, cfg.n_q,  cfg.head_dim, cfg.rope_base);
         rope_neox(kv.k.data(), pos, seq, cfg.n_kv, cfg.head_dim, cfg.rope_base);
+        if (L + 1 == cfg.n_layers) break;
+        w.q.forward(q.data(), xn.data(), seq);
+        rope_neox(q.data(), pos, seq, cfg.n_q, cfg.head_dim, cfg.rope_base);
         gqa_attention_masked(attn.data(), q.data(), kv.k.data(), kv.v.data(),
                              seq, seq, cfg.n_q, cfg.n_kv, cfg.head_dim, scale, mask);
-        w.o.forward(o.data(), attn.data(), seq);
-        for (size_t i = 0; i < (size_t)seq*H; i++) h[i] += o[i];
+        if (w.o.add_ok()) {
+            w.o.forward_add(h.data(), attn.data(), seq);
+        } else {
+            w.o.forward(o.data(), attn.data(), seq);
+            for (size_t i = 0; i < (size_t)seq*H; i++) h[i] += o[i];
+        }
 
         // SwiGLU MLP
         rmsnorm(h2.data(), h.data(), w.ln_post, seq, H, cfg.rms_eps);
         w.gate.forward(g.data(), h2.data(), seq);
         w.up  .forward(u.data(), h2.data(), seq);
         silu_gate(gu.data(), g.data(), u.data(), seq*F);
-        w.down.forward(dn.data(), gu.data(), seq);
-        for (size_t i = 0; i < (size_t)seq*H; i++) h[i] += dn[i];
+        if (w.down.add_ok()) {
+            w.down.forward_add(h.data(), gu.data(), seq);
+        } else {
+            w.down.forward(dn.data(), gu.data(), seq);
+            for (size_t i = 0; i < (size_t)seq*H; i++) h[i] += dn[i];
+        }
     }
-
-    rmsnorm(out, h.data(), out_norm, seq, H, cfg.rms_eps);
 }
 
 } // namespace tcpu

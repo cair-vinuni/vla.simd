@@ -101,6 +101,8 @@ struct TurboVlaModel {
     mutable TurboVlaTrace tr;
     mutable std::vector<int> ids_i, pos_i;
     mutable std::vector<float> gmask, ghidden, memory;
+    mutable std::string text_instruction;
+    mutable bool have_text = false;
 };
 
 } // namespace tcpu

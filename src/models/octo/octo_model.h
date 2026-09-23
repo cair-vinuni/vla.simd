@@ -11,7 +11,6 @@
 #include "diffusion_head.h"
 #include "tokenizer/t5_tokenizer.h"
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -45,37 +44,12 @@ struct OctoModel {
                  const float* noise, const float* z, uint64_t seed,
                  bool unnormalize, float* actions) const;
 
-    // Control-loop API: feed ONE new frame pair per step; the stem outputs of the
-    // previous frame are reused from an internal window-2 history (frames are static
-    // once encoded). First step runs as [repeat, real] with the pad mask, matching
-    // octo's HistoryWrapper. Call reset_history() on a new episode.
-    void predict_step(const uint8_t* primary, const uint8_t* wrist,
-                      const std::string& instruction, uint64_t seed,
-                      bool unnormalize, float* actions);
-
-    // Split form of predict_step for pipelined loops: feed_frame() runs only the
-    // stems (call it the moment a camera frame lands, e.g. from a capture thread -
-    // it may overlap a running predict_fed), predict_fed() runs transformer + head
-    // on the frames fed so far (no-op if none fed). One feeder thread at a time.
-    // feed_frame + predict_fed back-to-back == predict_step.
-    void feed_frame(const uint8_t* primary, const uint8_t* wrist);
-    void predict_fed(const std::string& instruction, uint64_t seed,
-                     bool unnormalize, float* actions);
-    void reset_history() { hist_len = 0; }
-
 private:
     const float* lang_encode(const std::string& instruction) const;
-    void run_from_stems(const float* sp, const float* sw, int wnd,
-                        const uint8_t* timestep_mask, const std::string& instruction,
-                        const float* noise, const float* z, uint64_t seed,
-                        bool unnormalize, float* actions) const;
 
     mutable std::unordered_map<std::string, std::vector<float>> lang_cache;
-    std::mutex hist_mu;                    // guards hist_* against a feeder thread
-    std::vector<float> hist_sp, hist_sw;   // stem outputs of the last 2 frames
-    std::vector<float> feed_sp, feed_sw;   // stem scratch (outside the lock)
-    std::vector<float> snap_sp, snap_sw;   // predict_fed window snapshot
-    int hist_len = 0;
+    mutable std::vector<uint8_t> win_p, win_w;
+    mutable std::vector<float> win_sp, win_sw;
 };
 
 } // namespace tcpu

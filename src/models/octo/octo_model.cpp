@@ -170,6 +170,7 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
                         const uint8_t* timestep_mask, const std::string& instruction,
                         const float* noise, const float* z, uint64_t seed,
                         bool unnormalize, float* actions) const {
+    const int D = tf.cfg.d;
     Prof prof;
 
     // position tables are sized for max_horizon; octo_demo calls straight in here
@@ -179,79 +180,31 @@ void OctoModel::predict(const uint8_t* primary, const uint8_t* wrist, int wnd,
     }
 
     // vision (goal images absent -> zeros, language-conditioned)
-    std::vector<float> sp ((size_t)wnd*tf.cfg.tok_primary*tf.cfg.stem_dim);
-    std::vector<float> sw (wrist ? (size_t)wnd*tf.cfg.tok_wrist*tf.cfg.stem_dim : 0);
-    for (int t=0; t<wnd; t++) {
-        stem_primary.encode(primary+(size_t)t*256*256*3, nullptr, 256, 256,
-                            sp.data()+(size_t)t*tf.cfg.tok_primary*tf.cfg.stem_dim);
-        if (wrist)
-            stem_wrist.encode(wrist+(size_t)t*128*128*3, nullptr, 128, 128,
-                              sw.data()+(size_t)t*tf.cfg.tok_wrist*tf.cfg.stem_dim);
-    }
+    const size_t PB = (size_t)256*256*3, WB = (size_t)128*128*3;
+    const size_t SP = (size_t)tf.cfg.tok_primary*tf.cfg.stem_dim, SW = (size_t)tf.cfg.tok_wrist*tf.cfg.stem_dim;
+    std::vector<float> sp((size_t)wnd*SP), sw(wrist ? (size_t)wnd*SW : 0);
+    auto stems = [wnd](const SmallStem& st, const uint8_t* img, int hw, size_t nb, size_t ns, float* out,
+                       const std::vector<uint8_t>& prev, const std::vector<float>& prev_out) {
+        for (int t=0; t<wnd; t++) {
+            const uint8_t* f = img+(size_t)t*nb;
+            const float* hit = nullptr;
+            for (int u=0; u<t && !hit; u++)
+                if (!std::memcmp(f, img+(size_t)u*nb, nb)) hit = out+(size_t)u*ns;
+            for (size_t u=0; u<prev.size()/nb && !hit; u++)
+                if (!std::memcmp(f, prev.data()+u*nb, nb)) hit = prev_out.data()+u*ns;
+            if (hit) std::memcpy(out+(size_t)t*ns, hit, ns*sizeof(float));
+            else     st.encode(f, nullptr, hw, hw, out+(size_t)t*ns);
+        }
+    };
+    stems(stem_primary, primary, 256, PB, SP, sp.data(), win_p, win_sp);
+    if (wrist) stems(stem_wrist, wrist, 128, WB, SW, sw.data(), win_w, win_sw);
+    win_p.clear();
+    win_w.clear();
+    win_sp.swap(sp);
+    win_sw.swap(sw);
+    win_p.assign(primary, primary+(size_t)wnd*PB);
+    if (wrist) win_w.assign(wrist, wrist+(size_t)wnd*WB);
     prof.tick("stems");
-
-    run_from_stems(sp.data(), wrist ? sw.data() : nullptr, wnd, timestep_mask, instruction,
-                   noise, z, seed, unnormalize, actions);
-}
-
-void OctoModel::predict_step(const uint8_t* primary, const uint8_t* wrist,
-                             const std::string& instruction, uint64_t seed,
-                             bool unnormalize, float* actions) {
-    feed_frame(primary, wrist);
-    predict_fed(instruction, seed, unnormalize, actions);
-}
-
-void OctoModel::feed_frame(const uint8_t* primary, const uint8_t* wrist) {
-    const size_t SP = (size_t)tf.cfg.tok_primary*tf.cfg.stem_dim;
-    const size_t SW = (size_t)tf.cfg.tok_wrist  *tf.cfg.stem_dim;
-    const int WND = 2;
-
-    // stems run outside the lock so a concurrent predict_fed is never blocked
-    // for more than the window copy below
-    feed_sp.resize(SP);
-    feed_sw.resize(SW);
-    stem_primary.encode(primary, nullptr, 256, 256, feed_sp.data());
-    stem_wrist.encode(wrist, nullptr, 128, 128, feed_sw.data());
-
-    std::lock_guard<std::mutex> lk(hist_mu);
-    hist_sp.resize(WND*SP);
-    hist_sw.resize(WND*SW);
-
-    // shift the window: previous frame's stems are static once computed
-    std::memmove(hist_sp.data(), hist_sp.data()+SP, SP*sizeof(float));
-    std::memmove(hist_sw.data(), hist_sw.data()+SW, SW*sizeof(float));
-    std::memcpy(hist_sp.data()+SP, feed_sp.data(), SP*sizeof(float));
-    std::memcpy(hist_sw.data()+SW, feed_sw.data(), SW*sizeof(float));
-
-    if (hist_len < WND) hist_len++;
-    if (hist_len < WND) {   // no history yet: [repeat, real], first slot padded
-        std::memcpy(hist_sp.data(), hist_sp.data()+SP, SP*sizeof(float));
-        std::memcpy(hist_sw.data(), hist_sw.data()+SW, SW*sizeof(float));
-    }
-}
-
-void OctoModel::predict_fed(const std::string& instruction, uint64_t seed,
-                            bool unnormalize, float* actions) {
-    const int WND = 2;
-    uint8_t tmask[WND];
-    {
-        std::lock_guard<std::mutex> lk(hist_mu);
-        if (hist_len == 0) return;
-        snap_sp = hist_sp;   // snapshot: a feeder thread may rewrite the window
-        snap_sw = hist_sw;
-        tmask[0] = (uint8_t)(hist_len == WND);
-        tmask[1] = 1;
-    }
-    run_from_stems(snap_sp.data(), snap_sw.data(), WND, tmask, instruction,
-                   nullptr, nullptr, seed, unnormalize, actions);
-}
-
-void OctoModel::run_from_stems(const float* sp, const float* sw, int wnd,
-                               const uint8_t* timestep_mask, const std::string& instruction,
-                               const float* noise, const float* z, uint64_t seed,
-                               bool unnormalize, float* actions) const {
-    const int D = tf.cfg.d;
-    Prof prof;
 
     const float* t5_out = lang_encode(instruction);
     prof.tick("t5");
@@ -259,7 +212,8 @@ void OctoModel::run_from_stems(const float* sp, const float* sw, int wnd,
     // transformer -> readout embedding of the last timestep (fast path: the final
     // layer only computes the readout row; the rest of `out` is unused here)
     std::vector<float> out((size_t)tf.total_tokens(wnd)*D);
-    tf.forward(t5_out, sp, sw, wnd, timestep_mask, out.data(), true);
+    tf.forward(t5_out, win_sp.data(), wrist ? win_sw.data() : nullptr, wnd, timestep_mask,
+               out.data(), true);
     prof.tick("transformer");
     const float* emb = out.data()+(size_t)tf.readout_index(wnd, wnd-1)*D;
 

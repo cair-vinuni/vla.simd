@@ -148,6 +148,8 @@ int TurboVlaModel::pad_length(const std::string& instruction) const {
 // Tokenize, run BERT over the group length, zero-pad to text_pad, project.
 // Everything the fusion stack needs about the text is left in the trace.
 void TurboVlaModel::encode_text(const std::string& instruction) const {
+    if (have_text && instruction == text_instruction) return;
+    have_text = false;
     const int P = cfg.text_pad, TH = text.cfg.hidden, D = fusion.cfg.hidden;
     const int L = pad_length(instruction);          // <= P by construction
 
@@ -180,6 +182,8 @@ void TurboVlaModel::encode_text(const std::string& instruction) const {
         for (int j = 0; j < L; j++)
             tr.self_attn[(size_t)i*P + j] = gmask[(size_t)i*L + j] == 0.0f ? 1.0f : 0.0f;
     }
+    text_instruction = instruction;
+    have_text = true;
 }
 
 void TurboVlaModel::predict(const uint8_t* frames, const float* state,

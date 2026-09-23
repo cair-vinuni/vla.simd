@@ -272,9 +272,8 @@ std::vector<float> SmolvlaModel::predict_normalized(
     std::vector<int> pos(n_prefix);
     { int c = 0; for (int i = 0; i < n_prefix; i++) { c += pad[i]; pos[i] = c - 1; } }
 
-    std::vector<float> vlm_out((size_t)n_prefix * H);
     std::vector<VlmKV> kv;
-    vlm.prefix_forward(prefix.data(), pmask.data(), pos.data(), n_prefix, vlm_out.data(), kv);
+    vlm.prefix_forward(prefix.data(), pmask.data(), pos.data(), n_prefix, kv);
     lap("vlm_prefill");
 
     // ---- denoise mask + positions ----

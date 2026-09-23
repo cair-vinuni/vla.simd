@@ -68,24 +68,12 @@ void Linear::init_bf16(const uint16_t* Wb16, const float* bias_, int N_, int K_,
         std::memcpy(&deq[i], &u, 4);
     }
 
-#if TCPU_HAL_APPLE
-    // Accelerate reads the raw fp32 weights; skip the (unused) panel packing.
-    if (hal::accel_on()) {
-        W    = deq.data();
-        bias = bias_;
-        N    = N_;
-        K    = K_;
-        role = role_;
-        Wp   = nullptr;
-        Wb   = nullptr;
-        Wr16 = nullptr;
-        packed.clear();
-        packed_bf16.clear();
-        return;
-    }
-#endif
-
     init(deq.data(), bias_, N_, K_, role_);
+    if (Wp) {
+        W = nullptr;
+        deq.clear();
+        deq.shrink_to_fit();
+    }
 }
 
 bool Linear::bf16_keeps_raw() {

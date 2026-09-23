@@ -87,13 +87,16 @@ bool ActionExpert::load(const std::string& dir) {
     const int NL = cfg.n_layers, MAD = cfg.max_action_dim;
 
     // total float count
-    size_t total = 0;
-    auto layer_floats = [&](bool self) {
+    size_t total = 0, wtotal = 0;
+    auto layer_w = [&](bool self) {
         size_t kvw = self ? (size_t)KV*EH : (size_t)KV*KV;
-        return (size_t)EH + (size_t)QF*EH + kvw*2 + (size_t)EH*QF
-             + (size_t)EH + (size_t)EF*EH*2 + (size_t)EH*EF;
+        return (size_t)QF*EH + kvw*2 + (size_t)EH*QF + (size_t)EF*EH*2 + (size_t)EH*EF;
     };
-    for (int L = 0; L < NL; L++) total += layer_floats(cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0);
+    for (int L = 0; L < NL; L++) {
+        const size_t w = layer_w(cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0);
+        wtotal += w;
+        total  += w + (size_t)EH*2;
+    }
     total += (size_t)EH;                                   // out_norm
     total += (size_t)EH*MAD + EH;                          // action_in_proj
     total += (size_t)EH*(2*EH) + EH;                       // action_time_mlp_in
@@ -102,36 +105,52 @@ bool ActionExpert::load(const std::string& dir) {
 
     std::ifstream bin(dir + "/aex.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/aex.bin\n", dir.c_str()); return false; }
-    blob.resize(total);
-    bin.read(reinterpret_cast<char*>(blob.data()), total*sizeof(float));
+    blob.resize(total - wtotal);
+    raw.resize(wtotal);
+    size_t bo = 0, ro = 0;
+    auto rd = [&](std::vector<float>& dst, size_t& off, size_t n) {
+        float* p = dst.data()+off;
+        off += n;
+        bin.read(reinterpret_cast<char*>(p), n*sizeof(float));
+        return (const float*)p;
+    };
+    auto take  = [&](size_t n) { return rd(raw, ro, n); };
+    auto small = [&](size_t n) { return rd(blob, bo, n); };
+
+    using Role = nn::Linear::Role;
+    layers.resize(NL);
+    for (int L = 0; L < NL; L++) {
+        ExpertLayerW& w = layers[L];
+        w.is_self_attn = cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0;
+        const int kk = w.is_self_attn ? EH : KV;
+        w.ln_in = small(EH);
+        w.q   .init(take((size_t)QF*EH), nullptr, QF, EH, Role::Gemm);
+        w.k   .init(take((size_t)KV*kk), nullptr, KV, kk, Role::Gemm);
+        w.v   .init(take((size_t)KV*kk), nullptr, KV, kk, Role::Gemm);
+        w.o   .init(take((size_t)EH*QF), nullptr, EH, QF, Role::Gemm);
+        w.ln_post = small(EH);
+        w.gate.init(take((size_t)EF*EH), nullptr, EF, EH, Role::Mlp);
+        w.up  .init(take((size_t)EF*EH), nullptr, EF, EH, Role::Mlp);
+        w.down.init(take((size_t)EH*EF), nullptr, EH, EF, Role::Mlp);
+    }
+    out_norm     = small(EH);
+    flow.ain_w   = small((size_t)EH*MAD);   flow.ain_b  = small(EH);
+    flow.at1_w   = small((size_t)EH*2*EH);  flow.at1_b  = small(EH);
+    flow.at2_w   = small((size_t)EH*EH);    flow.at2_b  = small(EH);
+    flow.aout_w  = small((size_t)MAD*EH);   flow.aout_b = small(MAD);
     if (!bin || bin.peek() != EOF) {
         std::fprintf(stderr, "smolvla: %s/aex.bin size does not match aex.meta (need %zu floats)\n", dir.c_str(), total);
         return false;
     }
 
-    using Role = nn::Linear::Role;
-    layers.resize(NL);
-    size_t off = 0;
-    auto take = [&](size_t n) { const float* p = blob.data()+off; off += n; return p; };
-    for (int L = 0; L < NL; L++) {
-        ExpertLayerW& w = layers[L];
-        w.is_self_attn = cfg.self_attn_every_n > 0 && L % cfg.self_attn_every_n == 0;
-        const int kk = w.is_self_attn ? EH : KV;
-        w.ln_in = take(EH);
-        w.q   .init(take((size_t)QF*EH), nullptr, QF, EH, Role::Gemm);
-        w.k   .init(take((size_t)KV*kk), nullptr, KV, kk, Role::Gemm);
-        w.v   .init(take((size_t)KV*kk), nullptr, KV, kk, Role::Gemm);
-        w.o   .init(take((size_t)EH*QF), nullptr, EH, QF, Role::Gemm);
-        w.ln_post = take(EH);
-        w.gate.init(take((size_t)EF*EH), nullptr, EF, EH, Role::Mlp);
-        w.up  .init(take((size_t)EF*EH), nullptr, EF, EH, Role::Mlp);
-        w.down.init(take((size_t)EH*EF), nullptr, EH, EF, Role::Mlp);
+    bool all = true;
+    for (ExpertLayerW& w : layers)
+        for (nn::Linear* l : {&w.q, &w.k, &w.v, &w.o, &w.gate, &w.up, &w.down})
+            all &= l->drop_raw();
+    if (all) {
+        raw.clear();
+        raw.shrink_to_fit();
     }
-    out_norm     = take(EH);
-    flow.ain_w   = take((size_t)EH*MAD);   flow.ain_b  = take(EH);
-    flow.at1_w   = take((size_t)EH*2*EH);  flow.at1_b  = take(EH);
-    flow.at2_w   = take((size_t)EH*EH);    flow.at2_b  = take(EH);
-    flow.aout_w  = take((size_t)MAD*EH);   flow.aout_b = take(MAD);
     return true;
 }
 
@@ -267,11 +286,16 @@ void ActionExpert::denoise_step(const std::vector<VlmKV>& kv, int n_prefix, cons
             P.toc(P.attn);
         }
         P.tic();
-        w.o.forward(o.data(), attn.data(), C);
-        P.toc(P.proj);
-        P.tic();
-        for (size_t i = 0; i < (size_t)C*EH; i++) h[i] += o[i];
-        P.toc(P.res);
+        if (w.o.add_ok()) {
+            w.o.forward_add(h.data(), attn.data(), C);
+            P.toc(P.proj);
+        } else {
+            w.o.forward(o.data(), attn.data(), C);
+            P.toc(P.proj);
+            P.tic();
+            for (size_t i = 0; i < (size_t)C*EH; i++) h[i] += o[i];
+            P.toc(P.res);
+        }
 
         P.tic();
         rmsnorm(hn2.data(), h.data(), w.ln_post, C, EH, cfg.rms_eps);
@@ -284,11 +308,16 @@ void ActionExpert::denoise_step(const std::vector<VlmKV>& kv, int n_prefix, cons
         silu_gate(gu.data(), g.data(), u.data(), C*EF);
         P.toc(P.silu);
         P.tic();
-        w.down.forward(dn.data(), gu.data(), C);
-        P.toc(P.mlp);
-        P.tic();
-        for (size_t i = 0; i < (size_t)C*EH; i++) h[i] += dn[i];
-        P.toc(P.res);
+        if (w.down.add_ok()) {
+            w.down.forward_add(h.data(), gu.data(), C);
+            P.toc(P.mlp);
+        } else {
+            w.down.forward(dn.data(), gu.data(), C);
+            P.toc(P.mlp);
+            P.tic();
+            for (size_t i = 0; i < (size_t)C*EH; i++) h[i] += dn[i];
+            P.toc(P.res);
+        }
     }
 
     if (ds.hf.size() < (size_t)C*EH) ds.hf.resize((size_t)C*EH);

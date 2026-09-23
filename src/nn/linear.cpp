@@ -31,7 +31,7 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
     packed.clear();
     packed_bf16.clear();
 
-    if (role == Role::Generic) return;
+    if (role == Role::Generic || (TCPU_HAL_APPLE && accel_on())) return;
 
     // Pack once for the packed-panel kernel (TCPU_PACKED=0 keeps the raw path;
     // the packer produces N/16 full blocks, so N must be a multiple of 16).
@@ -52,6 +52,9 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
                                                                  : (uint16_t)((u+0x7fff+((u>>16) & 1)) >> 16);
             }
             Wb = packed_bf16.data();
+            packed.clear();
+            packed.shrink_to_fit();
+            Wp = nullptr;
         }
 #endif
     }
@@ -59,7 +62,7 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
 
 bool Linear::init_int8() {
     if (!int8_gemm_available() || N%16 != 0) return false;
-    if (!W && !Wb && !Wr16) return false;
+    if (!W && !Wp && !Wb && !Wr16) return false;
 
     // The packer wants a plain [N,K] fp32 matrix, but a layer holds whichever
     // representation its init picked: raw fp32 (init), packed bf16 panels or raw
@@ -75,6 +78,11 @@ bool Linear::init_int8() {
                 const uint32_t u = (uint32_t)Wr16[i] << 16;
                 std::memcpy(&tmp[i], &u, 4);
             }
+        } else if (Wp) {
+            for (int b=0; b<N/16; b++)
+                for (int k=0; k<K; k++)
+                    for (int j=0; j<16; j++)
+                        tmp[(size_t)(b*16+j)*K+k] = Wp[((size_t)b*K+k)*16+j];
         } else {
             // packed panels [N/16][K][16]: element [b][k][j] is W[b*16+j][k]
             for (int b=0; b<N/16; b++)
@@ -94,8 +102,10 @@ bool Linear::init_int8() {
 
     // The fp32/bf16 panels are dead weight once the int8 path owns forward():
     // drop them (4 or 2 bytes/weight against 1) rather than keep a fallback
-    // nothing selects. W / Wr16 point into the model's own arena, so they are
-    // left alone - only what this object allocated is freed.
+    // nothing selects.
+    if (W == deq.data()) W = nullptr;
+    deq.clear();
+    deq.shrink_to_fit();
     packed.clear();
     packed.shrink_to_fit();
     packed_bf16.clear();
@@ -185,15 +195,6 @@ void Linear::forward_kt(float* out_t, const float* x, int seq, int ldo) const {
         return;
     }
 
-    if (!Wp) {   // no fp32 panels (raw-bf16 path): compute plain and transpose
-        std::vector<float> tmp((size_t)seq*N);
-        forward(tmp.data(), x, seq);
-        for (int t=0; t<seq; t++)
-            for (int n=0; n<N; n++)
-                out_t[(size_t)n*ldo+t] = tmp[(size_t)t*N+n];
-        return;
-    }
-
     dense_linear_packed_kt(out_t, x, Wp, bias, seq, N, K, ldo);
 }
 
@@ -203,6 +204,14 @@ bool Linear::kt_native() {
 #else
     return accel_on();
 #endif
+}
+
+bool Linear::kt_ok() const { return kt_native() && !Wq && (Wp || accel_on()); }
+
+bool Linear::drop_raw() {
+    if (accel_on() || (!Wp && !Wq)) return false;
+    W = nullptr;
+    return true;
 }
 
 } // namespace nn

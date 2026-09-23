@@ -55,6 +55,7 @@ struct DenoiseScratch {
 struct ActionExpert {
     SmolvlaConfig cfg;
     std::vector<float> blob;
+    std::vector<float> raw;
     std::vector<ExpertLayerW> layers;
     const float* out_norm = nullptr;  // [expert_h]
     FlowW flow{};

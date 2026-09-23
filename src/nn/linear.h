@@ -69,7 +69,7 @@ struct Linear {
     bool add_ok() const { return add_native() && Wp; }
 
     // out_t[n*ldo + t]: attention's K^T layout straight from the GEMM.
-    // Call only when kt_native(); columns [seq, ldo) are left untouched
+    // Call only when kt_ok(); columns [seq, ldo) are left untouched
     // (callers keep the buffer zeroed).
     void forward_kt(float* out_t, const float* x, int seq, int ldo) const;
 
@@ -77,11 +77,9 @@ struct Linear {
     // in-register transpose epilogue; Apple transposed-output sgemm).
     static bool kt_native();
 
-    // Whether this layer can. init_int8() frees the fp32 panels and there is no
-    // transposed int8 store, so an int8 layer falls back to an allocation plus a
-    // scalar scatter transpose - slower than the GEMM it accelerates, and on
-    // Apple it computes K in fp32 from the weights init_int8 left behind.
-    bool kt_ok() const { return kt_native() && !Wq; }
+    bool kt_ok() const;
+
+    bool drop_raw();
 
     int N = 0, K = 0;
 
