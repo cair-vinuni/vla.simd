@@ -21,6 +21,8 @@ void Conv2d::init(const float* W_, const float* bias_, int Cout_, int k_, int Ci
     Cout = Cout_;
     k    = k_;
     Cin  = Cin_;
+    Wq   = nullptr;
+    packed_i8.clear();
 
     // conv2d_packed walks Cout/16 whole panels, so a partial trailing block
     // leaves those output channels unwritten and the caller reads uninitialized

@@ -28,8 +28,10 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
     Wp   = nullptr;
     Wb   = nullptr;
     Wr16 = nullptr;
+    Wq   = nullptr;
     packed.clear();
     packed_bf16.clear();
+    packed_i8.clear();
 
     if (role == Role::Generic || (TCPU_HAL_APPLE && accel_on())) return;
 
