@@ -87,7 +87,7 @@ static void test_linear() {
             for (int t = 0; t < seq; t++) ktt[(size_t)t*N+n] = kt[(size_t)n*ldo+t];
         CHECK(same_bits(ktt, yp), "dense_linear_packed_kt != dense_linear_packed (%d,%d,%d)", seq, N, K);
 
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
         std::vector<float> g((size_t)seq*N), gg(yp);
         dense_linear_packed_gelu(g.data(), x.data(), Wp.data(), b.data(), seq, N, K);
         gelu_tanh(gg.data(), seq*N);
@@ -140,7 +140,8 @@ static void naive_attention(std::vector<double>& out, const float* Q, const floa
 
 static void test_attention() {
     const int cfgs[][5] = {{1, 50, 8, 2, 64}, {50, 50, 8, 2, 64}, {50, 113, 15, 5, 64},
-                           {17, 33, 4, 4, 72}, {9, 20, 2, 1, 256}, {256, 256, 12, 12, 64}};
+                           {17, 33, 4, 4, 72}, {9, 20, 2, 1, 256}, {256, 256, 12, 12, 64},
+                           {12, 512, 4, 2, 64}};
     const float NINF = -std::numeric_limits<float>::infinity();
     for (auto& c : cfgs) {
         const int sq = c[0], sk = c[1], nq = c[2], nkv = c[3], hd = c[4];

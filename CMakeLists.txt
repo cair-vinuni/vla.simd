@@ -30,8 +30,7 @@ string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " -funroll-loops")
 # macros these enable and Debug/RelWithDebInfo would otherwise fall through to
 # the scalar kernels.
 #
-# x86-64 -> AVX2/FMA, backend by vendor (AuthenticAMD -> Zen;
-# -DVLA_HAL=amd|avx2 to force). Apple arm64 -> -mcpu. Other aarch64 -> baseline
+# x86-64 -> AVX2/FMA. Apple arm64 -> -mcpu. Other aarch64 -> baseline
 # ARMv8 NEON. Anything else -> scalar fallback.
 #
 # Non-Apple aarch64 stays on the baseline by choice. Pi 5 (Cortex-A76, ACT, 4
@@ -41,12 +40,6 @@ string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " -funroll-loops")
 # (SDOT, AVX-VNNI) take it per-function via __attribute__((target(...))) behind
 # a runtime check. -DVLA_ARM_NATIVE=ON opts in, -DVLA_ARM_FLAGS overrides.
 # ---------------------------------------------------------------------------
-set(VLA_HAL "auto" CACHE STRING "x86 HAL backend: auto | avx2 (Intel tuning) | amd (Zen tuning)")
-set_property(CACHE VLA_HAL PROPERTY STRINGS auto avx2 amd)
-if(NOT VLA_HAL MATCHES "^(auto|avx2|amd)$")
-  message(FATAL_ERROR "VLA_HAL must be auto, avx2 or amd (got '${VLA_HAL}')")
-endif()
-
 add_library(vla_flags INTERFACE)
 target_compile_features(vla_flags INTERFACE cxx_std_17)
 target_include_directories(vla_flags INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
@@ -79,30 +72,11 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
     message(STATUS "vla_simd aarch64: baseline armv8-a+simd")
   endif()
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i[3-6]86")
-  set(VLA_X86_VENDOR "${VLA_HAL}")
-  if(VLA_HAL STREQUAL "auto")
-    set(VLA_X86_VENDOR "")
-    if(CMAKE_CROSSCOMPILING)
-      message(STATUS "vla_simd: cross-compiling, not sniffing the build host's vendor "
-                     "(-DVLA_HAL=amd|avx2 to pick)")
-    elseif(EXISTS "/proc/cpuinfo")
-      file(READ "/proc/cpuinfo" VLA_CPUINFO)
-      if(VLA_CPUINFO MATCHES "AuthenticAMD")
-        set(VLA_X86_VENDOR "amd")
-      endif()
-    endif()
-  endif()
-
   # AVX-VNNI is deliberately not global: it would let the compiler emit vpdpbusd
   # into any int8 loop and SIGILL pre-Alder-Lake / pre-Zen-4.
   # src/hal/avx2/gemm_i8.cpp opts in per-function behind a cpuid check.
   target_compile_options(vla_flags INTERFACE -mavx2 -mfma -mf16c)
-  if(VLA_X86_VENDOR STREQUAL "amd")
-    target_compile_definitions(vla_flags INTERFACE TCPU_HAL_PREFER_AMD)
-    message(STATUS "vla_simd HAL: amd-zen (AVX2, Zen-tuned attention)")
-  else()
-    message(STATUS "vla_simd HAL: x86-avx2 (Intel tuning)")
-  endif()
+  message(STATUS "vla_simd HAL: x86-avx2")
 else()
   message(STATUS "vla_simd HAL: scalar (${CMAKE_SYSTEM_PROCESSOR})")
 endif()

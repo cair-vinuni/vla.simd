@@ -7,14 +7,14 @@
 // x86 AVX2 GEMM backend (i9 tuning). Packed-panel 6x16 C-resident
 // micro-kernel, in-register K^T transpose epilogue, static schedule.
 //
-// Shared by BOTH x86 backends (TCPU_ISA_X86), Intel and AMD Zen: the 6x16 tile
+// Shared by BOTH x86 backends (TCPU_HAL_X86), Intel and AMD Zen: the 6x16 tile
 // is FMA-bound and both uarchs retire 2x256-bit FMA per cycle, so the Intel
 // tuning already lands at 93% of a Ryzen 5 5500's pinned FMA peak (measured:
 // 713 GF/s on 768x768x1024, 625-645 GF/s on the 3072-wide MLP shapes). Nothing
 // Zen-specific was found to add here.
 
 #include "../arch.h"
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
 
 #include "../simd.h"
 #include "../../ops/lm_ops.h"
@@ -368,4 +368,4 @@ void dense_linear_bf16(float* out, const float* x, const uint16_t* W, const floa
 
 } // namespace tcpu
 
-#endif // TCPU_ISA_X86
+#endif // TCPU_HAL_X86

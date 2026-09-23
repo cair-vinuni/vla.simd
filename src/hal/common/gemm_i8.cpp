@@ -14,7 +14,7 @@
 #include "env.h"
 #if TCPU_ISA_ARM
 #include <arm_neon.h>
-#elif TCPU_ISA_X86
+#elif TCPU_HAL_X86
 #include <immintrin.h>
 #endif
 #include <cassert>
@@ -123,7 +123,7 @@ static inline void quantize_row_neon(const float* xt, int8_t* q, float* scale, i
 }
 #endif
 
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
 // AVX2 absmax + convert, the x86 twin of quantize_row_neon. Without it the int8
 // GEMM is a net loss: a 1024x3072 ViT activation is 3.1M scalar calls per layer,
 // more than the 4x the integer kernel wins.
@@ -185,7 +185,7 @@ void quantize_span_i8(const float* x, int8_t* q, size_t n, float inv) {
         const int16x8_t s1 = vcombine_s16(vqmovn_s32(cvt(x+i+8)), vqmovn_s32(cvt(x+i+12)));
         vst1q_s8(q+i, vcombine_s8(vqmovn_s16(s0), vqmovn_s16(s1)));
     }
-#elif TCPU_ISA_X86
+#elif TCPU_HAL_X86
     const __m256 vi = _mm256_set1_ps(inv);
     const __m256 lo = _mm256_set1_ps(-127.0f), hi = _mm256_set1_ps(127.0f);
     const __m256i ord = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
@@ -213,7 +213,7 @@ void quantize_act_i8(const float* x, int8_t* xq, float* ascale, int seq, int K) 
     for (int t=0; t<seq; t++)
         quantize_row_neon(x+(size_t)t*K, xq+(size_t)t*Kp, ascale+t, K, Kp);
     return;
-#elif TCPU_ISA_X86
+#elif TCPU_HAL_X86
 #if defined(_OPENMP)
     #pragma omp parallel for schedule(static) if((size_t)seq*K > (size_t)hal::env::omp_min())
 #endif
@@ -278,7 +278,7 @@ void dense_linear_i8_ref(float* out, const int8_t* xq, const float* ascale,
     }
 }
 
-#if !TCPU_ISA_ARM && !TCPU_ISA_X86
+#if !TCPU_ISA_ARM && !TCPU_HAL_X86
 // No vector int8 on this backend: callers keep their fp32 path, and the
 // reference stands in for anything that calls the entry point anyway.
 bool int8_gemm_available() { return false; }
@@ -288,6 +288,6 @@ void dense_linear_i8_pre(float* out, const int8_t* xq, const float* ascale,
                          int seq, int N, int K) {
     dense_linear_i8_ref(out, xq, ascale, Wq, wscale, bias, seq, N, K);
 }
-#endif // !TCPU_ISA_ARM && !TCPU_ISA_X86
+#endif // !TCPU_ISA_ARM && !TCPU_HAL_X86
 
 } // namespace tcpu

@@ -30,11 +30,7 @@ namespace hal {
 // keeps the exact stride it shipped with.
 inline int kt_stride(int seq_k) {
     const int skp = (seq_k+7) & ~7;
-#if TCPU_HAL_AMD
-    return (skp & 511) == 0 ? skp+8 : skp;
-#else
-    return skp;
-#endif
+    return env::zen() && (skp & 511) == 0 ? skp+8 : skp;
 }
 
 inline void transpose_kt(float* kt, const float* K, int seq_k, int n_kv, int head_dim, int ldk) {

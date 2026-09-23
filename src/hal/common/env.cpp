@@ -10,6 +10,10 @@
 #include <climits>
 #include <cstdlib>
 #include <cstddef>
+#include <cstring>
+#if TCPU_HAL_X86
+#include <cpuid.h>
+#endif
 using std::size_t;
 
 namespace tcpu {
@@ -153,6 +157,23 @@ bool simd_mish() {
     return v;
 }
 
+bool zen() {
+#if TCPU_HAL_X86
+    static const bool v = flag_on("TCPU_ZEN", [] {
+        unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+        char vendor[12];
+        if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) return false;
+        std::memcpy(vendor, &ebx, 4);
+        std::memcpy(vendor+4, &edx, 4);
+        std::memcpy(vendor+8, &ecx, 4);
+        return std::memcmp(vendor, "AuthenticAMD", 12) == 0;
+    }());
+    return v;
+#else
+    return false;
+#endif
+}
+
 bool bf16_mlp() {
     static const bool v = [] {
         const char* e = std::getenv("TCPU_BF16_MLP");
@@ -190,7 +211,7 @@ int i8_mblock() {
 
 int i8_mr() {
     static const int v = [] {
-        const int m = int_env("TCPU_I8_MR", TCPU_ISA_X86 ? 5 : 4);
+        const int m = int_env("TCPU_I8_MR", TCPU_HAL_X86 ? 5 : 4);
         return m < 1 ? 1 : m > 6 ? 6 : m;   // the kernel is templated for 1..6
     }();
     return v;

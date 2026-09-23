@@ -29,7 +29,7 @@
 // target attribute behind a cpuid check, not as a global flag.
 
 #include "../arch.h"
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
 
 #include "../common/env.h"
 #include "../../ops/quant_ops.h"
@@ -160,4 +160,4 @@ void dense_linear_i8_pre(float* out, const int8_t* xq, const float* ascale,
 
 } // namespace tcpu
 
-#endif // TCPU_ISA_X86
+#endif // TCPU_HAL_X86

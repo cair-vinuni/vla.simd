@@ -28,7 +28,7 @@ void rope_neox(float* x, const int* pos, int seq, int n_heads, int head_dim, flo
 // GQA attention with an explicit additive mask and distinct query/key lengths (cross-attn).
 // Q [seq_q,n_q,hd], K/V [seq_k,n_kv,hd] -> out [seq_q,n_q,hd]. mask[seq_q,seq_k] is added to
 // scores before softmax (0 = keep, -inf = block). Matches SmolVLA eager_attention_forward.
-// K_pre: optional pre-transposed keys [n_kv, head_dim, (seq_k+7)&~7] (e.g. from
+// K_pre: optional pre-transposed keys [n_kv, head_dim, hal::kt_stride(seq_k)] (e.g. from
 // dense_linear_packed_kt); skips the internal transpose. AVX2 path only - pass K too.
 void gqa_attention_masked(float* out, const float* Q, const float* K, const float* V,
                           int seq_q, int seq_k, int n_q, int n_kv, int head_dim,

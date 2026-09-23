@@ -27,15 +27,15 @@ namespace tcpu {
 // scalar: its only callers are Octo's diffusion head (64-1024 elements), where
 // there is nothing to win and the numerics are golden-verified as they are.
 void silu_gate(float* out, const float* g, const float* u, int n) {
-#if TCPU_ISA_X86 || TCPU_ISA_ARM
+#if TCPU_HAL_X86 || TCPU_ISA_ARM
     if (hal::env::simd_silu()) {
-        const int lanes = TCPU_ISA_X86 ? 8 : 4;
+        const int lanes = TCPU_HAL_X86 ? 8 : 4;
         const int nv = n - (n % lanes);
 #if defined(_OPENMP)
         #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
 #endif
         for (int i=0; i<nv; i += lanes) {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
             const __m256 x = _mm256_loadu_ps(g+i);
             const __m256 e = exp256_ps(_mm256_sub_ps(_mm256_setzero_ps(), x));
             const __m256 s = _mm256_div_ps(x, _mm256_add_ps(_mm256_set1_ps(1.0f), e));
@@ -73,7 +73,7 @@ void silu(float* x, int n) {
 
 void gelu_tanh(float* x, int n) {
     const float c = 0.7978845608028654f; // sqrt(2/pi)
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     // 0.5*(1+tanh(y)) == sigmoid(2y), so gelu = v * sigmoid(2c*(v + 0.044715 v^3));
     // one exp256_ps per 8 elements instead of 8 scalar tanhf (tolerance class).
     const int nv = n & ~7;
@@ -142,18 +142,18 @@ void gelu_tanh(float* x, int n) {
 // gelu_tanh is NOT a substitute for either path: see the header.
 void gelu_erf(float* x, int n) {
     const float inv_sqrt2 = 0.70710678118654752f;
-#if TCPU_ISA_X86 || TCPU_ISA_ARM
+#if TCPU_HAL_X86 || TCPU_ISA_ARM
     if (hal::env::simd_erf()) {
         const float p  =  0.3275911f;
         const float a1 =  0.254829592f,  a2 = -0.284496736f, a3 = 1.421413741f;
         const float a4 = -1.453152027f,  a5 =  1.061405429f;
-        const int lanes = TCPU_ISA_X86 ? 8 : 4;
+        const int lanes = TCPU_HAL_X86 ? 8 : 4;
         const int nv = n - (n % lanes);
 #if defined(_OPENMP)
         #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
 #endif
         for (int i=0; i<nv; i += lanes) {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
             const __m256 v = _mm256_loadu_ps(x+i);
             const __m256 z = _mm256_mul_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.0f), v),
                                            _mm256_set1_ps(inv_sqrt2));
@@ -220,15 +220,15 @@ void mish(float* x, int n) {
     // above that, tanh(softplus(v)) is 1 to well inside fp32, and the branch also
     // keeps log1p(exp(v)) from returning inf for the large activations the UNet's
     // wide channel blocks do produce.
-#if TCPU_ISA_X86 || TCPU_ISA_ARM
+#if TCPU_HAL_X86 || TCPU_ISA_ARM
     if (hal::env::simd_mish()) {
-        const int lanes = TCPU_ISA_X86 ? 8 : 4;
+        const int lanes = TCPU_HAL_X86 ? 8 : 4;
         const int nv = n - (n % lanes);
 #if defined(_OPENMP)
         #pragma omp parallel for schedule(static) if(n > hal::env::omp_min())
 #endif
         for (int i=0; i<nv; i += lanes) {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
             const __m256 v = _mm256_loadu_ps(x+i);
             const __m256 e = exp256_ps(_mm256_min_ps(v, _mm256_set1_ps(20.0f)));
             const __m256 m = _mm256_mul_ps(e, _mm256_add_ps(e, _mm256_set1_ps(2.0f)));

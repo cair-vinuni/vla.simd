@@ -28,7 +28,7 @@
 //   - degenerate rows (fully-masked -> uniform weights) keep the per-row path.
 
 #include "../arch.h"
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
 
 #include "../simd.h"
 #include "../common/env.h"
@@ -174,7 +174,6 @@ static inline void av_tile16_rows(int rows, const float* p, size_t lds, float* o
     }
 }
 
-#if TCPU_HAL_AMD
 // V comes pre-packed as [kv][d/16][key][16], so each of the four head_dim passes
 // streams one contiguous run instead of walking the model's [key][kv][d] layout
 // at an n_kv*head_dim stride. That stride is the same L1/L2 set-aliasing trap as
@@ -202,7 +201,6 @@ static void vpack(float* VP, const float* V, int seq_k, int n_kv, int head_dim) 
         }
     }
 }
-#endif
 
 // ROWSx16 QK micro-kernel over transposed keys: ROWS query rows share every K
 // panel load (up to 12 accumulators + 2 K loads + 1 broadcast = 15 YMM, the
@@ -275,7 +273,8 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
     // (exp256_ps). Blocked keys (mask == finfo.min) flush to weight exactly 0.0f via
     // the exp clamp, so the AV pass still skips them.
     const int skp = hal::kt_stride(seq_k);   // K^T leading dimension (padded on Zen)
-    const int sds = TCPU_HAL_AMD ? ((seq_k+7) & ~7) + 8 : skp;   // scores leading dimension (same aliasing)
+    const bool zen = hal::env::zen();
+    const int sds = zen ? ((seq_k+7) & ~7) + 8 : skp;   // scores leading dimension (same aliasing)
     const float* KTp = K_pre;
     if (!KTp) {
         // reused across calls (the op is entered from one thread; parallelism is
@@ -299,19 +298,20 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
         constexpr int QR = 6;
         const int ntiles = (seq_q+QR-1)/QR;
 
-#if TCPU_HAL_AMD
         // V repacked once per call for the tiled A*V (same reuse rule as KT:
         // grab the pointer before any parallel region).
-        static thread_local std::vector<float> VPbuf;
-        if (VPbuf.size() < (size_t)n_kv*head_dim*seq_k)
-            VPbuf.resize((size_t)n_kv*head_dim*seq_k);
-        vpack(VPbuf.data(), V, seq_k, n_kv, head_dim);
-        const float* const VB = VPbuf.data();
-        const size_t ldkv = (size_t)head_dim*seq_k, ldt = 16, ldblk = (size_t)seq_k*16;
-#else
-        const float* const VB = V;
-        const size_t ldkv = head_dim, ldt = (size_t)n_kv*head_dim, ldblk = 16;
-#endif
+        const float* VB = V;
+        size_t ldkv = head_dim, ldt = (size_t)n_kv*head_dim, ldblk = 16;
+        if (zen) {
+            static thread_local std::vector<float> VPbuf;
+            if (VPbuf.size() < (size_t)n_kv*head_dim*seq_k)
+                VPbuf.resize((size_t)n_kv*head_dim*seq_k);
+            vpack(VPbuf.data(), V, seq_k, n_kv, head_dim);
+            VB = VPbuf.data();
+            ldkv = (size_t)head_dim*seq_k;
+            ldt = 16;
+            ldblk = (size_t)seq_k*16;
+        }
 
         std::vector<int> jmaxv(seq_q, seq_k);
         if (mask) {
@@ -448,4 +448,4 @@ void gqa_attention_masked(float* out, const float* Q, const float* K, const floa
 
 } // namespace tcpu
 
-#endif // TCPU_ISA_X86
+#endif // TCPU_HAL_X86

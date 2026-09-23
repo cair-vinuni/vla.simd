@@ -70,16 +70,8 @@ jobs:
           print(f"{mach}: {want} present")
           EOF
       - run: ctest --test-dir build --output-on-failure
-
-  # The Zen-tuned attention backend has no other job that compiles it.
-  amd-backend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - run: cmake -S . -B build -DVLA_HAL=amd -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-      - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
+      - if: runner.arch == 'X64'
+        run: TCPU_ZEN=1 ctest --test-dir build --output-on-failure
 
   sanitize:
     runs-on: ubuntu-24.04

@@ -24,7 +24,7 @@ void pack_weights16(const float* W, float* Wp, int N, int K) {
                 Wp[((size_t)b*K+k)*16+j] = W[(size_t)(b*16+j)*K+k];
 }
 
-#if !TCPU_ISA_X86
+#if !TCPU_HAL_X86
 // K^T-output packed GEMM: only the AVX2 backend has the in-register transpose
 // epilogue; elsewhere compute token-major and copy (callers on these backends
 // only take this path when forced - see nn::Linear::kt_native).
@@ -56,7 +56,7 @@ void dense_linear_bf16(float* out, const float* x, const uint16_t* W, const floa
         }
     }
 }
-#endif // !TCPU_ISA_X86
+#endif // !TCPU_HAL_X86
 
 #if !TCPU_HAL_NEON
 // bf16 packed-panel GEMM: native only on the Pi NEON backend (the one place it

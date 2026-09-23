@@ -74,7 +74,7 @@ void Linear::init_bf16(const uint16_t* Wb16, const float* bias_, int N_, int K_,
 }
 
 bool Linear::bf16_keeps_raw() {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     return !hal::env::bf16_deq();
 #elif TCPU_HAL_APPLE
     return false;

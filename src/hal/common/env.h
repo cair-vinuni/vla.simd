@@ -106,6 +106,8 @@ bool simd_erf();
 
 bool simd_mish();
 
+bool zen();
+
 // TCPU_BF16_MLP=1: run MLP-role GEMMs from bf16 packed weights (Pi NEON backend;
 // memory-bound MLP, 5th-decimal accuracy class). Default off.
 bool bf16_mlp();

@@ -154,7 +154,7 @@ void Linear::forward(float* out, const float* x, int seq) const {
 }
 
 void Linear::forward_gelu(float* out, const float* x, int seq) const {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     if (Wp && !Wr16 && hal::env::fuse_gelu()) {
         dense_linear_packed_gelu(out, x, Wp, bias, seq, N, K);
         return;
@@ -165,7 +165,7 @@ void Linear::forward_gelu(float* out, const float* x, int seq) const {
 }
 
 void Linear::forward_add(float* out, const float* x, int seq) const {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     if (Wp && hal::env::fuse_res()) {
         dense_linear_packed_add(out, x, Wp, bias, seq, N, K);
         return;
@@ -178,7 +178,7 @@ void Linear::forward_add(float* out, const float* x, int seq) const {
 }
 
 bool Linear::add_native() {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     return hal::env::packed() && hal::env::fuse_res();
 #else
     return false;
@@ -195,7 +195,7 @@ void Linear::forward_kt(float* out_t, const float* x, int seq, int ldo) const {
 }
 
 bool Linear::kt_native() {
-#if TCPU_ISA_X86
+#if TCPU_HAL_X86
     return hal::env::packed();
 #else
     return accel_on();

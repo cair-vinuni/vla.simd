@@ -141,7 +141,7 @@ Octo and Diffusion Policy see consecutive frames only if the client sends every
 frame, so run the client with `--chunk_size_threshold=1.0` for them.
 
 `--bench N` (or `--soak SEC`; `--json` for JSON output) times N queries after
-warmup and exits, reporting the backend the library was built for.
+warmup and exits, reporting the backend it ran on.
 `--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod:
 
 | knob | effect |
@@ -150,6 +150,7 @@ warmup and exits, reporting the backend the library was built for.
 | `DP_SCHEDULER`, `DP_STEPS` | Diffusion Policy sampler (`DDPM` or `DDIM`) and step count |
 | `SMOLVLA_NUM_STEPS` | SmolVLA flow-matching steps |
 | `TCPU_VIEW_THREADS`, `TCPU_EXPERT_THREADS`, `TCPU_OMP_MIN` | threading of the camera views, the SmolVLA expert loop, and the size below which small ops stay single-threaded |
+| `TCPU_ZEN=0`, `TCPU_ZEN=1` | force the Intel or the AMD Zen attention layout on x86; the default follows the CPU vendor |
 | `TCPU_BF16_MLP=1`, `TCPU_BF16_DEQ=0` | bf16 MLP weights on the Pi; keep bf16 checkpoint weights resident on x86 |
 
 The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
