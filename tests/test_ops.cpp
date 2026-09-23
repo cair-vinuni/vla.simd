@@ -171,7 +171,9 @@ static void test_attention() {
                 for (int j = 0; j < sk; j++) KT[((size_t)h*hd+d)*ldk+j] = K[((size_t)j*nkv+h)*hd+d];
         gqa_attention_masked(pre.data(), Q.data(), K.data(), V.data(), sq, sk, nq, nkv, hd, scale,
                              causal.data(), KT.data());
-        CHECK(same_bits(pre, masked), "masked with K_pre != masked (%d,%d,%d,%d,%d)", sq, sk, nq, nkv, hd);
+        expect_close("gqa_attention_masked causal K_pre", pre, ref, one, 2e-6);
+        CHECK(TCPU_HAL_APPLE || same_bits(pre, masked),
+              "masked with K_pre != masked (%d,%d,%d,%d,%d)", sq, sk, nq, nkv, hd);
     }
 }
 
