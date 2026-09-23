@@ -92,11 +92,12 @@ int32_t vla_smolvla_tokenize(void* h, const char* text, int32_t* ids, int32_t* m
     // rather than in every caller means no entry point can get it wrong; the
     // rstrip makes it idempotent for callers that already added one.
     std::string s(text);
+    if (s.size() > 65536) s.erase(0, s.size() - 65536);
     while (!s.empty() && s.back() == '\n') s.pop_back();
     s.push_back('\n');
 
     auto enc = hh->tok.encode(s, false);
-    if ((int)enc.size() > hh->tok_maxlen) enc.resize(hh->tok_maxlen);
+    if ((int)enc.size() > hh->tok_maxlen) enc.erase(enc.begin(), enc.end() - hh->tok_maxlen);
     for (int i = 0; i < hh->tok_maxlen; i++) {
         ids[i]  = i < (int)enc.size() ? enc[i] : hh->pad_id;
         mask[i] = i < (int)enc.size() ? 1 : 0;
