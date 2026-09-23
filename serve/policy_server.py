@@ -42,13 +42,12 @@ Protocol (see lerobot/transport/services.proto):
     SendObservations(stream Observation) -> Empty    pickled TimedObservation
     GetActions(Empty) -> Actions                     pickled list[TimedAction]
 
-Pickle over a socket trusts the peer and the port is unauthenticated: keep it on
-a lab LAN or an SSH tunnel. Same exposure as CVE-2026-25874 in lerobot's own
-server.
+The port is unauthenticated: keep it on a lab LAN or an SSH tunnel.
 """
 
 import argparse
 import ctypes
+import io
 import logging
 import os
 import pickle  # nosec: the lerobot async-inference protocol is pickle-based
@@ -68,6 +67,31 @@ F32P = ctypes.POINTER(ctypes.c_float)
 I32P = ctypes.POINTER(ctypes.c_int32)
 
 logger = logging.getLogger("vla_simd_policy_server")
+
+VLA_ABI_VERSION = 1
+
+
+class _WireUnpickler(pickle.Unpickler):
+    ALLOWED = {
+        ("lerobot.async_inference.helpers", "RemotePolicyConfig"),
+        ("lerobot.async_inference.helpers", "TimedObservation"),
+        ("lerobot.configs.types", "PolicyFeature"),
+        ("lerobot.configs.types", "FeatureType"),
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+        *((f"numpy.{core}.multiarray", name)
+          for core in ("core", "_core") for name in ("_reconstruct", "scalar")),
+        *((f"numpy.{core}.numeric", "_frombuffer") for core in ("core", "_core")),
+    }
+
+    def find_class(self, module, name):
+        if (module, name) not in self.ALLOWED:
+            raise pickle.UnpicklingError(f"refusing to unpickle {module}.{name}")
+        return super().find_class(module, name)
+
+
+def _loads(data):
+    return _WireUnpickler(io.BytesIO(data)).load()
 
 
 def read_config(model_dir):
@@ -107,7 +131,15 @@ def _open_lib(lib_path, target):
             f"  cmake --build build -j --target {target}\n"
             "or point --lib at it."
         )
-    return ctypes.CDLL(lib_path)
+    lib = ctypes.CDLL(lib_path)
+    abi = getattr(lib, "vla_abi_version", None)
+    if abi is not None:
+        abi.restype = ctypes.c_int32
+        abi = abi()
+    if abi != VLA_ABI_VERSION:
+        sys.exit(f"{lib_path} has ABI version {abi}, this server speaks {VLA_ABI_VERSION}: "
+                 f"rebuild it (cmake --build build -j --target {target}) or update the server.")
+    return lib
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +494,14 @@ class OctoEngine:
         self.cfg = read_config(model_dir)
         self.window = min(int(self.cfg.get("window", 2) or 2), self.max_window)
         self.cam_names = self.cfg.get("cams", []) or _cam_list(args)
-        self.n_views = 2
+        self.n_views = 1 if len(self.cam_names) == 1 else 2
         self.task = None
         self.lock = threading.Lock()
         self._out = np.empty((self.chunk, self.action_dim), np.float32)
 
     def describe(self):
-        return (f"2 cams {self.cam_names or '(unnamed)'} at 256/128 | window {self.window}"
-                f"/{self.max_window} | chunk {self.chunk}x{self.action_dim} | no state "
+        return (f"{self.n_views} cams {self.cam_names or '(unnamed)'} at 256/128 "
+                f"| window {self.window}/{self.max_window} | chunk {self.chunk}x{self.action_dim} | no state "
                 f"| steps {self.cfg.get('steps', '?')}")
 
     def predict(self, adapted, seed):
@@ -479,18 +511,20 @@ class OctoEngine:
         if not task:
             raise RuntimeError("no task: the client sent none and the checkpoint recorded none")
         primary = np.ascontiguousarray(primary, np.uint8)
-        wrist = np.ascontiguousarray(wrist, np.uint8)
+        wrist = None if wrist is None else np.ascontiguousarray(wrist, np.uint8)
         mask = np.ascontiguousarray(mask, np.uint8)
         wnd = primary.shape[0]
-        if wrist.shape[0] != wnd or mask.shape[0] != wnd:
-            raise ValueError(f"window mismatch: primary {wnd}, wrist {wrist.shape[0]}, "
+        wrist_wnd = wnd if wrist is None else wrist.shape[0]
+        if wrist_wnd != wnd or mask.shape[0] != wnd:
+            raise ValueError(f"window mismatch: primary {wnd}, wrist {wrist_wnd}, "
                              f"mask {mask.shape[0]}")
         if not 1 <= wnd <= self.max_window:
             raise ValueError(f"window {wnd} outside [1, {self.max_window}]")
 
         with self.lock:
             rc = self.lib.vla_octo_predict(
-                self.h, primary.ctypes.data_as(U8P), wrist.ctypes.data_as(U8P),
+                self.h, primary.ctypes.data_as(U8P),
+                None if wrist is None else wrist.ctypes.data_as(U8P),
                 wnd, mask.ctypes.data_as(U8P), task.encode(), seed,
                 1,  # un-normalize: actions come back in dataset units
                 self._out.ctypes.data_as(F32P))
@@ -501,7 +535,7 @@ class OctoEngine:
     def warmup_input(self):
         w = self.window
         return (np.zeros((w, *self.PRIMARY_HW, 3), np.uint8),
-                np.zeros((w, *self.WRIST_HW, 3), np.uint8),
+                np.zeros((w, *self.WRIST_HW, 3), np.uint8) if self.n_views == 2 else None,
                 np.ones(w, np.uint8), self.task)
 
     def close(self):
@@ -837,30 +871,24 @@ class History:
     lerobot's async protocol carries one observation per message, so the window
     is assembled here. Before n have arrived the earliest one is repeated, which
     is what the reference policies do at the start of an episode, and the mask
-    says which entries are real. `reset()` is called when a client (re)connects,
-    so one episode's tail never leaks into the next one's head.
+    says which entries are real.
     """
 
     def __init__(self, n):
         self.n = n
         self.items = []
-
-    def reset(self):
-        self.items = []
+        self.lock = threading.Lock()
 
     def push(self, item):
-        self.items.append(item)
-        if len(self.items) > self.n:
-            self.items.pop(0)
-        return self.items
-
-    def padded(self):
         """(window, mask): the buffer left-padded to n by repeating the oldest."""
-        k = len(self.items)
-        pad = self.n - k
-        window = [self.items[0]] * pad + self.items
-        mask = np.array([0] * pad + [1] * k, np.uint8)
-        return window, mask
+        with self.lock:
+            self.items.append(item)
+            if len(self.items) > self.n:
+                self.items.pop(0)
+            k = len(self.items)
+            pad = self.n - k
+            window = [self.items[0]] * pad + self.items
+        return window, np.array([0] * pad + [1] * k, np.uint8)
 
 
 class TurboVlaAdapter(ObservationAdapter):
@@ -897,11 +925,11 @@ class OctoAdapter(ObservationAdapter):
     def __call__(self, raw_observation):
         frame = self._frame(raw_observation)
         primary = self._resize(np.asarray(frame[self.camera_keys[0]]), *self.engine.PRIMARY_HW)
-        wrist = self._resize(np.asarray(frame[self.camera_keys[1]]), *self.engine.WRIST_HW)
-        self.history.push((primary, wrist))
-        window, mask = self.history.padded()
+        wrist = (self._resize(np.asarray(frame[self.camera_keys[1]]), *self.engine.WRIST_HW)
+                 if self.engine.n_views == 2 else None)
+        window, mask = self.history.push((primary, wrist))
         return (np.stack([p for p, _ in window]),
-                np.stack([w for _, w in window]),
+                None if wrist is None else np.stack([w for _, w in window]),
                 mask,
                 raw_observation.get("task"))
 
@@ -915,8 +943,7 @@ class DiffusionAdapter(ActAdapter):
 
     def __call__(self, raw_observation):
         frames, state = super().__call__(raw_observation)
-        self.history.push((frames, state))
-        window, _ = self.history.padded()
+        window, _ = self.history.push((frames, state))
         return (np.stack([f for f, _ in window]), np.stack([s for _, s in window]))
 
 # ---------------------------------------------------------------------------
@@ -969,8 +996,9 @@ def _octo_extra(p):
     p.add_argument("--tok-dir", default=None, help="default: <model-dir>/tok")
     _lang_extra(p)
     p.add_argument("--cams", default=None,
-                   help="camera order, primary first (e.g. 'primary,wrist'); Octo's "
-                        "converter records no names and the two towers differ in size")
+                   help="camera order, primary first (e.g. 'primary,wrist', or 'primary' "
+                        "alone for no wrist); Octo's converter records no names and the "
+                        "two towers differ in size")
     p.add_argument("--seed", type=int, default=0,
                    help="DDPM noise for query i is seed+i (default: 0)")
 
@@ -1005,6 +1033,7 @@ MODELS = {
 # ---------------------------------------------------------------------------
 def build_servicer_class(spec):
     """Imported lazily so `--help` works without lerobot on the path."""
+    import torch
     from lerobot.async_inference.helpers import (
         RemotePolicyConfig,
         TimedAction,
@@ -1013,6 +1042,12 @@ def build_servicer_class(spec):
     )
     from lerobot.transport import services_pb2, services_pb2_grpc
     from lerobot.transport.utils import receive_bytes_in_chunks
+
+    class ActionPickler(pickle.Pickler):
+        def reducer_override(self, obj):
+            if isinstance(obj, torch.Tensor):
+                return torch.from_numpy, (obj.numpy(),)
+            return NotImplemented
 
     class VlaSimdPolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """lerobot's AsyncInference service, backed by the vla.simd engine.
@@ -1045,14 +1080,7 @@ def build_servicer_class(spec):
 
         def _reset(self):
             self.shutdown_event.set()
-            # Drained, not replaced: a worker already parked in
-            # observation_queue.get() would otherwise wait out its timeout on an
-            # orphaned queue.
-            while True:
-                try:
-                    self.observation_queue.get_nowait()
-                except Empty:
-                    break
+            self.observation_queue = Queue(maxsize=1)
             with self._predicted_lock:
                 self._predicted_timesteps = set()
             self.last_processed_obs = None
@@ -1070,7 +1098,7 @@ def build_servicer_class(spec):
 
         def SendPolicyInstructions(self, request, context):  # noqa: N802
             try:
-                specs = pickle.loads(request.data)  # nosec
+                specs = _loads(request.data)
                 if not isinstance(specs, RemotePolicyConfig):
                     raise TypeError(f"expected a RemotePolicyConfig, got {type(specs)}")
                 if specs.policy_type != spec.policy_type:
@@ -1078,6 +1106,9 @@ def build_servicer_class(spec):
                         f"this server serves {spec.policy_type} only, "
                         f"the client asked for {specs.policy_type!r}"
                     )
+                if not isinstance(specs.actions_per_chunk, int) or specs.actions_per_chunk < 1:
+                    raise ValueError(
+                        f"actions_per_chunk must be an int >= 1, got {specs.actions_per_chunk!r}")
 
                 # The checkpoint is the converted one in --model-dir; a mismatch
                 # here is the classic "served the wrong model" bug, so it is loud.
@@ -1104,20 +1135,22 @@ def build_servicer_class(spec):
         def SendObservations(self, request_iterator, context):  # noqa: N802
             received = receive_bytes_in_chunks(
                 request_iterator, None, self.shutdown_event, f"{spec.policy_type}_policy_server")
+            adapter = self.adapter
             try:
-                obs = pickle.loads(received)  # nosec
+                obs = _loads(received)
                 if not isinstance(obs, TimedObservation):
                     raise TypeError(f"expected a TimedObservation, got {type(obs)}")
+                adapted = adapter(obs.get_observation()) if hasattr(adapter, "history") else None
             except Exception as e:
-                logger.exception("undecodable observation from %s", context.peer())
+                logger.exception("bad observation from %s", context.peer())
                 context.abort(_grpc_status().INVALID_ARGUMENT, f"bad observation: {e}")
-            if not self._enqueue(obs):
+            if not self._enqueue(obs, adapted):
                 logger.debug("observation #%s filtered out", obs.get_timestep())
             return services_pb2.Empty()
 
         def GetActions(self, request, context):  # noqa: N802
             try:
-                obs = self.observation_queue.get(timeout=self.cfg.obs_queue_timeout)
+                obs, adapted = self.observation_queue.get(timeout=self.cfg.obs_queue_timeout)
             except Empty:
                 return services_pb2.Empty()
 
@@ -1126,7 +1159,7 @@ def build_servicer_class(spec):
                     self._predicted_timesteps.add(obs.get_timestep())
 
                 t0 = time.perf_counter()
-                chunk = self._predict(obs)
+                chunk = self._predict(obs, adapted)
                 inference_ms = (time.perf_counter() - t0) * 1000
 
                 with self._query_lock:
@@ -1137,7 +1170,9 @@ def build_servicer_class(spec):
                         obs.get_timestep(), len(chunk), inference_ms,
                         np.round(np.asarray(chunk[0].get_action()), 3).tolist(),
                     )
-                return services_pb2.Actions(data=pickle.dumps(chunk))  # nosec
+                buf = io.BytesIO()
+                ActionPickler(buf).dump(chunk)
+                return services_pb2.Actions(data=buf.getvalue())
             except Exception as e:
                 # An empty reply is what a timed-out queue returns, so a broken
                 # engine would be indistinguishable from a quiet client.
@@ -1152,7 +1187,7 @@ def build_servicer_class(spec):
                 return False
             return not observations_similar(obs, previous, lerobot_features=self.lerobot_features)
 
-        def _enqueue(self, obs):
+        def _enqueue(self, obs, adapted):
             if not (obs.must_go or self.last_processed_obs is None
                     or self._sanity_ok(obs, self.last_processed_obs)):
                 return False
@@ -1164,18 +1199,17 @@ def build_servicer_class(spec):
             except Empty:
                 pass
             try:
-                self.observation_queue.put_nowait(obs)
+                self.observation_queue.put_nowait((obs, adapted))
             except Full:
                 return False
             return True
 
-        def _predict(self, timed_obs: "TimedObservation"):
+        def _predict(self, timed_obs: "TimedObservation", adapted):
             if self.adapter is None:
                 raise RuntimeError("no policy instructions received yet")
 
-            import torch
-
-            adapted = self.adapter(timed_obs.get_observation())
+            if adapted is None:
+                adapted = self.adapter(timed_obs.get_observation())
             self.last_processed_obs = timed_obs
 
             # Reserve AND advance under one lock. Incrementing only after
@@ -1237,8 +1271,9 @@ def main(spec=None, doc=None):
     # cores so serving on a 4-core Pi does not silently oversubscribe (which costs
     # ~6% and shows up in the log as a thread count the board does not have). An
     # explicit OMP_NUM_THREADS still wins - thread count is a reported parameter.
-    os.environ.setdefault(
-        "OMP_NUM_THREADS", str(min(int(spec.omp_threads), os.cpu_count() or 1)))
+    ncpu = (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+            else os.cpu_count() or 1)
+    os.environ.setdefault("OMP_NUM_THREADS", str(min(int(spec.omp_threads), ncpu)))
 
     p = argparse.ArgumentParser(
         description=doc or __doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1249,9 +1284,8 @@ def main(spec=None, doc=None):
     p.add_argument("--lib", default=spec.default_lib,
                    help=f"path to {os.path.basename(spec.default_lib)}")
     # Loopback by default: the payload codec is pickle over an unauthenticated
-    # port, in the control path of a physical arm (see the CVE note on the
-    # `serve` extra in pyproject.toml). Exposing it to the LAN is an explicit
-    # choice.
+    # port, in the control path of a physical arm. Exposing it to the LAN is an
+    # explicit choice.
     p.add_argument("--host", default="127.0.0.1",
                    help="127.0.0.1 keeps it local; 0.0.0.0 serves the LAN (default: 127.0.0.1)")
     p.add_argument("--port", type=int, default=8080)
@@ -1280,7 +1314,8 @@ def main(spec=None, doc=None):
         p.error("--obs-queue-timeout must be > 0")
 
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger.setLevel(logging.INFO)
 
     t0 = time.time()
     engine = spec.engine_cls(args)
@@ -1325,12 +1360,17 @@ def main(spec=None, doc=None):
             options=[
                 ("grpc.max_receive_message_length", args.max_message_mb * 1024 * 1024),
                 ("grpc.max_send_message_length", args.max_message_mb * 1024 * 1024),
+                ("grpc.so_reuseport", 0),
             ])
         services_pb2_grpc.add_AsyncInferenceServicer_to_server(
             servicer_cls(engine, ServerConfig(args)), server)
         # add_insecure_port returns 0 on failure; unchecked, the server logs
         # "listening" and blocks forever while nothing can connect.
-        if server.add_insecure_port(f"{args.host}:{args.port}") == 0:
+        try:
+            bound = server.add_insecure_port(f"{args.host}:{args.port}")
+        except RuntimeError:
+            bound = 0
+        if bound == 0:
             sys.exit(f"failed to bind {args.host}:{args.port} (already in use?)")
         server.start()
         logger.info("vla.simd %s policy server listening on %s:%d",
