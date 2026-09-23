@@ -131,7 +131,7 @@ int32_t vla_smolvla_predict(void* h, const uint8_t* frames, int32_t n_views,
     std::vector<float> noise_buf;
     if (!noise) {
         noise_buf.resize((size_t)C*MAD);
-        std::mt19937 rng((unsigned)seed);
+        std::mt19937_64 rng(seed);
         std::normal_distribution<float> nd(0.f, 1.f);
         for (auto& x : noise_buf) x = nd(rng);
         noise = noise_buf.data();

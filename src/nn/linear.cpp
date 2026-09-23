@@ -47,7 +47,8 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
             for (size_t i=0; i<packed.size(); i++) {
                 uint32_t u;
                 std::memcpy(&u, &packed[i], 4);
-                packed_bf16[i] = (uint16_t)((u+0x7fff+((u>>16) & 1)) >> 16);
+                packed_bf16[i] = (u & 0x7fffffffu) > 0x7f800000u ? (uint16_t)((u >> 16) | 0x40u)
+                                                                 : (uint16_t)((u+0x7fff+((u>>16) & 1)) >> 16);
             }
             Wb = packed_bf16.data();
         }

@@ -5,6 +5,8 @@
 
 #include "env.h"
 #include "../arch.h"
+#include <algorithm>
+#include <climits>
 #include <cstdlib>
 #include <cstddef>
 using std::size_t;
@@ -15,7 +17,10 @@ namespace env {
 
 static int int_env(const char* name, int dflt) {
     const char* e = std::getenv(name);
-    return e ? std::atoi(e) : dflt;
+    if (!e || !*e) return dflt;
+    char* end;
+    const long long v = std::strtoll(e, &end, 10);
+    return *end || v < INT_MIN || v > INT_MAX ? dflt : (int)v;
 }
 static bool flag_on(const char* name, bool dflt) {
     const char* e = std::getenv(name);
@@ -58,7 +63,7 @@ int attn_qblock() {
         // Rounded UP to a multiple of 4, not just clamped: the dense QK kernel
         // works in 4-query micro-tiles and writes all four rows of the last tile,
         // so an odd block (TCPU_ATTN_QB=5) wrote past the score buffer.
-        return n < 4 ? 4 : (n + 3) & ~3;
+        return n < 4 ? 4 : n > 1024 ? 1024 : (n + 3) & ~3;
     }();
     return v;
 }
@@ -183,7 +188,7 @@ int gemm_chunk() {
 }
 
 int omp_min() {
-    static const int v = int_env("TCPU_OMP_MIN", 8192);
+    static const int v = std::max(0, int_env("TCPU_OMP_MIN", 8192));
     return v;
 }
 

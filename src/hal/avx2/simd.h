@@ -69,9 +69,9 @@ static inline float hmax8(__m256 v) {
 // Cephes-style exp, ~1-2 ulp (avx_mathfun lineage). Lanes below -87 flush to exactly
 // 0.0f (mirrors libm underflow), so blocked-key scores keep producing zero weight.
 static inline __m256 exp256_ps(__m256 x) {
-    const __m256 keep = _mm256_cmp_ps(x, _mm256_set1_ps(-87.0f), _CMP_GT_OQ);
-    x = _mm256_min_ps(x, _mm256_set1_ps(88.3762626647949f));
-    x = _mm256_max_ps(x, _mm256_set1_ps(-88.3762626647950f));
+    const __m256 keep = _mm256_cmp_ps(x, _mm256_set1_ps(-87.0f), _CMP_NLE_UQ);
+    x = _mm256_min_ps(_mm256_set1_ps(88.3762626647949f), x);
+    x = _mm256_max_ps(_mm256_set1_ps(-88.3762626647950f), x);
 
     __m256 fx = _mm256_fmadd_ps(x, _mm256_set1_ps(1.44269504088896341f), _mm256_set1_ps(0.5f));
     fx = _mm256_floor_ps(fx);

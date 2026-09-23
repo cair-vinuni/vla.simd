@@ -284,7 +284,7 @@ void DPUNet1d::forward(float* eps_out, const float* sample, const float* gc, int
     }
 
     std::vector<float> f((size_t)T*final_block.cout);
-    final_block.forward(f.data(), x.data(), T, G, ge, col);
+    final_block.forward(f.data(), x.data(), T, 8, ge, col);
     final_conv.forward(eps_out, f.data(), T);
 }
 

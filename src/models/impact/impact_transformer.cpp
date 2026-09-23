@@ -137,17 +137,18 @@ bool ImpactTransformer::load(const std::string& dir, int img_ch) {
     take_linear(head, cfg.action_dim, d, nn::Linear::Role::Generic);
     if (!ok || off != data.size() || cfg.n_1d != 2 || cfg.heads*cfg.head_dim != d) return false;
 
-    // Left out of every int8 group on purpose, as in ACT:
-    //   state_proj / head - K and N are the state/action dims, far too small to
-    //                       pay for quantizing, and the head is the last op
-    //                       before the robot's joint commands.
+    // Left out of every int8 group on purpose:
+    //   head              - the last op before the robot's joint commands.
     //   attention itself  - scores and A*V are activation x activation, a
     //                       different quantization problem from weights.
     // Any layer whose shape the kernel cannot take silently stays fp32.
     const int mask = int8_mask();
-    if (mask) {
+    if (mask & 31) {
         int n = 0;
-        if (mask & I8_IMGPROJ) n += img_proj.init_int8();
+        if (mask & I8_IMGPROJ) {
+            n += img_proj.init_int8();
+            n += state_proj.init_int8();
+        }
         for (ImpactEncoderLayer& l : enc) {
             if (mask & I8_ATTN) {
                 n += l.attn.wq.init_int8();

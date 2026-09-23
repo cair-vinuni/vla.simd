@@ -51,7 +51,7 @@ static inline void simd_axpy(float* o, float alpha, const float* v, int n) {
 // constants, so it matches the AVX2 gelu path's numerics (tolerance class). Lanes
 // below -87 flush to exactly 0.0f (mirrors libm underflow).
 static inline float32x4_t exp_ps_neon(float32x4_t x) {
-    const uint32x4_t keep = vcgtq_f32(x, vdupq_n_f32(-87.0f));
+    const uint32x4_t keep = vmvnq_u32(vcleq_f32(x, vdupq_n_f32(-87.0f)));
     x = vminq_f32(x, vdupq_n_f32(88.3762626647949f));
     x = vmaxq_f32(x, vdupq_n_f32(-88.3762626647950f));
 

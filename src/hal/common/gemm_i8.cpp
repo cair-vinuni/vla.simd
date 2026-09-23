@@ -274,8 +274,7 @@ void dense_linear_i8_ref(float* out, const int8_t* xq, const float* ascale,
             for (int g=0; g<KG; g++)
                 for (int c=0; c<4; c++)
                     acc += (int32_t)Wq[((size_t)(b*KG+g)*16 + j)*4 + c] * (int32_t)q[g*4+c];
-            const float v = (float)acc*ascale[t]*wscale[n];
-            out[(size_t)t*N+n] = bias ? v+bias[n] : v;
+            out[(size_t)t*N+n] = std::fma((float)acc*wscale[n], ascale[t], bias ? bias[n] : 0.0f);
         }
     }
 }

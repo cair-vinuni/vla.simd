@@ -41,11 +41,6 @@ struct ImpactModel {
 
     bool load(const std::string& dir);
 
-    // Quantize the matmul groups IMPACT_INT8 selects to symmetric W8A8; called
-    // by load(). Lossy and opt-in, exactly as ACT's and Octo's - see the mask
-    // comment in impact_model.cpp for the groups and what is left out.
-    void apply_int8();
-
     int chunk() const { return tf.cfg.chunk; }
     int action_dim() const { return tf.cfg.action_dim; }
     int state_dim() const { return tf.cfg.state_dim; }

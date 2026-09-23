@@ -52,7 +52,7 @@ ExpertProf& prof() { static thread_local ExpertProf p; return p; }
 bool ActionExpert::load(const std::string& dir) {
     std::ifstream meta(dir + "/aex.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/aex.meta\n", dir.c_str()); return false; }
-    std::string k; float v;
+    std::string k; double v;
     int san = cfg.self_attn_every_n;
     while (meta >> k >> v) {
         if      (k == "expert_h"         ) cfg.expert_h = (int)v;
@@ -340,7 +340,7 @@ void ActionExpert::denoise(const std::vector<VlmKV>& kv, int n_prefix, const flo
     const float dt = -1.0f/(float)cfg.num_steps;
 
     for (int step = 0; step < cfg.num_steps; step++) {
-        float time = 1.0f + (float)step*dt;
+        const float time = (float)(1.0 + step*(-1.0/cfg.num_steps));
         denoise_step(kv, n_prefix, x.data(), time, mask_full, mask_prefix.data(),
                      pos_full, pos_rebased.data(), v_t.data(), cK, cV);
         for (size_t i = 0; i < x.size(); i++) x[i] += dt*v_t[i];

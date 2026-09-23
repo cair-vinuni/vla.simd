@@ -29,8 +29,8 @@ struct SmolvlaConfig {
     int chunk          = 50;
     int num_steps      = 10;
     int max_action_dim = 32;
-    float min_period   = 0.004f;
-    float max_period   = 4.0f;
+    double min_period  = 4e-3;
+    double max_period  = 4.0;
 
     int q_full()  const { return n_q  * head_dim; }
     int kv_full() const { return n_kv * head_dim; }

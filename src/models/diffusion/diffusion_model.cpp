@@ -135,8 +135,9 @@ void DiffusionModel::preprocess(const uint8_t* src, int cam, float* dst) const {
     const int out_w = cfg.crop_w > 0 ? cfg.crop_w : in_w;
 
     // Center crop, matching torchvision CenterCrop at eval.
-    const int top  = (in_h - out_h)/2;
-    const int left = (in_w - out_w)/2;
+    const int dh = in_h - out_h, dw = in_w - out_w;
+    const int top  = dh/2 + ((dh & 3) == 3);
+    const int left = dw/2 + ((dw & 3) == 3);
     for (int y=0; y<out_h; y++) {
         const uint8_t* srow = src + ((size_t)(y+top)*in_w + left)*3;
         float* drow = dst + (size_t)y*out_w*3;

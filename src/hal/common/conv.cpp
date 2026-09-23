@@ -18,6 +18,7 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -259,27 +260,55 @@ void groupnorm(float* out, const float* x, const float* scale, const float* bias
     std::vector<double> S1(C, 0.0), S2(C, 0.0), K(C);
     for (int c=0; c<C; c++) K[c] = x[c];
 
+    const bool par = (size_t)n_pixels*C > (size_t)hal::env::omp_min();
+    int nth = 1;
 #if defined(_OPENMP)
-    #pragma omp parallel
+    if (par) nth = omp_get_max_threads();
 #endif
-  {
-    std::vector<double> l1(C, 0.0), l2(C, 0.0);
+    if (C >= 16*nth) {
 #if defined(_OPENMP)
-    #pragma omp for schedule(static) nowait
+        #pragma omp parallel for schedule(static) if(nth > 1)
 #endif
-    for (int p=0; p<n_pixels; p++) {
-        const float* xp = x+(size_t)p*C;
-        for (int c=0; c<C; c++) {
-            const double d = (double)xp[c] - K[c];
-            l1[c] += d;
-            l2[c] += d*d;
+        for (int cb=0; cb<C; cb+=16) {
+            const int ce = std::min(cb+16, C);
+            for (int p=0; p<n_pixels; p++) {
+                const float* xp = x+(size_t)p*C;
+                for (int c=cb; c<ce; c++) {
+                    const double d = (double)xp[c] - K[c];
+                    S1[c] += d;
+                    S2[c] += d*d;
+                }
+            }
+        }
+    } else {
+        std::vector<double> part((size_t)nth*2*C, 0.0);
+#if defined(_OPENMP)
+        #pragma omp parallel num_threads(nth)
+#endif
+      {
+        int tid = 0;
+#if defined(_OPENMP)
+        tid = omp_get_thread_num();
+#endif
+        double* l1 = part.data() + (size_t)tid*2*C;
+        double* l2 = l1 + C;
+#if defined(_OPENMP)
+        #pragma omp for schedule(static)
+#endif
+        for (int p=0; p<n_pixels; p++) {
+            const float* xp = x+(size_t)p*C;
+            for (int c=0; c<C; c++) {
+                const double d = (double)xp[c] - K[c];
+                l1[c] += d;
+                l2[c] += d*d;
+            }
+        }
+      }
+        for (int t=0; t<nth; t++) {
+            const double* l1 = part.data() + (size_t)t*2*C;
+            for (int c=0; c<C; c++) { S1[c] += l1[c]; S2[c] += l1[C+c]; }
         }
     }
-#if defined(_OPENMP)
-    #pragma omp critical
-#endif
-    for (int c=0; c<C; c++) { S1[c] += l1[c]; S2[c] += l2[c]; }
-  }
 
     // out = x*A + B with A = inv*scale, B = bias - mean*inv*scale
     std::vector<float> A(C), B(C);
@@ -305,7 +334,7 @@ void groupnorm(float* out, const float* x, const float* scale, const float* bias
     }
 
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(par)
 #endif
     for (int p=0; p<n_pixels; p++) {
         const float* xp = x+(size_t)p*C;
