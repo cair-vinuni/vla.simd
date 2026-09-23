@@ -5,6 +5,7 @@
  */
 
 #pragma once
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,11 +23,12 @@
 //
 // Lowercasing and accent stripping cover ASCII, Latin-1 Supplement and Latin
 // Extended-A (through U+017F) plus the combining-mark block U+0300-U+036F, which
-// is every codepoint an uncased English instruction can produce. Beyond that the
-// text passes through unchanged and unmatched pieces become [UNK] - the same
-// outcome an out-of-vocabulary word already gets, not silent corruption.
+// is every codepoint an uncased English instruction can produce.
 
 namespace tcpu {
+
+std::vector<uint32_t> utf8_decode(const std::string& s);
+void utf8_append(std::string& out, uint32_t cp);
 
 struct BertTokenizer {
     std::unordered_map<std::string, int> vocab;   // token -> id

@@ -7,35 +7,28 @@
 #include "bert_tokenizer.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 
 namespace tcpu {
-namespace {
 
 // ---------------------------------------------------------------- UTF-8 -----
-// Malformed bytes decode to themselves (a lone 0x80-0xBF becomes that
-// codepoint), which lands them in no vocabulary entry and so in [UNK] - the same
-// place an unknown word goes. Nothing here can run off the end of the string.
 std::vector<uint32_t> utf8_decode(const std::string& s) {
     std::vector<uint32_t> cps;
     cps.reserve(s.size());
     size_t i = 0;
     while (i < s.size()) {
-        const unsigned char c = (unsigned char)s[i];
-        int extra = 0;
-        uint32_t cp = c;
-        if      (c < 0x80) { extra = 0; }
-        else if ((c & 0xE0) == 0xC0) { extra = 1; cp = c & 0x1Fu; }
-        else if ((c & 0xF0) == 0xE0) { extra = 2; cp = c & 0x0Fu; }
-        else if ((c & 0xF8) == 0xF0) { extra = 3; cp = c & 0x07u; }
-        if (i + (size_t)extra >= s.size()) extra = 0;   // truncated tail
-        for (int k = 1; k <= extra; k++) {
-            const unsigned char cc = (unsigned char)s[i+k];
-            if ((cc & 0xC0) != 0x80) { extra = 0; cp = c; break; }   // not a continuation
-            cp = (cp << 6) | (cc & 0x3Fu);
+        const unsigned char c = (unsigned char)s[i++];
+        int extra = c < 0x80 ? 0 : c < 0xC2 ? -1 : c < 0xE0 ? 1 : c < 0xF0 ? 2 : c < 0xF5 ? 3 : -1;
+        if (extra < 0) { cps.push_back(0xFFFD); continue; }
+        uint32_t cp = c & (0x7Fu >> extra);
+        unsigned char lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
+        unsigned char hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
+        while (extra > 0 && i < s.size() && (unsigned char)s[i] >= lo && (unsigned char)s[i] <= hi) {
+            cp = (cp << 6) | ((unsigned char)s[i++] & 0x3Fu);
+            extra--; lo = 0x80; hi = 0xBF;
         }
-        cps.push_back(cp);
-        i += 1 + (size_t)extra;
+        cps.push_back(extra ? 0xFFFD : cp);
     }
     return cps;
 }
@@ -58,48 +51,61 @@ void utf8_append(std::string& out, uint32_t cp) {
     }
 }
 
+namespace {
+
 // ------------------------------------------------- character predicates -----
+template <size_t N> bool in_ranges(uint32_t cp, const uint32_t (&r)[N][2]) {
+    for (const auto& x : r) if (cp >= x[0] && cp <= x[1]) return true;
+    return false;
+}
+
 bool is_whitespace(uint32_t cp) {
-    // \t \n \r plus Unicode category Zs (the reference's _is_whitespace).
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' ||
            cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
-           cp == 0x202F || cp == 0x205F || cp == 0x3000;
+           cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000;
 }
 
 bool is_control(uint32_t cp) {
-    if (cp == '\t' || cp == '\n' || cp == '\r') return false;
-    if (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F)) return true;        // Cc
-    if (cp == 0xAD || (cp >= 0x200B && cp <= 0x200F)) return true;   // Cf
-    if ((cp >= 0x202A && cp <= 0x202E) || cp == 0x2060 || cp == 0xFEFF) return true;
-    return false;
+    if (cp == '\t' || cp == '\n' || cp == '\r' || (cp >= 0x20 && cp < 0x7F)) return false;
+    static const uint32_t r[][2] = {
+        {0x00, 0x1F}, {0x7F, 0x9F}, {0xAD, 0xAD}, {0x600, 0x605}, {0x61C, 0x61C}, {0x6DD, 0x6DD},
+        {0x70F, 0x70F}, {0x180E, 0x180E}, {0x200B, 0x200F}, {0x202A, 0x202E}, {0x2060, 0x2064},
+        {0x2066, 0x206F}, {0xE000, 0xF8FF}, {0xFEFF, 0xFEFF}, {0xFFF9, 0xFFFB}, {0x110BD, 0x110BD},
+        {0x1BCA0, 0x1BCA3}, {0x1D173, 0x1D17A}, {0xE0001, 0xE0001}, {0xE0020, 0xE007F},
+        {0xF0000, 0xFFFFD}, {0x100000, 0x10FFFD},
+    };
+    return in_ranges(cp, r);
 }
 
 bool is_punctuation(uint32_t cp) {
     // The reference treats every ASCII non-alphanumeric as punctuation, plus
     // anything in Unicode category P. The P set below is the Latin-1, general
     // punctuation, CJK and fullwidth blocks - what real instruction text uses.
-    if ((cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) ||
-        (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126)) return true;
-    if (cp == 0xA1 || cp == 0xA7 || cp == 0xAB || cp == 0xB6 || cp == 0xB7 ||
-        cp == 0xBB || cp == 0xBF) return true;
-    if (cp >= 0x2010 && cp <= 0x2027) return true;
-    if (cp >= 0x2030 && cp <= 0x205E) return true;
-    if (cp >= 0x3001 && cp <= 0x3003) return true;
-    if (cp >= 0x3008 && cp <= 0x3011) return true;
-    if (cp >= 0xFF01 && cp <= 0xFF0F) return true;
-    if (cp >= 0xFF1A && cp <= 0xFF20) return true;
-    return false;
+    if (cp < 0x80) return (cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) ||
+                          (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126);
+    static const uint32_t r[][2] = {
+        {0xA1, 0xA1}, {0xA7, 0xA7}, {0xAB, 0xAB}, {0xB6, 0xB7}, {0xBB, 0xBB}, {0xBF, 0xBF},
+        {0x2010, 0x2027}, {0x2030, 0x2043}, {0x2045, 0x2051}, {0x2053, 0x205E}, {0x207D, 0x207E},
+        {0x208D, 0x208E}, {0x2768, 0x2775}, {0x2E00, 0x2E2E}, {0x2E30, 0x2E42}, {0x3001, 0x3003},
+        {0x3008, 0x3011}, {0x3014, 0x301F}, {0x3030, 0x3030}, {0x303D, 0x303D}, {0x30A0, 0x30A0},
+        {0x30FB, 0x30FB}, {0xFE10, 0xFE19}, {0xFE30, 0xFE52}, {0xFE54, 0xFE61}, {0xFE63, 0xFE63},
+        {0xFE68, 0xFE68}, {0xFE6A, 0xFE6B}, {0xFF01, 0xFF03}, {0xFF05, 0xFF0A}, {0xFF0C, 0xFF0F},
+        {0xFF1A, 0xFF1B}, {0xFF1F, 0xFF20}, {0xFF3B, 0xFF3D}, {0xFF3F, 0xFF3F}, {0xFF5B, 0xFF5B},
+        {0xFF5D, 0xFF5D}, {0xFF5F, 0xFF65},
+    };
+    return in_ranges(cp, r);
 }
 
 bool is_cjk(uint32_t cp) {
     return (cp >= 0x4E00  && cp <= 0x9FFF ) || (cp >= 0x3400  && cp <= 0x4DBF ) ||
            (cp >= 0x20000 && cp <= 0x2A6DF) || (cp >= 0x2A700 && cp <= 0x2B73F) ||
-           (cp >= 0x2B740 && cp <= 0x2B81F) || (cp >= 0x2B820 && cp <= 0x2CEAF) ||
+           (cp >= 0x2B740 && cp <= 0x2B81F) || (cp >= 0x2B920 && cp <= 0x2CEAF) ||
            (cp >= 0xF900  && cp <= 0xFAFF ) || (cp >= 0x2F800 && cp <= 0x2FA1F);
 }
 
 uint32_t to_lower(uint32_t cp) {
     if (cp >= 'A' && cp <= 'Z') return cp + 32;
+    if (cp >= 0xFF21 && cp <= 0xFF3A) return cp + 32;
     if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return cp + 32;   // Latin-1 Supplement
     if (cp == 0x178) return 0xFF;                                 // Y with diaeresis
     if (cp == 0x130) return 'i';                                  // I with dot above
@@ -148,7 +154,14 @@ char accent_base(uint32_t cp) {
     return 0;
 }
 
-bool is_combining_mark(uint32_t cp) { return cp >= 0x300 && cp <= 0x36F; }
+bool is_combining_mark(uint32_t cp) {
+    static const uint32_t r[][2] = {
+        {0x300, 0x36F}, {0x180B, 0x180D}, {0x1AB0, 0x1ABD}, {0x1DC0, 0x1DF5}, {0x1DFC, 0x1DFF},
+        {0x20D0, 0x20DC}, {0x20E1, 0x20E1}, {0x20E5, 0x20F0}, {0x302A, 0x302D}, {0x3099, 0x309A},
+        {0xFE00, 0xFE0F}, {0xFE20, 0xFE2F}, {0xE0100, 0xE01EF},
+    };
+    return cp >= 0x300 && in_ranges(cp, r);
+}
 
 } // namespace
 
@@ -190,14 +203,32 @@ bool BertTokenizer::load_file(const std::string& vocab_path) {
 // ------------------------------------------------------------- encode -------
 std::vector<int> BertTokenizer::pieces(const std::string& text) const {
     // BasicTokenizer: clean, pad CJK, then split on whitespace.
+    static const char* const specials[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"};
+    const uint32_t special = 0x110000;
     std::vector<uint32_t> cps;
     cps.reserve(text.size());
-    for (uint32_t cp : utf8_decode(text)) {
-        if (cp == 0 || cp == 0xFFFD || is_control(cp)) continue;
-        if (is_whitespace(cp)) { cps.push_back(' '); continue; }
-        if (is_cjk(cp)) { cps.push_back(' '); cps.push_back(cp); cps.push_back(' '); continue; }
-        cps.push_back(cp);
+    auto clean = [&](const std::string& part) {
+        for (uint32_t cp : utf8_decode(part)) {
+            if (cp == 0xFFFD || is_control(cp)) continue;
+            if (is_whitespace(cp)) { cps.push_back(' '); continue; }
+            if (is_cjk(cp)) { cps.push_back(' '); cps.push_back(cp); cps.push_back(' '); continue; }
+            cps.push_back(cp);
+        }
+    };
+    size_t done = 0;
+    for (size_t i = text.find('['); i != std::string::npos; i = text.find('[', i + 1)) {
+        for (const char* sp : specials) {
+            const size_t n = std::strlen(sp);
+            if (text.compare(i, n, sp) != 0) continue;
+            auto it = vocab.find(sp);
+            if (it == vocab.end()) continue;
+            clean(text.substr(done, i - done));
+            cps.push_back(special + (uint32_t)it->second);
+            done = i + n;
+            break;
+        }
     }
+    clean(text.substr(done));
 
     std::vector<int> ids;
     std::vector<std::string> words;      // one word, then its punctuation splits
@@ -211,6 +242,13 @@ std::vector<int> BertTokenizer::pieces(const std::string& text) const {
             uint32_t cp = lower_case ? to_lower(raw) : raw;
             if (lower_case) {
                 if (is_combining_mark(cp)) continue;
+                if (cp >= 0xAC00 && cp <= 0xD7A3) {
+                    const uint32_t s = cp - 0xAC00;
+                    utf8_append(cur, 0x1100 + s / 588);
+                    utf8_append(cur, 0x1161 + s % 588 / 28);
+                    if (s % 28) utf8_append(cur, 0x11A7 + s % 28);
+                    continue;
+                }
                 const char base = accent_base(cp);
                 if (base) cp = (uint32_t)(unsigned char)base;
             }
@@ -254,7 +292,8 @@ std::vector<int> BertTokenizer::pieces(const std::string& text) const {
 
     for (uint32_t cp : cps) {
         if (cp == ' ') flush_word();
-        else           word.push_back(cp);
+        else if (cp >= special) { flush_word(); ids.push_back((int)(cp - special)); }
+        else word.push_back(cp);
     }
     flush_word();
     return ids;
