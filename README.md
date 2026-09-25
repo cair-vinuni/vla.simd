@@ -44,29 +44,37 @@ The policies evaluated in the paper are published as GGUF in the
 [vla.simd model bundle](https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31)
 on the Hugging Face Hub:
 
-| policy | checkpoints |
-| --- | --- |
-| ACT | [act-so101-multi-task-gguf](https://huggingface.co/khanhnd61/act-so101-multi-task-gguf) |
-| IMPACT | [impact-so101-multi-task-gguf](https://huggingface.co/khanhnd61/impact-so101-multi-task-gguf) (its `impact-int8-*` file was trained for W8A8: serve it with `--int8 63`), [impact-so101-long-gguf](https://huggingface.co/khanhnd61/impact-so101-long-gguf), [impact-libero-gguf](https://huggingface.co/khanhnd61/impact-libero-gguf) |
-| SmolVLA | [smolvla-so101-multi-task-gguf](https://huggingface.co/khanhnd61/smolvla-so101-multi-task-gguf), [smolvla-so101-long-gguf](https://huggingface.co/khanhnd61/smolvla-so101-long-gguf) |
-| Octo | [octo-small-so101-multi-task-gguf](https://huggingface.co/khanhnd61/octo-small-so101-multi-task-gguf), [octo-small-so101-long-gguf](https://huggingface.co/khanhnd61/octo-small-so101-long-gguf) |
-| TurboVLA | [vrfai/turbovla-libero-gguf](https://huggingface.co/vrfai/turbovla-libero-gguf) (vla.cpp's, see below) |
+| policy | long | multi-task |
+| --- | --- | --- |
+| ACT | | [act-so101-multi-task-gguf](https://huggingface.co/khanhnd61/act-so101-multi-task-gguf) |
+| IMPACT | [impact-so101-long-gguf](https://huggingface.co/khanhnd61/impact-so101-long-gguf) | [impact-so101-multi-task-gguf](https://huggingface.co/khanhnd61/impact-so101-multi-task-gguf) (its `impact-int8-*` file was trained for W8A8: serve it with `--int8 63`) |
+| SmolVLA | [smolvla-so101-long-gguf](https://huggingface.co/khanhnd61/smolvla-so101-long-gguf) | [smolvla-so101-multi-task-gguf](https://huggingface.co/khanhnd61/smolvla-so101-multi-task-gguf) |
+| Octo | [octo-small-so101-long-gguf](https://huggingface.co/khanhnd61/octo-small-so101-long-gguf) | [octo-small-so101-multi-task-gguf](https://huggingface.co/khanhnd61/octo-small-so101-multi-task-gguf) |
+
+IMPACT on LIBERO (spatial, object, goal, 10) is [impact-libero-gguf](https://huggingface.co/khanhnd61/impact-libero-gguf).
 
 ## Serve
 
-Serving is one environment for every policy, and the only one the robot needs.
-Installing the package builds the engine:
+A rollout has two parts: the vla.simd server loads a GGUF checkpoint and serves
+actions on the CPU, and lerobot's client drives the robot against it. They run
+on the same machine or on two; only the client talks to the robot.
+
+### 1. Start the server
+
+One environment serves every policy. Installing the package builds the engine:
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
 uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
-One `vla-simd-serve` serves every policy (ACT, IMPACT, SmolVLA, Octo, TurboVLA
-and Diffusion Policy) from its GGUF; `--model` picks which, and `$CORES` is the
-OpenMP thread count. `--model-dir` is a `.gguf` file, a
-directory holding exactly one, or `hf://<user>/<repo>[@<revision>]`, with
-`/<file>.gguf` appended when the repo holds several:
+`vla-simd-serve` loads the GGUF and listens for the client. `--model` names the
+policy (`act`, `impact`, `smolvla`, `octo`, `turbovla` or `diffusion`), and
+`--model-dir` is the checkpoint: a `.gguf` file, a directory holding exactly
+one, or `hf://<user>/<repo>[@<revision>]` with `/<file>.gguf` appended when the
+repo holds several. The GGUF carries the weights, tokenizer, normalization
+statistics and camera order, so nothing else is needed. `$CORES` is the OpenMP
+thread count:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
@@ -76,8 +84,8 @@ OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model impact --port 8080 \
     --task "put the tape into the box"
 ```
 
-The GGUF carries the weights, tokenizer, normalization statistics and camera
-order, so nothing else is needed.
+Add `--host 0.0.0.0` when the client runs on another machine (the default,
+127.0.0.1, keeps the port local). Per policy:
 
 | `--model` | notes |
 | --- | --- |
@@ -86,8 +94,38 @@ order, so nothing else is needed.
 | `octo` | add `--cams front,wrist`, the robot's camera names, primary first; the GGUF records none. `--cams front` serves a robot without a wrist camera |
 | `diffusion` | prefix `DP_SCHEDULER=DDIM DP_STEPS=10`; the 2-frame history is assembled from the stream |
 
+### 2. Run the rollout client
+
+The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
+so the robot side is lerobot's own async client, `lerobot-vla-simd`, from the
+[lerobot fork](https://github.com/khanhnd61-vr/lerobot). Install it into
+`.serve`, or into any Python 3.12 venv on the robot's machine:
+
+```sh
+uv pip install --python .serve \
+    'lerobot[async,feetech] @ git+https://github.com/khanhnd61-vr/lerobot@4b33b84296c0880ebce778d69f16a38d33825575'
+```
+
+Then, with the server running, drive the robot. `--policy_type` matches the
+server's `--model`, and `--server_address` is where the server listens:
+
+```sh
+.serve/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 --policy_type=impact \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 --robot.id=my_arm \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --actions_per_chunk=50 \
+    --task="put the tape into the box"
+```
+
 Octo and Diffusion Policy see consecutive frames only if the client sends every
-frame, so run the client with `--chunk_size_threshold=1.0` for them.
+frame, so run the client with `--chunk_size_threshold=1.0` for them, and
+`--actions_per_chunk=4` for Octo, whose chunk is 4 actions.
+`--replay.repo_id=<user>/<dataset>` in place of the `--robot.*` flags checks a
+server with no robot attached: it sends recorded frames and prints the returned
+actions next to the recorded ones.
+
+### Server options
 
 `--bench N` (or `--soak SEC`; `--json` for JSON output) times N queries after
 warmup and exits, reporting the backend it ran on.
@@ -103,49 +141,10 @@ warmup and exits, reporting the backend it ran on.
 | `TCPU_ZEN=0`, `TCPU_ZEN=1` | force the Intel or the AMD Zen attention layout on x86; the default follows the CPU vendor |
 | `TCPU_BF16_MLP=1`, `TCPU_BF16_DEQ=0` | bf16 MLP weights on the Pi; keep bf16 checkpoint weights resident on x86 |
 
-The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
-so the robot side runs lerobot unchanged except for its client,
-`lerobot-vla-simd`, which ships in the
-[lerobot fork](https://github.com/khanhnd61-vr/lerobot). It installs into
-`.serve`, or into any Python 3.12 venv on the robot when the server runs in
-Docker or on another machine:
-
-```sh
-uv pip install --python .serve \
-    'lerobot[async,feetech] @ git+https://github.com/khanhnd61-vr/lerobot@4b33b84296c0880ebce778d69f16a38d33825575'
-
-.serve/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 --policy_type=<name> \
-    --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0 --robot.id=my_arm \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
-    --actions_per_chunk=50 \
-    --task="pick up the tape"
-```
-
-### vla.cpp GGUF
-
-[vla.cpp](https://github.com/VinRobotics/vla.cpp) publishes its own GGUFs for
-SmolVLA, TurboVLA and Octo (it has no ACT, IMPACT or Diffusion Policy), and
-those load the same way:
-
-```sh
-OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
-    --model-dir hf://vrfai/smolvla-libero-gguf --task "put the bowl on the plate"
-```
-
-A vla.cpp GGUF does not carry everything the engine reads. The server fetches
-the rest once into `~/.cache/vla_simd/gguf` (under `$VLA_SIMD_CACHE` when set),
-and a file placed beside the `.gguf` takes precedence:
-
-| `--model` | from the Hub | notes |
-| --- | --- | --- |
-| `smolvla` | `tok/` (SmolVLM2-500M-Instruct) | `pos_ids shifted` in a `config.txt` beside the GGUF for a checkpoint trained with transformers 4.55-4.57 |
-| `turbovla` | `vocab.txt` (bert-base-uncased), `stats.bin` (TurboVLA's `libero_all4_stats.json`) | vla.cpp's GGUF lacks DINOv3's final norm, so the engine runs without it as vla.cpp does, and warns |
-| `octo` | nothing | set `VLA_OCTO_UNNORM_DATASET` when the GGUF has several datasets' statistics, as vla.cpp requires. `vrfai/octo-small-libero-gguf` was finetuned on the primary camera alone (its wrist tower is untrained), so serve it with `--cams primary` |
-
 ### Docker
 
-The image builds the package for the platform it is built on, x86-64 with AVX2
+The server also runs in a container; the client then connects to its published
+port as above. The image builds the package for the platform it is built on, x86-64 with AVX2
 or aarch64 (a Raspberry Pi 5):
 
 ```sh
