@@ -38,119 +38,19 @@ build.
 that way. From a checkout, `python vla_simd/policy_server.py` runs the server
 against `build/` instead.
 
-## Convert
-
-The engine loads a single `.gguf` per policy, not framework checkpoints, so every
-policy is converted once, offline. The GGUF holds the weight arenas in the
-engine's own layout plus the tokenizer, statistics and camera order, so it is
-self-contained ([tools/_gguf.py](tools/_gguf.py) describes the format). No converter runs at serve time: the server
-still installs torch for lerobot's wire types, but builds no torch model.
-
-**A torch converter must run in the environment its checkpoint was trained in**,
-not one shared venv. Five environments cover the six policies, all of them
-dependency groups in [pyproject.toml](pyproject.toml), which install without
-building the engine:
-
-| venv | install | Python | converts |
-| --- | --- | --- | --- |
-| `.lerobot` | `--group lerobot` | >=3.12 | ACT, Diffusion Policy, SmolVLA |
-| `.impact` | `--group impact` | >=3.12 | IMPACT (from the lerobot fork) |
-| `.turbovla` | `--group turbovla` | >=3.10 | TurboVLA |
-| `.octo` | `--group octo` | 3.10 or 3.11 | Octo (x86-64 or macOS) |
-| `.numpy` | `--group numpy` | >=3.10 | SmolVLA (torch-free) |
-
-Create only the one you need:
-
-```sh
-uv venv .numpy --prompt numpy                   && uv pip install --python .numpy    --group numpy
-uv venv .lerobot --prompt lerobot --python 3.12 && uv pip install --python .lerobot  --group lerobot  --torch-backend cpu
-uv venv .impact --prompt impact --python 3.12   && uv pip install --python .impact   --group impact   --torch-backend cpu
-uv venv .turbovla --prompt turbovla             && uv pip install --python .turbovla --group turbovla --torch-backend cpu
-
-# TurboVLA also needs the upstream checkout and its released checkpoint
-git clone https://github.com/H-EmbodVis/TurboVLA third_party/TurboVLA
-.turbovla/bin/hf download H-EmbodVis/TurboVLA checkpoints/libero/turbovla_libero.pth --local-dir build/turbovla_ckpt
-
-# Octo also needs the upstream checkout, installed without its own pins
-uv venv .octo --prompt octo --python 3.10 && uv pip install --python .octo --group octo
-git clone https://github.com/octo-models/octo third_party/octo
-uv pip install --python .octo -e third_party/octo --no-deps
-```
-
-Convert once per checkpoint. `--out build/<name>` writes
-`build/<name>/<name>.gguf`; a path ending in `.gguf` is used as given.
-
-```sh
-# IMPACT
-.impact/bin/python tools/convert_impact.py --ckpt <hub-id-or-dir> --out build/impact
-
-# ACT
-.lerobot/bin/python tools/convert_act.py --ckpt <hub-id-or-dir> --out build/act
-
-# Diffusion Policy
-.lerobot/bin/python tools/convert_diffusion.py --ckpt <dir> --out build/diffusion
-
-# SmolVLA, with torch or without. --pos-ids is shifted for transformers
-# 4.55-4.57 and identity otherwise (lerobot >= 0.5 trains with transformers 5)
-.lerobot/bin/python tools/convert_lerobot_ckpt.py --ckpt <dir> --out build/smolvla
-.numpy/bin/python tools/convert_hf_safetensors.py <hub-id-or-dir> build/smolvla --pos-ids identity
-
-# TurboVLA
-.turbovla/bin/python tools/convert_turbovla.py --out build/turbovla \
-    --ckpt build/turbovla_ckpt/checkpoints/libero/turbovla_libero.pth
-
-# Octo base model (the T5 tokenizer goes in the same GGUF)
-.octo/bin/python tools/convert_octo.py build/octo
-
-# Octo finetune saved by lerobot; needs a lerobot that ships
-# lerobot.policies.octo (0.6.1 does not). The frozen T5 tower comes from
-# Hugging Face t5-base, or from an Octo GGUF with --t5-from
-python tools/convert_lerobot_octo.py --ckpt <hub-id-or-dir> --out build/octo_so101
-```
-
-A converted policy is shared through the Hugging Face Hub:
-`.serve/bin/hf upload <user>/<repo> build/<name>` uploads it, and
-`--model-dir hf://<user>/<repo>` serves it from there (`@<commit>` pins a
-revision). A directory holding several GGUFs is served by the file's path.
-Directories written by earlier converters (`.meta`/`.bin`) still load.
-
-### vla.cpp GGUF
-
-SmolVLA, TurboVLA and Octo GGUFs from [vla.cpp](https://github.com/VinRobotics/vla.cpp)
-load without conversion: pass the `.gguf`, a directory holding it, or its Hub repo
-as `--model-dir`. The engine maps the GGUF's tensors onto the arenas the
-converters write, so the same checkpoint loads bit for bit the same either way
-(`tools/check_gguf.py` compares the two).
-
-```sh
-OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
-    --model-dir hf://vrfai/smolvla-libero-gguf --task "put the bowl on the plate"
-```
-
-A GGUF does not carry everything the engine reads. The server fetches the rest
-once into `~/.cache/vla_simd/gguf` (under `$VLA_SIMD_CACHE` when set), and a file placed beside
-the `.gguf` takes precedence:
-
-| `--model` | from the Hub | notes |
-| --- | --- | --- |
-| `smolvla` | `tok/` (SmolVLM2-500M-Instruct) | `pos_ids shifted` in a `config.txt` beside the GGUF for a checkpoint trained with transformers 4.55-4.57 |
-| `turbovla` | `vocab.txt` (bert-base-uncased), `stats.bin` (TurboVLA's `libero_all4_stats.json`) | vla.cpp's GGUF lacks DINOv3's final norm, so the engine runs without it as vla.cpp does, and warns |
-| `octo` | nothing | set `VLA_OCTO_UNNORM_DATASET` when the GGUF has several datasets' statistics, as vla.cpp requires. `vrfai/octo-small-libero-gguf` was finetuned on the primary camera alone (its wrist tower is untrained), so serve it with `--cams primary` |
-
-`build/vla-simd-gguf info <file>` prints what a GGUF holds, and
-`build/vla-simd-gguf extract <file> <dir>` writes the converted directory it loads as.
-
 ## Checkpoints
 
-The policies evaluated in the paper are public on the Hugging Face Hub:
+The policies evaluated in the paper are published as GGUF in the
+[vla.simd model bundle](https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31)
+on the Hugging Face Hub:
 
 | policy | checkpoints |
 | --- | --- |
-| ACT | [act-matched_so101-multi-task-clean](https://huggingface.co/khanhnd61/act-matched_so101-multi-task-clean) |
-| IMPACT | [impact_so101-multi-task-clean](https://huggingface.co/khanhnd61/impact_so101-multi-task-clean), [impact-int8_so101-multi-task-clean](https://huggingface.co/khanhnd61/impact-int8_so101-multi-task-clean) (trained for W8A8, serve with `--int8 63`), [impact_libero_spatial](https://huggingface.co/khanhnd61/impact_libero_spatial), [impact_libero_object](https://huggingface.co/khanhnd61/impact_libero_object), [impact_libero_goal](https://huggingface.co/khanhnd61/impact_libero_goal), [impact_libero_10](https://huggingface.co/khanhnd61/impact_libero_10) |
-| SmolVLA | [smolvla_so101-multi-task-clean](https://huggingface.co/khanhnd61/smolvla_so101-multi-task-clean), [smolvla-prune10_so101-multi-task-clean](https://huggingface.co/khanhnd61/smolvla-prune10_so101-multi-task-clean) |
-| Octo | [octo-small_so101-multi-task-clean](https://huggingface.co/khanhnd61/octo-small_so101-multi-task-clean), base [rail-berkeley/octo-small-1.5](https://huggingface.co/rail-berkeley/octo-small-1.5) |
-| TurboVLA | [H-EmbodVis/TurboVLA](https://huggingface.co/H-EmbodVis/TurboVLA) (LIBERO) |
+| ACT | [act-so101-multi-task-gguf](https://huggingface.co/khanhnd61/act-so101-multi-task-gguf) |
+| IMPACT | [impact-so101-multi-task-gguf](https://huggingface.co/khanhnd61/impact-so101-multi-task-gguf) (its `impact-int8-*` file was trained for W8A8: serve it with `--int8 63`), [impact-so101-long-gguf](https://huggingface.co/khanhnd61/impact-so101-long-gguf), [impact-libero-gguf](https://huggingface.co/khanhnd61/impact-libero-gguf) |
+| SmolVLA | [smolvla-so101-multi-task-gguf](https://huggingface.co/khanhnd61/smolvla-so101-multi-task-gguf), [smolvla-so101-long-gguf](https://huggingface.co/khanhnd61/smolvla-so101-long-gguf) |
+| Octo | [octo-small-so101-multi-task-gguf](https://huggingface.co/khanhnd61/octo-small-so101-multi-task-gguf), [octo-small-so101-long-gguf](https://huggingface.co/khanhnd61/octo-small-so101-long-gguf) |
+| TurboVLA | [vrfai/turbovla-libero-gguf](https://huggingface.co/vrfai/turbovla-libero-gguf) (vla.cpp's, see below) |
 
 ## Serve
 
@@ -162,22 +62,26 @@ uv venv .serve --prompt serve --python 3.12
 uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
-One `vla-simd-serve` serves every policy; `--model` picks which, `--model-dir`
-is the converted directory or its `hf://` Hub repo, and `$CORES` is the OpenMP
-thread count:
+One `vla-simd-serve` serves every policy from its GGUF; `--model` picks which,
+and `$CORES` is the OpenMP thread count. `--model-dir` is a `.gguf` file, a
+directory holding exactly one, or `hf://<user>/<repo>[@<revision>]`, with
+`/<file>.gguf` appended when the repo holds several:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
 
-OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve \
-    --model <name> --model-dir build/<name> --port 8080
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model act --port 8080 \
+    --model-dir hf://khanhnd61/act-so101-multi-task-gguf/act-so101-multi-task.gguf
 ```
+
+The GGUF carries the weights, tokenizer, normalization statistics and camera
+order, so nothing else is needed.
 
 | `--model` | notes |
 | --- | --- |
 | `impact`, `act`, `smolvla` | nothing extra |
-| `turbovla` | add `--task "<instruction>"` unless converted with one; frames consumed as given, at the checkpoint's resolution |
-| `octo` | add `--cams front,wrist`, the robot's camera names, primary first; the converter records none. `--cams front` serves a robot without a wrist camera |
+| `turbovla` | add `--task "<instruction>"` unless the GGUF records one; frames consumed as given, at the checkpoint's resolution |
+| `octo` | add `--cams front,wrist`, the robot's camera names, primary first; the GGUF records none. `--cams front` serves a robot without a wrist camera |
 | `diffusion` | prefix `DP_SCHEDULER=DDIM DP_STEPS=10`; the 2-frame history is assembled from the stream |
 
 Octo and Diffusion Policy see consecutive frames only if the client sends every
@@ -216,6 +120,26 @@ uv pip install --python .serve \
     --task="pick up the tape"
 ```
 
+### vla.cpp GGUF
+
+SmolVLA, TurboVLA and Octo GGUFs from [vla.cpp](https://github.com/VinRobotics/vla.cpp)
+load the same way:
+
+```sh
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
+    --model-dir hf://vrfai/smolvla-libero-gguf --task "put the bowl on the plate"
+```
+
+A vla.cpp GGUF does not carry everything the engine reads. The server fetches
+the rest once into `~/.cache/vla_simd/gguf` (under `$VLA_SIMD_CACHE` when set),
+and a file placed beside the `.gguf` takes precedence:
+
+| `--model` | from the Hub | notes |
+| --- | --- | --- |
+| `smolvla` | `tok/` (SmolVLM2-500M-Instruct) | `pos_ids shifted` in a `config.txt` beside the GGUF for a checkpoint trained with transformers 4.55-4.57 |
+| `turbovla` | `vocab.txt` (bert-base-uncased), `stats.bin` (TurboVLA's `libero_all4_stats.json`) | vla.cpp's GGUF lacks DINOv3's final norm, so the engine runs without it as vla.cpp does, and warns |
+| `octo` | nothing | set `VLA_OCTO_UNNORM_DATASET` when the GGUF has several datasets' statistics, as vla.cpp requires. `vrfai/octo-small-libero-gguf` was finetuned on the primary camera alone (its wrist tower is untrained), so serve it with `--cams primary` |
+
 ### Docker
 
 The image builds the package for the platform it is built on, x86-64 with AVX2
@@ -223,8 +147,9 @@ or aarch64 (a Raspberry Pi 5):
 
 ```sh
 docker build -t vla-simd .
-docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/build/act:/m:ro" vla-simd \
-    --model act --model-dir /m --host 0.0.0.0
+.serve/bin/hf download khanhnd61/act-so101-multi-task-gguf act-so101-multi-task.gguf --local-dir act
+docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/act:/m:ro" vla-simd \
+    --model act --model-dir /m/act-so101-multi-task.gguf --host 0.0.0.0
 ```
 
 `docker build --platform linux/arm64 -t vla-simd .` builds the Pi image on an

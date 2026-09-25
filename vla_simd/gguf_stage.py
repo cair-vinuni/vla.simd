@@ -144,10 +144,11 @@ def stage(path, model, cache_root=None):
     real = os.path.realpath(gguf)
     cache_root = os.path.expanduser(cache_root or os.path.join(
         os.environ.get("VLA_SIMD_CACHE", "~/.cache/vla_simd"), "gguf"))
-    stem = os.path.splitext(os.path.basename(real))[0]
+    # the GGUF's own name: in the Hub cache the real file is a hash-named blob
+    stem = os.path.splitext(os.path.basename(gguf))[0]
     out = os.path.join(cache_root, f"{stem}-{hashlib.sha1(real.encode()).hexdigest()[:10]}")
     os.makedirs(out, exist_ok=True)
-    link = os.path.join(out, os.path.basename(real))
+    link = os.path.join(out, os.path.basename(gguf))
     if os.path.islink(link) and os.readlink(link) != real:
         os.unlink(link)
     if not os.path.lexists(link):

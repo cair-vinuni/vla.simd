@@ -1081,8 +1081,8 @@ def main():
     p.add_argument("--model", choices=sorted(MODELS), default=spec.policy_type,
                    help="which policy to serve")
     p.add_argument("--model-dir", required=True,
-                   help="converted checkpoint (.meta/.bin + stats + config.txt), a vla.cpp "
-                        ".gguf, or hf://<user>/<repo>[@<revision>] for either on the Hugging Face Hub")
+                   help="a .gguf, a directory holding one, or hf://<user>/<repo>[@<revision>]"
+                        "[/<file>.gguf] on the Hugging Face Hub")
     p.add_argument("--lib", default=spec.default_lib,
                    help=f"path to {os.path.basename(spec.default_lib)}")
     # Loopback by default: the payload codec is pickle over an unauthenticated
@@ -1135,10 +1135,16 @@ def main():
         os.environ[f"{spec.policy_type.upper()}_INT8"] = str(args.int8)
 
     if args.model_dir.startswith("hf://"):
-        repo, _, rev = args.model_dir[5:].partition("@")
+        # hf://<user>/<repo>[@<revision>][/<file>.gguf]: a file picks one GGUF of
+        # several in the repo, and only that file is downloaded
+        ref, _, rev = args.model_dir[5:].partition("@")
+        rev, _, rev_file = rev.partition("/")
+        parts = ref.split("/")
+        repo, file = "/".join(parts[:2]), "/".join(parts[2:]) or rev_file
         try:
-            from huggingface_hub import snapshot_download
-            args.model_dir = snapshot_download(repo, revision=rev or None)
+            from huggingface_hub import hf_hub_download, snapshot_download
+            args.model_dir = (hf_hub_download(repo, file, revision=rev or None) if file
+                              else snapshot_download(repo, revision=rev or None))
         except Exception as e:
             sys.exit(f"--model-dir {args.model_dir}: Hub download failed ({e})")
     # a vla.cpp GGUF loads as is; stage the tokenizer/statistics it does not carry
