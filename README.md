@@ -62,16 +62,18 @@ uv venv .serve --prompt serve --python 3.12
 uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
-One `vla-simd-serve` serves every policy from its GGUF; `--model` picks which,
-and `$CORES` is the OpenMP thread count. `--model-dir` is a `.gguf` file, a
+One `vla-simd-serve` serves every policy (ACT, IMPACT, SmolVLA, Octo, TurboVLA
+and Diffusion Policy) from its GGUF; `--model` picks which, and `$CORES` is the
+OpenMP thread count. `--model-dir` is a `.gguf` file, a
 directory holding exactly one, or `hf://<user>/<repo>[@<revision>]`, with
 `/<file>.gguf` appended when the repo holds several:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
 
-OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model act --port 8080 \
-    --model-dir hf://khanhnd61/act-so101-multi-task-gguf/act-so101-multi-task.gguf
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model impact --port 8080 \
+    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf \
+    --task "put the tape into the box"
 ```
 
 The GGUF carries the weights, tokenizer, normalization statistics and camera
@@ -122,8 +124,9 @@ uv pip install --python .serve \
 
 ### vla.cpp GGUF
 
-SmolVLA, TurboVLA and Octo GGUFs from [vla.cpp](https://github.com/VinRobotics/vla.cpp)
-load the same way:
+[vla.cpp](https://github.com/VinRobotics/vla.cpp) publishes its own GGUFs for
+SmolVLA, TurboVLA and Octo (it has no ACT, IMPACT or Diffusion Policy), and
+those load the same way:
 
 ```sh
 OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
