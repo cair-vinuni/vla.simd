@@ -50,10 +50,11 @@ typedef enum {
     VLA_ERR_EXCEPTION = -3   /* a C++ exception was caught at the boundary */
 } vla_status;
 
-/* model_dir is a directory written by tools/convert_*.py. The SmolVLA, TurboVLA
- * and Octo loaders also take a vla.cpp .gguf, or a directory holding one: files
- * the GGUF does not carry (a tokenizer, statistics) are read from beside it, and
- * tok_dir may name <model.gguf>/tok, which Octo's GGUF supplies itself. */
+/* model_dir is a .gguf written by tools/convert_*.py, a directory holding
+ * exactly one, or a .meta/.bin directory from an earlier converter. tok_dir may
+ * name <model_dir>/tok, which such a GGUF carries. The SmolVLA, TurboVLA and
+ * Octo loaders also take a vla.cpp .gguf; files it does not carry (a tokenizer,
+ * statistics) are read from beside it. */
 
 /* The library's VLA_ABI_VERSION, which may differ from the caller's header. */
 VLA_API int32_t vla_abi_version(void);

@@ -6,6 +6,7 @@
 
 #include "t5_text.h"
 #include "models/arena.h"
+#include "io/files.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
@@ -22,7 +23,7 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
         return false;
     }
 
-    std::ifstream meta(dir + "/text.meta");
+    io::InFile meta(dir + "/text.meta");
     std::string key; double val;
     while (meta >> key >> val) {
         if      (key == "proj_dim"      ) cfg.proj_dim  = (int)val;
@@ -63,7 +64,7 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
 
     // vocab_map.bin: int32 per full-vocabulary id. Its length is the tell that
     // the tables belong together, so it is checked rather than trusted.
-    std::ifstream vm(dir + "/vocab_map.bin", std::ios::binary);
+    io::InFile vm(dir + "/vocab_map.bin", std::ios::binary);
     if (!vm) { std::fprintf(stderr, "impact: cannot open %s/vocab_map.bin\n", dir.c_str()); return false; }
     vm.seekg(0, std::ios::end);
     const std::streamoff bytes = vm.tellg();

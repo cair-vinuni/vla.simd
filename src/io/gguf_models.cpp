@@ -165,6 +165,7 @@ bool adapt_gguf(const Gguf& g, const Sidecar& side, Files& out, std::string& err
     if (arch == "smolvla")  return adapt_smolvla(g, side, out, err);
     if (arch == "turbovla") return adapt_turbovla(g, side, out, err);
     if (arch == "octo")     return adapt_octo(g, side, out, err);
+    if (arch == "vla-simd") return adapt_vla_simd(g, out, err);
     err = g.path() + ": GGUF architecture '" + arch +
           "' is not supported (smolvla, turbovla and octo are)";
     return false;

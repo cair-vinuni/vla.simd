@@ -38,6 +38,8 @@ bool adapt_gguf(const Gguf& g, const Sidecar& side, Files& out, std::string& err
 bool adapt_smolvla(const Gguf& g, const Sidecar& side, Files& out, std::string& err);
 bool adapt_turbovla(const Gguf& g, const Sidecar& side, Files& out, std::string& err);
 bool adapt_octo(const Gguf& g, const Sidecar& side, Files& out, std::string& err);
+// vla.simd's own GGUF (tools/_gguf.py): the converted files, stored verbatim
+bool adapt_vla_simd(const Gguf& g, Files& out, std::string& err);
 
 // ---------------------------------------------------------------------------
 // shared by the adapters

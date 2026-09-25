@@ -13,7 +13,8 @@
 
 // Read-only GGUF (v2/v3) reader: header, metadata and tensor table, with the
 // tensor data mapped rather than copied. No ggml dependency; only the element
-// types a vla.cpp checkpoint actually ships (F32, F16, BF16) can be widened.
+// types a vla.cpp checkpoint actually ships (F32, F16, BF16) can be widened,
+// and I8/I32 (vla.simd's own GGUF) are served as raw bytes.
 
 namespace tcpu {
 namespace io {
@@ -24,7 +25,7 @@ enum GgufType : uint32_t {
     GGUF_I64 = 11, GGUF_F64 = 12,
 };
 
-enum GgmlType : uint32_t { GGML_F32 = 0, GGML_F16 = 1, GGML_BF16 = 30 };
+enum GgmlType : uint32_t { GGML_F32 = 0, GGML_F16 = 1, GGML_I8 = 24, GGML_I32 = 26, GGML_BF16 = 30 };
 
 struct GgufValue {
     uint32_t type = 0;
@@ -60,6 +61,7 @@ public:
     const std::string& path() const { return file; }
 
     bool has(const std::string& key) const { return kv.count(key) != 0; }
+    std::vector<std::string> keys() const;
     const GgufValue* get(const std::string& key) const;
     std::string str(const std::string& key, const std::string& dflt = "") const;
     double num(const std::string& key, double dflt) const;

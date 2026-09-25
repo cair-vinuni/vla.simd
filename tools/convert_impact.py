@@ -4,20 +4,20 @@ Copyright 2026 Khanh D. Nguyen, Hoang M. Truong, An T. Le.
 Licensed under the Apache License, Version 2.0.
 SPDX-License-Identifier: Apache-2.0
 
-Convert a lerobot IMPACT policy to the C++ engine's arenas.
+Convert a lerobot IMPACT policy to the vla.simd GGUF the engine loads.
 
     # from a trained checkpoint
     python tools/convert_impact.py \
       --ckpt ~/work/lerobot/outputs/train/impact_so101_tape/checkpoints/last/pretrained_model \
-      --out build/impact_so101
+      --out build/impact_so101/impact_so101.gguf
 
     # random weights, for benchmarking before training finishes
-    python tools/convert_impact.py --random --out build/impact_rand
+    python tools/convert_impact.py --random --out build/impact_rand.gguf
 
 Needs the lerobot venv (torch, torchvision, transformers) and the IMPACT policy on
 the path; see lerobot/src/lerobot/policies/impact/.
 
-Outputs (out_dir/):
+Packed into one GGUF (tools/_gguf.py), as these files:
   config.txt      image size, camera order, T5 special ids
   vision.meta/bin ResNet-18 + FiLM points, every BatchNorm folded into the conv
   text.meta/bin   T5-small encoder (nn::T5Encoder layout) + text proj + text pos + FiLM head
@@ -40,6 +40,7 @@ import numpy as np
 import torch
 
 from _common import Arena, dump_detr, dump_resnet18, log, to_numpy, write_meta
+from _gguf import gguf_output
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +306,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt", help="lerobot pretrained_model directory")
     ap.add_argument("--random", action="store_true", help="random weights at --seed")
-    ap.add_argument("--out", default="build/impact")
+    ap.add_argument("--out", default="build/impact",
+                    help="output .gguf, or a dir to write <dir>/<dir>.gguf in")
     ap.add_argument("--img", default="480x640", help="HxW of the camera frames")
     ap.add_argument("--cams", default="observation.images.front,observation.images.wrist")
     ap.add_argument("--state-dim", type=int, default=6)
@@ -319,8 +321,8 @@ def main():
 
     img_h, img_w = (int(x) for x in args.img.lower().split("x"))
     cam_keys = args.cams.split(",")
-    os.makedirs(args.out, exist_ok=True)
 
+    source = args.ckpt or f"random:{args.seed}"
     if args.ckpt:
         if not os.path.isdir(args.ckpt):
             from huggingface_hub import snapshot_download
@@ -352,27 +354,28 @@ def main():
         sys.exit("the engine builds exactly [latent, state] 1-D tokens; env_state is not supported")
     log(f"converting -> {args.out}  ({img_h}x{img_w}, cams {cam_keys})")
 
-    film_after = dump_vision(sd, policy, args.out)
-    film_channels = policy.model.backbone.stage_channels if film_after else []
-    vocab_full = dump_text(policy, args.out, film_channels)
-    dump_transformer(sd, policy, args.out)
+    with gguf_output(args.out, "impact", source=source) as out:
+        film_after = dump_vision(sd, policy, out.dir)
+        film_channels = policy.model.backbone.stage_channels if film_after else []
+        vocab_full = dump_text(policy, out.dir, film_channels)
+        dump_transformer(sd, policy, out.dir)
 
-    state_dim = policy.config.robot_state_feature.shape[0]
-    action_dim = policy.config.action_feature.shape[0]
-    stats = load_dataset_stats(args.ckpt)
-    if args.ckpt and not {"observation.state", "action"} <= stats.keys():
-        sys.exit(f"no state/action mean+std in *normalizer*.safetensors under {args.ckpt}")
-    if stats:
-        log(f"  stats           dataset statistics from the checkpoint's normalizer "
-            f"({len(stats)} features)")
-    else:
-        log("  stats           IDENTITY - no normalizer found (random init?)")
-    dump_stats(stats, cam_keys, args.out, state_dim, action_dim)
-    tok = dump_tokenizer(args.out, vocab_full)
-    dump_config(args.out, img_h, img_w, [k.split(".")[-1] for k in cam_keys],
-                vocab_full, tok.unk_token_id if tok.unk_token_id is not None else 2,
-                args.instruction)
-    log(f"done -> {args.out}")
+        state_dim = policy.config.robot_state_feature.shape[0]
+        action_dim = policy.config.action_feature.shape[0]
+        stats = load_dataset_stats(args.ckpt)
+        if args.ckpt and not {"observation.state", "action"} <= stats.keys():
+            sys.exit(f"no state/action mean+std in *normalizer*.safetensors under {args.ckpt}")
+        if stats:
+            log(f"  stats           dataset statistics from the checkpoint's normalizer "
+                f"({len(stats)} features)")
+        else:
+            log("  stats           IDENTITY - no normalizer found (random init?)")
+        dump_stats(stats, cam_keys, out.dir, state_dim, action_dim)
+        tok = dump_tokenizer(out.dir, vocab_full)
+        out.layout["vocab_map.bin"] = [("I32", None)]
+        dump_config(out.dir, img_h, img_w, [k.split(".")[-1] for k in cam_keys],
+                    vocab_full, tok.unk_token_id if tok.unk_token_id is not None else 2,
+                    args.instruction)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 #include "models/diffusion/diffusion_model.h"
 #include "models/arena.h"
 #include "hal/common/env.h"
+#include "io/files.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,13 +18,15 @@ namespace tcpu {
 
 static const float kNormEps = 1e-8f;
 
-static void read_vec(std::ifstream& f, std::vector<float>& v, int n) {
+static void read_vec(std::istream& f, std::vector<float>& v, int n) {
     v.resize((size_t)n);
     f.read(reinterpret_cast<char*>(v.data()), sizeof(float)*(size_t)n);
 }
 
 bool DiffusionModel::load(const std::string& dir) {
-    std::ifstream meta(dir + "/diffusion.meta");
+    const io::Mount mount(dir);
+    if (!mount.ok()) return false;
+    io::InFile meta(dir + "/diffusion.meta");
     if (!meta) return false;
 
     std::string line;
@@ -104,7 +107,7 @@ bool DiffusionModel::load(const std::string& dir) {
     // MIN_MAX for state and action is not a stylistic difference from the other
     // policies here -- it is what puts actions in [-1, 1] and makes the
     // scheduler's clip_sample_range of 1.0 the right number.
-    std::ifstream st(dir + "/stats.bin", std::ios::binary);
+    io::InFile st(dir + "/stats.bin", std::ios::binary);
     if (!st) return false;
     read_vec(st, state_min,  cfg.state_dim);
     read_vec(st, state_max,  cfg.state_dim);

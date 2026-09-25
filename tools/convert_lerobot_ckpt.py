@@ -2,8 +2,8 @@
 """
 convert_lerobot_ckpt.py
 
-Convert a finetuned lerobot SmolVLA checkpoint into the flat .meta/.bin weight
-format of the vla.simd engine, so vla_simd/policy_server.py can run it.
+Convert a finetuned lerobot SmolVLA checkpoint into the vla.simd GGUF, so
+vla_simd/policy_server.py can run it.
 
 Same output layout as convert_hf_safetensors.py (which converts the HuggingFaceVLA
 base models), but reads the checkpoint through the lerobot factories a torch
@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+from _gguf import gguf_output
 
 try:
     import torch
@@ -102,6 +104,7 @@ def dump_vlm(vlmx, out, n_layers):
             w(ly.input_layernorm.weight).tofile(f)
             w(ly.post_attention_layernorm.weight).tofile(f)
         w(tm.norm.weight).tofile(f)                 # output norm
+        split = f.tell()
         for L in range(n_layers):                   # bf16 region: matmul weights
             ly = tm.layers[L]
             wb(ly.self_attn.q_proj.weight).tofile(f)
@@ -111,6 +114,7 @@ def dump_vlm(vlmx, out, n_layers):
             wb(ly.mlp.gate_proj.weight).tofile(f)
             wb(ly.mlp.up_proj.weight).tofile(f)
             wb(ly.mlp.down_proj.weight).tofile(f)
+    return split
 
 
 @torch.no_grad()
@@ -166,6 +170,7 @@ def dump_vit(vlmx, out, n_img_tok, hidden):
             w(ly.layer_norm2.weight).tofile(f);     w(ly.layer_norm2.bias).tofile(f)
             w(ly.mlp.fc1.bias).tofile(f);           w(ly.mlp.fc2.bias).tofile(f)
         w(vm.post_layernorm.weight).tofile(f);      w(vm.post_layernorm.bias).tofile(f)
+        split = f.tell()
         wb(vm.embeddings.patch_embedding.weight).tofile(f)   # [768,3,16,16] C-order = [768,768]
         for L in range(nl):
             ly = vm.encoder.layers[L]
@@ -177,7 +182,7 @@ def dump_vit(vlmx, out, n_img_tok, hidden):
             wb(ly.mlp.fc2.weight).tofile(f)
         wb(conn.modality_projection.proj.weight).tofile(f)
 
-    return pos_mode
+    return pos_mode, split
 
 def dump_aex(model, vlmx, cfg, out, n_layers, san):
     aex = vlmx.lm_expert
@@ -255,14 +260,14 @@ def main():
     p.add_argument("--ckpt", default=DEFAULT_CHECKPOINT,
                    help=f"Run dir, step dir, or pretrained_model dir (default: {DEFAULT_CHECKPOINT})")
     p.add_argument("--out", default=None,
-                   help="Output dir for the .meta/.bin weights (default: <checkpoint>/simd)")
+                   help="Output .gguf, or a dir to write <dir>/<dir>.gguf in "
+                        "(default: <checkpoint>/simd)")
     p.add_argument("--task", default="pick up the cup",
                    help="Instruction written to config.txt")
     args = p.parse_args()
 
     ckpt = resolve_checkpoint(args.ckpt)
     out = os.path.expanduser(args.out) if args.out else str(ckpt.parent / "simd")
-    os.makedirs(out, exist_ok=True)
 
     print(f"Loading {ckpt} on cpu ...")
     cfg = PreTrainedConfig.from_pretrained(ckpt)
@@ -296,56 +301,56 @@ def main():
         n_img_tok = vlmx.embed_image(probe).shape[1]
     print(f"  image tokens per view: {n_img_tok}")
 
-    print("Dumping weights ...")
-    dump_vlm(vlmx, out, n_layers)
-    pos_mode = dump_vit(vlmx, out, n_img_tok, hidden)
-    dump_aex(model, vlmx, cfg, out, n_layers, san)
+    with gguf_output(out, "smolvla", source=args.ckpt) as o:
+        print("Dumping weights ...")
+        vlm_split = dump_vlm(vlmx, o.dir, n_layers)
+        pos_mode, vit_split = dump_vit(vlmx, o.dir, n_img_tok, hidden)
+        o.layout["vlm.bin"] = [("F32", vlm_split), ("BF16", None)]
+        o.layout["vit.bin"] = [("F32", vit_split), ("BF16", None)]
+        o.layout["emb.bin"] = [("BF16", None)]
+        dump_aex(model, vlmx, cfg, o.dir, n_layers, san)
 
-    tm = vlmx.get_vlm_model().text_model
-    wb(tm.embed_tokens.weight).tofile(f"{out}/emb.bin")
-    with open(f"{out}/heads.bin", "wb") as f:
-        w(model.state_proj.weight).tofile(f)
-        w(model.state_proj.bias).tofile(f)
+        tm = vlmx.get_vlm_model().text_model
+        wb(tm.embed_tokens.weight).tofile(f"{o.dir}/emb.bin")
+        with open(f"{o.dir}/heads.bin", "wb") as f:
+            w(model.state_proj.weight).tofile(f)
+            w(model.state_proj.bias).tofile(f)
 
-    smean, sstd = stats_of(pre, "observation.state", "STATE")
-    amean, astd = stats_of(post, "action", "ACTION")
-    smean.tofile(f"{out}/stats_state_mean.bin"); sstd.tofile(f"{out}/stats_state_std.bin")
-    amean.tofile(f"{out}/stats_action_mean.bin"); astd.tofile(f"{out}/stats_action_std.bin")
-    print(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")
+        smean, sstd = stats_of(pre, "observation.state", "STATE")
+        amean, astd = stats_of(post, "action", "ACTION")
+        smean.tofile(f"{o.dir}/stats_state_mean.bin"); sstd.tofile(f"{o.dir}/stats_state_std.bin")
+        amean.tofile(f"{o.dir}/stats_action_mean.bin"); astd.tofile(f"{o.dir}/stats_action_std.bin")
+        print(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")
 
-    # The preprocessor's rename map, not the declared image features: a finetune
-    # declares more camera slots than the deployment path is ever fed.
-    n_views = len(camera_keys(pre, cfg))
+        # The preprocessor's rename map, not the declared image features: a finetune
+        # declares more camera slots than the deployment path is ever fed.
+        n_views = len(camera_keys(pre, cfg))
 
-    with open(f"{out}/heads.meta", "w") as f:
-        f.write(f"vocab {tm.embed_tokens.weight.shape[0]}\nhidden {hidden}\n")
-        f.write(f"max_state_dim {cfg.max_state_dim}\n")
-        f.write(f"real_state_dim {smean.shape[0]}\nreal_action_dim {amean.shape[0]}\n")
-        f.write(f"n_views {n_views}\n")
+        with open(f"{o.dir}/heads.meta", "w") as f:
+            f.write(f"vocab {tm.embed_tokens.weight.shape[0]}\nhidden {hidden}\n")
+            f.write(f"max_state_dim {cfg.max_state_dim}\n")
+            f.write(f"real_state_dim {smean.shape[0]}\nreal_action_dim {amean.shape[0]}\n")
+            f.write(f"n_views {n_views}\n")
 
-    tokenizer = pipeline_tokenizer(pre)
-    nv, nm = dump_tokenizer(tokenizer, f"{out}/tok")
-    print(f"  tokenizer {tokenizer.name_or_path}: vocab={nv} merges={nm}")
+        tokenizer = pipeline_tokenizer(pre)
+        nv, nm = dump_tokenizer(tokenizer, f"{o.dir}/tok")
+        print(f"  tokenizer {tokenizer.name_or_path}: vocab={nv} merges={nm}")
 
-    with open(f"{out}/config.txt", "w") as f:
-        f.write(f"instruction {args.task}\n")
-        f.write(f"tokenizer_max_length {cfg.tokenizer_max_length}\n")
-        f.write(f"pad_token_id {tokenizer.pad_token_id}\n")
-        f.write(f"chunk {cfg.chunk_size}\nnum_steps {cfg.num_steps}\nn_views {n_views}\n")
-        f.write(f"checkpoint {ckpt}\n")
-        # Which SigLIP position-id convention got baked into vit.bin. The embedding is
-        # dumped already gathered to patch order, so a consumer that assumes the other
-        # convention reproduces the whole vision tower wrongly with no local symptom.
-        f.write(f"pos_ids {pos_mode}\n")
-        rename = rename_map(pre)
-        for i, dst in enumerate(camera_keys(pre, cfg)):
-            f.write(f"cam{i} {dst.split('.')[-1] if '.' in dst else dst}\n")
-        for src, dst in rename.items():
-            f.write(f"rename {src.split('.')[-1]} {dst.split('.')[-1]}\n")
-
-    total = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out)
-                if os.path.isfile(os.path.join(out, f)))
-    print(f"done -> {out} ({total / 1e6:.0f} MB)")
+        with open(f"{o.dir}/config.txt", "w") as f:
+            f.write(f"instruction {args.task}\n")
+            f.write(f"tokenizer_max_length {cfg.tokenizer_max_length}\n")
+            f.write(f"pad_token_id {tokenizer.pad_token_id}\n")
+            f.write(f"chunk {cfg.chunk_size}\nnum_steps {cfg.num_steps}\nn_views {n_views}\n")
+            f.write(f"checkpoint {ckpt}\n")
+            # Which SigLIP position-id convention got baked into vit.bin. The embedding is
+            # dumped already gathered to patch order, so a consumer that assumes the other
+            # convention reproduces the whole vision tower wrongly with no local symptom.
+            f.write(f"pos_ids {pos_mode}\n")
+            rename = rename_map(pre)
+            for i, dst in enumerate(camera_keys(pre, cfg)):
+                f.write(f"cam{i} {dst.split('.')[-1] if '.' in dst else dst}\n")
+            for src, dst in rename.items():
+                f.write(f"rename {src.split('.')[-1]} {dst.split('.')[-1]}\n")
 
 
 if __name__ == "__main__":

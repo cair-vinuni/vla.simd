@@ -8,6 +8,7 @@
 #include "act_transformer.h"
 #include "nn/encoder.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -26,7 +27,7 @@ namespace tcpu {
 enum : int { I8_ATTN = 1, I8_W1 = 2, I8_W2 = 4, I8_IMGPROJ = 8, I8_DEC = 16 };
 
 bool ActTransformer::load(const std::string& dir, int img_ch, int int8_mask, bool int8_state) {
-    std::ifstream meta(dir + "/" + tag + ".meta");
+    io::InFile meta(dir + "/" + tag + ".meta");
     if (!meta) return false;
     std::string line;
     while (std::getline(meta, line)) {

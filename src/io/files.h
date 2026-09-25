@@ -10,11 +10,11 @@
 #include <string>
 
 // Model file access. The loaders read a converted directory: <dir>/<name>.meta
-// and .bin files. A vla.cpp GGUF is loaded through the same loaders by mounting
-// it: an adapter regenerates, in memory, the exact files the Python converter
-// would have written from the same checkpoint, and open() serves them under the
-// GGUF's path. A file the GGUF does not carry (a tokenizer, statistics) is read
-// from disk beside it, as a sidecar.
+// and .bin files. A GGUF is loaded through the same loaders by mounting it: an
+// adapter produces, in memory, the exact files the Python converter writes
+// (vla.simd's own GGUF stores them verbatim; a vla.cpp GGUF is re-laid out),
+// and InFile serves them under the GGUF's path. A file the GGUF does not carry
+// (a vla.cpp tokenizer, statistics) is read from disk beside it, as a sidecar.
 //
 // A model path mounts as a GGUF when it is a .gguf file, or a directory holding
 // exactly one .gguf and no .meta files. Anything else is a plain directory.

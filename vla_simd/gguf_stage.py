@@ -19,6 +19,9 @@ such as a Hub snapshot works too.
 
 A sidecar already beside the GGUF wins over a generated one, so a checkpoint
 with its own statistics or tokenizer just ships them next to it.
+
+A vla.simd GGUF (tools/_gguf.py) carries everything; staging only puts its
+config.txt on disk, where the server reads the camera order and instruction.
 """
 
 import hashlib
@@ -131,12 +134,16 @@ def stage(path, model, cache_root=None):
         return path
     meta = read_metadata(gguf)
     arch = meta.get("general.architecture")
+    own = arch == "vla-simd"
+    if own:                                      # tools/_gguf.py: self-contained
+        arch = meta.get("vla_simd.model")
     if arch != model:
-        raise SystemExit(f"{gguf} is a vla.cpp '{arch}' GGUF, not {model} (pass --model {arch})")
+        raise SystemExit(f"{gguf} is a{' vla.simd' if own else ' vla.cpp'} '{arch}' GGUF, "
+                         f"not {model} (pass --model {arch})")
 
     real = os.path.realpath(gguf)
-    cache_root = os.path.expanduser(
-        cache_root or os.environ.get("VLA_SIMD_CACHE", "~/.cache/vla_simd/gguf"))
+    cache_root = os.path.expanduser(cache_root or os.path.join(
+        os.environ.get("VLA_SIMD_CACHE", "~/.cache/vla_simd"), "gguf"))
     stem = os.path.splitext(os.path.basename(real))[0]
     out = os.path.join(cache_root, f"{stem}-{hashlib.sha1(real.encode()).hexdigest()[:10]}")
     os.makedirs(out, exist_ok=True)
@@ -157,6 +164,12 @@ def stage(path, model, cache_root=None):
         return not os.path.exists(os.path.join(out, name))
 
     config = []
+    if own:
+        # everything is inside; the server itself reads config.txt from disk
+        if missing("config.txt"):
+            with open(os.path.join(out, "config.txt"), "w", encoding="utf-8") as f:
+                f.write(meta.get("vla_simd.file.config.txt", ""))
+        return out
     if arch == "smolvla":
         if missing("tok"):
             pad = _smolvla_tokenizer(os.path.join(out, "tok"), SMOLVLA_TOKENIZER)

@@ -102,6 +102,8 @@ size_t type_bytes(uint32_t type) {
         case GGML_F32:  return 4;
         case GGML_F16:  return 2;
         case GGML_BF16: return 2;
+        case GGML_I8:   return 1;
+        case GGML_I32:  return 4;
         default:        return 0;
     }
 }
@@ -209,6 +211,12 @@ bool Gguf::open(const std::string& path) {
     return true;
 }
 
+std::vector<std::string> Gguf::keys() const {
+    std::vector<std::string> out;
+    for (const auto& kv_ : kv) out.push_back(kv_.first);
+    return out;
+}
+
 const GgufValue* Gguf::get(const std::string& key) const {
     auto it = kv.find(key);
     return it == kv.end() ? nullptr : &it->second;
@@ -231,7 +239,7 @@ const GgufTensor* Gguf::tensor(const std::string& name) const {
 
 bool tensor_f32(const GgufTensor& t, std::vector<float>& out, std::string& err) {
     const size_t n = (size_t)t.numel();
-    if (!t.data) {
+    if (!t.data || t.type == GGML_I8 || t.type == GGML_I32) {
         err = t.name + ": element type " + std::to_string(t.type) +
               " is not supported (F32, F16 and BF16 are)";
         return false;

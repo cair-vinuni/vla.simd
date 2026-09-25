@@ -8,6 +8,7 @@
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
 #include "nn/encoder.h"
+#include "io/files.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +19,9 @@ using std::size_t;
 namespace tcpu {
 
 bool ActModel::load(const std::string& dir) {
-    std::ifstream cfgf(dir + "/config.txt");
+    const io::Mount mount(dir);
+    if (!mount.ok()) return false;
+    io::InFile cfgf(dir + "/config.txt");
     if (!cfgf) return false;
     std::string line;
     cam_names.clear();
@@ -54,7 +57,7 @@ bool ActModel::load(const std::string& dir) {
                                 hal::env::int_env("ACT_I8_CONV_TO", -1));
     if (!tf.load(dir, backbone.out_channels(), i8)) return false;
 
-    std::ifstream st(dir + "/stats.bin", std::ios::binary);
+    io::InFile st(dir + "/stats.bin", std::ios::binary);
     if (!st) return false;
     const int sd = tf.cfg.state_dim;
     const int ad = tf.cfg.action_dim;

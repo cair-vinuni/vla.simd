@@ -40,8 +40,10 @@ against `build/` instead.
 
 ## Convert
 
-The engine loads flat `.meta`/`.bin` arenas, not framework checkpoints, so every
-policy is converted once, offline. No converter runs at serve time: the server
+The engine loads a single `.gguf` per policy, not framework checkpoints, so every
+policy is converted once, offline. The GGUF holds the weight arenas in the
+engine's own layout plus the tokenizer, statistics and camera order, so it is
+self-contained ([tools/_gguf.py](tools/_gguf.py) describes the format). No converter runs at serve time: the server
 still installs torch for lerobot's wire types, but builds no torch model.
 
 **A torch converter must run in the environment its checkpoint was trained in**,
@@ -75,7 +77,8 @@ git clone https://github.com/octo-models/octo third_party/octo
 uv pip install --python .octo -e third_party/octo --no-deps
 ```
 
-Convert once per checkpoint:
+Convert once per checkpoint. `--out build/<name>` writes
+`build/<name>/<name>.gguf`; a path ending in `.gguf` is used as given.
 
 ```sh
 # IMPACT
@@ -96,19 +99,20 @@ Convert once per checkpoint:
 .turbovla/bin/python tools/convert_turbovla.py --out build/turbovla \
     --ckpt build/turbovla_ckpt/checkpoints/libero/turbovla_libero.pth
 
-# Octo base model and tokenizer
+# Octo base model (the T5 tokenizer goes in the same GGUF)
 .octo/bin/python tools/convert_octo.py build/octo
-.octo/bin/python tools/convert_t5_tokenizer.py build/octo/tok
 
 # Octo finetune saved by lerobot; needs a lerobot that ships
-# lerobot.policies.octo (0.6.1 does not)
-python tools/convert_lerobot_octo.py --ckpt <hub-id-or-dir> --t5-from build/octo --out build/octo_so101
+# lerobot.policies.octo (0.6.1 does not). The frozen T5 tower comes from
+# Hugging Face t5-base, or from an Octo GGUF with --t5-from
+python tools/convert_lerobot_octo.py --ckpt <hub-id-or-dir> --out build/octo_so101
 ```
 
-A converted directory is shared through the Hugging Face Hub:
+A converted policy is shared through the Hugging Face Hub:
 `.serve/bin/hf upload <user>/<repo> build/<name>` uploads it, and
 `--model-dir hf://<user>/<repo>` serves it from there (`@<commit>` pins a
-revision).
+revision). A directory holding several GGUFs is served by the file's path.
+Directories written by earlier converters (`.meta`/`.bin`) still load.
 
 ### vla.cpp GGUF
 
@@ -124,7 +128,7 @@ OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
 ```
 
 A GGUF does not carry everything the engine reads. The server fetches the rest
-once into `~/.cache/vla_simd/gguf` (`$VLA_SIMD_CACHE`), and a file placed beside
+once into `~/.cache/vla_simd/gguf` (under `$VLA_SIMD_CACHE` when set), and a file placed beside
 the `.gguf` takes precedence:
 
 | `--model` | from the Hub | notes |

@@ -136,7 +136,8 @@ add_library(tcpu_io STATIC
   src/io/gguf_models.cpp
   src/io/gguf_smolvla.cpp
   src/io/gguf_turbovla.cpp
-  src/io/gguf_octo.cpp)
+  src/io/gguf_octo.cpp
+  src/io/gguf_vla_simd.cpp)
 target_link_libraries(tcpu_io PUBLIC vla_flags)
 
 add_library(tcpu_ops STATIC

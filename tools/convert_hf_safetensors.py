@@ -2,20 +2,20 @@
 """
 convert_hf_safetensors.py
 
-Convert a lerobot SmolVLA checkpoint into the vla.simd .meta/.bin arena **without
-torch, lerobot or transformers** - it reads `model.safetensors` and the processor
+Convert a lerobot SmolVLA checkpoint into the vla.simd GGUF **without torch,
+lerobot or transformers** - it reads `model.safetensors` and the processor
 state files directly. Byte layouts are identical to
 `convert_lerobot_ckpt.py`, which is the torch-based converter and remains the
 reference; this one exists so a serving box (a Raspberry Pi, here) can convert a
 checkpoint it could never load through the training stack.
 
     python3 tools/convert_hf_safetensors.py khanhnd61/smolvla_so101_tape_prune6 \
-        build/smolvla --task "pick up the tape" --pos-ids identity
+        build/smolvla/smolvla.gguf --task "pick up the tape" --pos-ids identity
 
 Accepts a Hub id (downloaded to ~/.cache/vla_simd) or a local directory holding
 config.json / model.safetensors / policy_*.json / the two normalizer
 safetensors. The SmolVLM2 tokenizer named by the preprocessor is fetched the same
-way and flattened into <out>/tok/.
+way and flattened into the GGUF's tok/.
 
 What it must reproduce, and cannot read off the checkpoint:
 
@@ -45,6 +45,8 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
+
+from _gguf import gguf_output
 
 ROPE_BASE = 10000.0   # apply_rope's hardcoded default, NOT text_config.rope_theta
 HUB = "https://huggingface.co/{repo}/resolve/main/{path}"
@@ -208,10 +210,12 @@ def dump_vlm(st, out, cfg_text, n_layers):
             st.f32(f"{VLM}.layers.{L}.input_layernorm.weight").tofile(f)
             st.f32(f"{VLM}.layers.{L}.post_attention_layernorm.weight").tofile(f)
         st.f32(f"{VLM}.norm.weight").tofile(f)      # output norm
+        split = f.tell()
         for L in range(n_layers):                   # bf16 region: matmul weights
             for name in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
                          "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"):
                 st.bf16(f"{VLM}.layers.{L}.{name}.weight").tofile(f)
+    return split
 
 
 def dump_vit(st, out, vc, n_img_tok, mm_out, pos_mode):
@@ -240,6 +244,7 @@ def dump_vit(st, out, vc, n_img_tok, mm_out, pos_mode):
                 st.f32(f"{p}.{name}").tofile(f)
         st.f32(f"{VIT}.post_layernorm.weight").tofile(f)
         st.f32(f"{VIT}.post_layernorm.bias").tofile(f)
+        split = f.tell()
         # [768,3,16,16] C-order is exactly the [768, 3*16*16] the engine GEMMs against
         st.bf16(f"{VIT}.embeddings.patch_embedding.weight").tofile(f)
         for L in range(nl):
@@ -248,6 +253,7 @@ def dump_vit(st, out, vc, n_img_tok, mm_out, pos_mode):
                          "self_attn.out_proj", "mlp.fc1", "mlp.fc2"):
                 st.bf16(f"{p}.{name}.weight").tofile(f)
         st.bf16("model.vlm_with_expert.vlm.model.connector.modality_projection.proj.weight").tofile(f)
+    return split
 
 
 def dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn, san):
@@ -312,7 +318,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("checkpoint", help="Hub id or local dir with model.safetensors")
-    p.add_argument("out", help="Output dir for the .meta/.bin weights")
+    p.add_argument("out", help="Output .gguf, or a dir to write <dir>/<dir>.gguf in")
     p.add_argument("--task", default=None,
                    help="Instruction written to config.txt (the robot's default prompt)")
     p.add_argument("--pos-ids", choices=("shifted", "identity"), required=True,
@@ -324,8 +330,6 @@ def main():
     args = p.parse_args()
 
     ckpt = resolve(args.checkpoint)
-    out = os.path.expanduser(args.out)
-    os.makedirs(out, exist_ok=True)
     log(f"Reading {ckpt}")
 
     cfg = json.loads((ckpt / "config.json").read_text())
@@ -385,60 +389,60 @@ def main():
     log(f"  views={n_views} {[c.split('.')[-1] for c in cams]} "
         f"(from {[k.split('.')[-1] for k in rename]})")
 
-    log("Dumping weights ...")
-    dump_vlm(st, out, cfg_text, n_layers)
-    dump_vit(st, out, vc, n_img_tok, hidden, args.pos_ids)
-    dump_aex(st, out, cfg, cfg_text, n_layers, expert_h, expert_ffn, san)
-    st.bf16(f"{VLM}.embed_tokens.weight").tofile(f"{out}/emb.bin")
-    with open(f"{out}/heads.bin", "wb") as f:
-        st.f32("model.state_proj.weight").tofile(f)
-        st.f32("model.state_proj.bias").tofile(f)
+    with gguf_output(args.out, "smolvla", source=args.checkpoint) as o:
+        log("Dumping weights ...")
+        vlm_split = dump_vlm(st, o.dir, cfg_text, n_layers)
+        vit_split = dump_vit(st, o.dir, vc, n_img_tok, hidden, args.pos_ids)
+        o.layout["vlm.bin"] = [("F32", vlm_split), ("BF16", None)]
+        o.layout["vit.bin"] = [("F32", vit_split), ("BF16", None)]
+        o.layout["emb.bin"] = [("BF16", None)]
+        dump_aex(st, o.dir, cfg, cfg_text, n_layers, expert_h, expert_ffn, san)
+        st.bf16(f"{VLM}.embed_tokens.weight").tofile(f"{o.dir}/emb.bin")
+        with open(f"{o.dir}/heads.bin", "wb") as f:
+            st.f32("model.state_proj.weight").tofile(f)
+            st.f32("model.state_proj.bias").tofile(f)
 
-    # ---- normalization statistics ----
-    def stats(spec, base, key, ftype):
-        step = next(s for s in spec["steps"] if s.get("state_file"))
-        mode = step["config"].get("norm_map", {}).get(ftype, "IDENTITY")
-        if mode != "MEAN_STD":
-            sys.exit(f"{key} is normalized {mode}; the engine implements MEAN_STD only")
-        n = Safetensors(base / step["state_file"])
-        return n.f32(f"{key}.mean").reshape(-1), n.f32(f"{key}.std").reshape(-1)
+        # ---- normalization statistics ----
+        def stats(spec, base, key, ftype):
+            step = next(s for s in spec["steps"] if s.get("state_file"))
+            mode = step["config"].get("norm_map", {}).get(ftype, "IDENTITY")
+            if mode != "MEAN_STD":
+                sys.exit(f"{key} is normalized {mode}; the engine implements MEAN_STD only")
+            n = Safetensors(base / step["state_file"])
+            return n.f32(f"{key}.mean").reshape(-1), n.f32(f"{key}.std").reshape(-1)
 
-    smean, sstd = stats(pre, ckpt, "observation.state", "STATE")
-    amean, astd = stats(post, ckpt, "action", "ACTION")
-    smean.tofile(f"{out}/stats_state_mean.bin"); sstd.tofile(f"{out}/stats_state_std.bin")
-    amean.tofile(f"{out}/stats_action_mean.bin"); astd.tofile(f"{out}/stats_action_std.bin")
-    log(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")
+        smean, sstd = stats(pre, ckpt, "observation.state", "STATE")
+        amean, astd = stats(post, ckpt, "action", "ACTION")
+        smean.tofile(f"{o.dir}/stats_state_mean.bin"); sstd.tofile(f"{o.dir}/stats_state_std.bin")
+        amean.tofile(f"{o.dir}/stats_action_mean.bin"); astd.tofile(f"{o.dir}/stats_action_std.bin")
+        log(f"  state stats {smean.shape[0]}-dim, action stats {amean.shape[0]}-dim")
 
-    with open(f"{out}/heads.meta", "w") as f:
-        f.write(f"vocab {st.shape(f'{VLM}.embed_tokens.weight')[0]}\nhidden {hidden}\n")
-        f.write(f"max_state_dim {cfg['max_state_dim']}\n")
-        f.write(f"real_state_dim {smean.shape[0]}\nreal_action_dim {amean.shape[0]}\n")
-        f.write(f"n_views {n_views}\n")
+        with open(f"{o.dir}/heads.meta", "w") as f:
+            f.write(f"vocab {st.shape(f'{VLM}.embed_tokens.weight')[0]}\nhidden {hidden}\n")
+            f.write(f"max_state_dim {cfg['max_state_dim']}\n")
+            f.write(f"real_state_dim {smean.shape[0]}\nreal_action_dim {amean.shape[0]}\n")
+            f.write(f"n_views {n_views}\n")
 
-    # ---- tokenizer ----
-    tok_step = next(s for s in pre["steps"] if s["registry_name"] == "tokenizer_processor")
-    tok_repo = args.tokenizer or tok_step["config"]["tokenizer_name"]
-    tok_path = Path(tok_repo).expanduser() / "tokenizer.json" if Path(tok_repo).is_dir() \
-        else fetch(tok_repo, "tokenizer.json")
-    nv, nm, tj = dump_tokenizer(tok_path, f"{out}/tok")
-    log(f"  tokenizer {tok_repo}: vocab={nv} merges={nm}")
+        # ---- tokenizer ----
+        tok_step = next(s for s in pre["steps"] if s["registry_name"] == "tokenizer_processor")
+        tok_repo = args.tokenizer or tok_step["config"]["tokenizer_name"]
+        tok_path = Path(tok_repo).expanduser() / "tokenizer.json" if Path(tok_repo).is_dir() \
+            else fetch(tok_repo, "tokenizer.json")
+        nv, nm, tj = dump_tokenizer(tok_path, f"{o.dir}/tok")
+        log(f"  tokenizer {tok_repo}: vocab={nv} merges={nm}")
 
-    task = args.task or "do the task"
-    with open(f"{out}/config.txt", "w") as f:
-        f.write(f"instruction {task}\n")
-        f.write(f"tokenizer_max_length {tok_step['config']['max_length']}\n")
-        f.write(f"pad_token_id {pad_token_id(tj)}\n")
-        f.write(f"chunk {cfg['chunk_size']}\nnum_steps {cfg['num_steps']}\nn_views {n_views}\n")
-        f.write(f"checkpoint {args.checkpoint}\n")
-        f.write(f"pos_ids {args.pos_ids}\n")
-        for i, c in enumerate(cams):
-            f.write(f"cam{i} {c.split('.')[-1]}\n")
-        for src, dst in rename.items():
-            f.write(f"rename {src.split('.')[-1]} {dst.split('.')[-1]}\n")
-
-    total = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out)
-                if os.path.isfile(os.path.join(out, f)))
-    log(f"done -> {out} ({total / 1e6:.0f} MB)")
+        task = args.task or "do the task"
+        with open(f"{o.dir}/config.txt", "w") as f:
+            f.write(f"instruction {task}\n")
+            f.write(f"tokenizer_max_length {tok_step['config']['max_length']}\n")
+            f.write(f"pad_token_id {pad_token_id(tj)}\n")
+            f.write(f"chunk {cfg['chunk_size']}\nnum_steps {cfg['num_steps']}\nn_views {n_views}\n")
+            f.write(f"checkpoint {args.checkpoint}\n")
+            f.write(f"pos_ids {args.pos_ids}\n")
+            for i, c in enumerate(cams):
+                f.write(f"cam{i} {c.split('.')[-1]}\n")
+            for src, dst in rename.items():
+                f.write(f"rename {src.split('.')[-1]} {dst.split('.')[-1]}\n")
 
 
 if __name__ == "__main__":

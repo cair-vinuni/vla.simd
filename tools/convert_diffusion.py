@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 convert_diffusion.py -- convert a lerobot Diffusion Policy checkpoint into the
-flat .meta/.bin arenas the vla.simd engine loads.
+vla.simd GGUF the engine loads.
 
     python3 tools/convert_diffusion.py \
         --ckpt ~/work/lerobot/outputs/train/dp_so101/checkpoints/last/pretrained_model \
-        --out build/diffusion_so101
+        --out build/diffusion_so101/diffusion_so101.gguf
 
     # structural export with no trained weights, for bringing a port up:
-    python3 tools/convert_diffusion.py --random-init --out build/diffusion_rand
+    python3 tools/convert_diffusion.py --random-init --out build/diffusion_rand.gguf
 
-Writes, into --out:
+Packed into one GGUF (tools/_gguf.py), as these files:
 
     diffusion.meta          shapes + sampler settings the C++ loader reads
     rgb_encoder{i}_backbone.{meta,bin}   ResNet-18
@@ -40,6 +40,7 @@ import numpy as np
 import torch
 
 from _common import Arena, dump_resnet18, linear, log, to_numpy, write_meta
+from _gguf import gguf_output
 
 
 def conv1d_rows(arena, w, b):
@@ -317,7 +318,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt")
     ap.add_argument("--random-init", action="store_true")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True,
+                    help="output .gguf, or a dir to write <dir>/<dir>.gguf in")
     ap.add_argument("--scheduler", default=None, choices=["DDPM", "DDIM"])
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
@@ -343,7 +345,6 @@ def main():
         sys.exit("give exactly one of --ckpt or --random-init")
 
     torch.manual_seed(args.seed)
-    os.makedirs(args.out, exist_ok=True)
 
     if args.random_init:
         log("building a random-init DiffusionPolicy (port validation only)")
@@ -372,16 +373,16 @@ def main():
     log(f"config: {cfg.n_obs_steps} obs x {len(cams)} cams at {img_hw[0]}x{img_hw[1]}, "
         f"horizon {cfg.horizon}, execute {cfg.n_action_steps}, {scheduler} x{steps}")
 
-    n_enc = len(cams) if cfg.use_separate_rgb_encoder_per_camera else 1
-    for i in range(n_enc):
-        prefix = f"diffusion.rgb_encoder.{i}" if cfg.use_separate_rgb_encoder_per_camera \
-            else "diffusion.rgb_encoder"
-        dump_rgb_encoder(sd, prefix, args.out, f"rgb_encoder{i}", 16 if cfg.use_group_norm else 0)
+    with gguf_output(args.out, "diffusion", source=args.ckpt or f"random:{args.seed}") as out:
+        n_enc = len(cams) if cfg.use_separate_rgb_encoder_per_camera else 1
+        for i in range(n_enc):
+            prefix = f"diffusion.rgb_encoder.{i}" if cfg.use_separate_rgb_encoder_per_camera \
+                else "diffusion.rgb_encoder"
+            dump_rgb_encoder(sd, prefix, out.dir, f"rgb_encoder{i}", 16 if cfg.use_group_norm else 0)
 
-    dump_unet(sd, args.out, cfg)
-    dump_stats(stats, cams, args.out)
-    dump_meta(cfg, cams, img_hw, args.out, scheduler, steps)
-    log(f"wrote {args.out}")
+        dump_unet(sd, out.dir, cfg)
+        dump_stats(stats, cams, out.dir)
+        dump_meta(cfg, cams, img_hw, out.dir, scheduler, steps)
 
 
 if __name__ == "__main__":

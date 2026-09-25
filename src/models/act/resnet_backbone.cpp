@@ -9,6 +9,7 @@
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include "nn/encoder.h"
+#include "io/files.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
@@ -45,7 +46,7 @@ struct StageTimer {
 } // namespace
 
 bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
-    std::ifstream meta(dir + "/" + name + ".meta");
+    io::InFile meta(dir + "/" + name + ".meta");
     if (!meta) return false;
 
     struct BlockMeta { int cin, cout, stride, has_down; };

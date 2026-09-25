@@ -152,6 +152,7 @@ InFile::InFile(const std::string& path, std::ios::openmode mode) : std::istream(
             buf = std::make_unique<BytesBuf>(f->second);
             if (f->second->size() >= kConsumeBytes) m.files.erase(f);
             rdbuf(buf.get());
+            if (mode & std::ios::ate) seekg(0, std::ios::end);
             return;
         }
     }

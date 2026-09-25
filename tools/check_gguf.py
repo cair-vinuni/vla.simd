@@ -4,8 +4,8 @@ Copyright 2026 Khanh D. Nguyen, Hoang M. Truong, An T. Le.
 Licensed under the Apache License, Version 2.0.
 SPDX-License-Identifier: Apache-2.0
 
-Check a vla.cpp GGUF against the directory vla.simd's own converter writes
-from the same upstream checkpoint:
+Check a GGUF (vla.cpp's, or vla.simd's own) against a converted directory,
+e.g. the one an earlier vla.simd converter wrote from the same checkpoint:
 
   python tools/check_gguf.py <model.gguf | dir> <converted-dir> [--vla-simd-gguf PATH]
 
