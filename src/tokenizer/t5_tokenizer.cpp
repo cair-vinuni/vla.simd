@@ -6,6 +6,7 @@
 
 #include "t5_tokenizer.h"
 #include "bert_tokenizer.h"
+#include "io/files.h"
 #include <fstream>
 #include <limits>
 
@@ -38,7 +39,7 @@ static bool is_space(uint32_t cp) {
 }
 
 bool T5Tokenizer::load(const std::string& dir) {
-    std::ifstream f(dir + "/vocab.txt");
+    io::InFile f(dir + "/vocab.txt");
     if (!f) return false;
 
     std::string line;

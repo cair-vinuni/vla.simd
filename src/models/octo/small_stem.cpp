@@ -7,6 +7,7 @@
 #include "../arena.h"
 #include "small_stem.h"
 #include "ops/conv_ops.h"
+#include "io/files.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,7 +17,7 @@
 namespace tcpu {
 
 bool SmallStem::load(const std::string& dir, const std::string& name) {
-    std::ifstream meta(dir + "/" + name + ".meta");
+    io::InFile meta(dir + "/" + name + ".meta");
     if (!meta) return false;
     std::string line;
     while (std::getline(meta, line)) {

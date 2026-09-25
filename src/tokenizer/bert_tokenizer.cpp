@@ -5,6 +5,7 @@
  */
 
 #include "bert_tokenizer.h"
+#include "io/files.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -168,7 +169,7 @@ bool is_combining_mark(uint32_t cp) {
 // ---------------------------------------------------------------- load ------
 bool BertTokenizer::load(const std::string& dir) {
     const std::string vocab_path = dir + "/vocab.txt";
-    std::ifstream f(vocab_path);
+    io::InFile f(vocab_path);
     if (!f) {
         std::fprintf(stderr, "bert tokenizer: cannot open %s\n", vocab_path.c_str());
         return false;

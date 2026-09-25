@@ -7,6 +7,7 @@
 #include "turbovla_model.h"
 #include "models/arena.h"
 #include "nn/encoder.h"
+#include "io/files.h"
 #include <array>
 #include <cstddef>
 #include <cstdio>
@@ -31,7 +32,9 @@ struct Profile {
 } // namespace
 
 bool TurboVlaModel::load(const std::string& dir) {
-    std::ifstream meta(dir + "/config.meta");
+    const io::Mount mount(dir);
+    if (!mount.ok()) return false;
+    io::InFile meta(dir + "/config.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/config.meta\n", dir.c_str()); return false; }
     std::string line;
     while (std::getline(meta, line)) {
@@ -116,7 +119,7 @@ bool TurboVlaModel::load(const std::string& dir) {
     // text_pad.txt: "<length>\t<instruction>" per line. Optional - without it
     // every instruction uses config.meta's text_pad, which is what the reference
     // does for an instruction outside the table.
-    std::ifstream pads(dir + "/text_pad.txt");
+    io::InFile pads(dir + "/text_pad.txt");
     if (pads) {
         while (std::getline(pads, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();

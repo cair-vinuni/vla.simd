@@ -20,7 +20,7 @@ Outputs (default build/octo/):
   stem_wrist.meta/.bin        conv b, gn scale, gn bias ; then embed w [512,384], b)
   octo.meta / octo.bin       projections, pos embeddings, 12 encoder blocks, final ln
   head.meta / head.bin       diffusion score net + beta schedule
-  stats_action_{mean,std,mask}.bin   bridge_dataset action stats [7]
+  stats_action_{mean,std,mask}.bin   action stats of --dataset [7]
 """
 import argparse
 import os
@@ -33,6 +33,10 @@ _p = argparse.ArgumentParser(description=__doc__,
 _p.add_argument("out", nargs="?", default="build/octo", help="output dir (default: build/octo)")
 _p.add_argument("--ckpt", default=os.environ.get("OCTO_CKPT", "hf://rail-berkeley/octo-small-1.5"),
                 help="hub id or local dir (default: $OCTO_CKPT, else the released octo-small-1.5)")
+_p.add_argument("--dataset", default="bridge_dataset",
+                help="dataset_statistics key to un-normalize with (default: bridge_dataset)")
+_p.add_argument("--window", type=int, default=2,
+                help="observation window the checkpoint was trained with (default: 2)")
 _p.add_argument("--inspect", action="store_true", help="print the param tree and exit")
 _a = _p.parse_args()
 
@@ -76,7 +80,7 @@ if INSPECT:
     sys.exit(0)
 
 INSTRUCTION = "pick up the black bowl"
-W = 2  # window size
+W = _a.window
 
 
 def f32(x):
@@ -108,8 +112,8 @@ betas = cosine_beta_schedule(STEPS).astype(np.float32)
 alphas = (1.0 - betas).astype(np.float32)
 alpha_hats = np.cumprod(alphas).astype(np.float32)
 
-# bridge_dataset action statistics, which the engine un-normalizes with
-stats = model.dataset_statistics["bridge_dataset"]["action"]
+# action statistics of the dataset the engine un-normalizes with
+stats = model.dataset_statistics[_a.dataset]["action"]
 amean, astd = f32(stats["mean"]), f32(stats["std"])
 amask = f32(np.asarray(stats.get("mask", np.ones_like(amean, bool)), np.float32))
 amean.tofile(f"{OUT}/stats_action_mean.bin")
@@ -252,6 +256,6 @@ with open(f"{OUT}/head.bin", "wb") as f:
 
 with open(f"{OUT}/config.txt", "w") as f:
     f.write(f"instruction {INSTRUCTION}\nwindow {W}\nsteps {STEPS}\n")
-    f.write("dataset bridge_dataset\n")
+    f.write(f"dataset {_a.dataset}\n")
 
 print(f"done -> {OUT}")

@@ -7,6 +7,7 @@
 #include "../arena.h"
 #include "octo_transformer.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -15,7 +16,7 @@
 namespace tcpu {
 
 bool OctoTransformer::load(const std::string& dir) {
-    std::ifstream meta(dir + "/octo.meta");
+    io::InFile meta(dir + "/octo.meta");
     if (!meta) return false;
     std::string key;
     double val;

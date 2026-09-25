@@ -17,7 +17,9 @@
 #include "models/smolvla/smolvla_model.h"
 #include "preprocess/image.h"
 #include "tokenizer/tokenizer.h"
+#include "io/files.h"
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -44,7 +46,7 @@ struct Handle {
 // after which no key ever matched and these settings silently kept their
 // defaults. The Python readers (vla_simd/, tools/) already split this way.
 void read_config(const std::string& dir, Handle* hh) {
-    std::ifstream f(dir + "/config.txt");
+    tcpu::io::InFile f(dir + "/config.txt");
     if (!f) return;
     std::string line;
     while (std::getline(f, line)) {
@@ -70,8 +72,16 @@ extern "C" {
 
 void* vla_smolvla_load(const char* model_dir, const char* tok_dir) try {
     if (!model_dir || !tok_dir) return nullptr;
+    // Held across the model, the tokenizer and config.txt: a GGUF's sidecars
+    // (tok/, config.txt) resolve through it.
+    const tcpu::io::Mount mount(model_dir);
+    if (!mount.ok()) return nullptr;
     auto hh = std::make_unique<Handle>();
-    if (!hh->m.load(model_dir) || !hh->tok.load(tok_dir)) return nullptr;
+    if (!hh->m.load(model_dir)) return nullptr;
+    if (!hh->tok.load(tok_dir)) {
+        std::fprintf(stderr, "smolvla: cannot load the tokenizer from %s (vocab.txt, merges.txt)\n", tok_dir);
+        return nullptr;
+    }
     read_config(model_dir, hh.get());
     return hh.release();
 } catch (...) {

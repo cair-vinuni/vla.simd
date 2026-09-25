@@ -9,6 +9,7 @@
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -50,9 +51,11 @@ enum : int { I8_VIT_ATTN = 1, I8_VIT_W1 = 2, I8_VIT_W2 = 4, I8_VIT_STEM = 8,
 } // namespace
 
 bool SmolvlaModel::load(const std::string& dir) {
+    const io::Mount mount(dir);
+    if (!mount.ok()) return false;
     if (!vit.load(dir) || !vlm.load(dir) || !aex.load(dir)) return false;
 
-    std::ifstream meta(dir + "/heads.meta");
+    io::InFile meta(dir + "/heads.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/heads.meta\n", dir.c_str()); return false; }
     std::string k; float v;
     while (meta >> k >> v) {
@@ -62,6 +65,7 @@ bool SmolvlaModel::load(const std::string& dir) {
         else if (k == "real_state_dim") real_state_dim = (int)v;
         else if (k == "real_action_dim") real_action_dim = (int)v;
         else if (k == "n_views") n_views = (int)v;
+        else if (k == "norm_eps") norm_eps = v;
     }
     // A renamed key or a non-numeric value ends the loop early and leaves these
     // at 0; every read below then asks for 0 bytes, succeeds, and returns a live
@@ -78,12 +82,12 @@ bool SmolvlaModel::load(const std::string& dir) {
         return false;
     }
 
-    { std::ifstream f(dir + "/emb.bin", std::ios::binary);
+    { io::InFile f(dir + "/emb.bin", std::ios::binary);
       if (!f) { std::fprintf(stderr, "smolvla: cannot open %s/emb.bin\n", dir.c_str()); return false; }
       emb.resize((size_t)vocab * hidden);
       f.read(reinterpret_cast<char*>(emb.data()), emb.size() * sizeof(uint16_t));
       if (!f) return false; }
-    { std::ifstream f(dir + "/heads.bin", std::ios::binary);
+    { io::InFile f(dir + "/heads.bin", std::ios::binary);
       if (!f) { std::fprintf(stderr, "smolvla: cannot open %s/heads.bin\n", dir.c_str()); return false; }
       state_w.resize((size_t)hidden * max_state_dim); state_b.resize(hidden);
       f.read(reinterpret_cast<char*>(state_w.data()), state_w.size() * sizeof(float));

@@ -7,6 +7,7 @@
 #include "smollm2_lm.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -15,7 +16,7 @@
 namespace tcpu {
 
 bool SmollmVlm::load(const std::string& dir) {
-    std::ifstream meta(dir + "/vlm.meta");
+    io::InFile meta(dir + "/vlm.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/vlm.meta\n", dir.c_str()); return false; }
     std::string key; float val;
     while (meta >> key >> val) {
@@ -35,7 +36,7 @@ bool SmollmVlm::load(const std::string& dir) {
                              + (size_t)F*H*2 + (size_t)H*F;
     const size_t wcount = per_layer_w*NL;
 
-    std::ifstream bin(dir + "/vlm.bin", std::ios::binary);
+    io::InFile bin(dir + "/vlm.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/vlm.bin\n", dir.c_str()); return false; }
     fnorms.resize(fcount);
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));

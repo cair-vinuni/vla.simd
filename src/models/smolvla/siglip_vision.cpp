@@ -8,6 +8,7 @@
 #include "models/arena.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +19,7 @@
 namespace tcpu {
 
 bool SiglipVision::load(const std::string& dir) {
-    std::ifstream meta(dir + "/vit.meta");
+    io::InFile meta(dir + "/vit.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/vit.meta\n", dir.c_str()); return false; }
     std::string k; float v;
     while (meta >> k >> v) {
@@ -68,7 +69,7 @@ bool SiglipVision::load(const std::string& dir) {
                         + (size_t)cfg.n_layers*(4*(size_t)H*H + (size_t)I*H + (size_t)H*I)
                         + (size_t)cfg.mm_out*cfg.shuffled_dim();
 
-    std::ifstream bin(dir + "/vit.bin", std::ios::binary);
+    io::InFile bin(dir + "/vit.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/vit.bin\n", dir.c_str()); return false; }
     fnorms.resize(fcount);
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));

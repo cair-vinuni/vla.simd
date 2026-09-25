@@ -7,6 +7,7 @@
 #include "fusion.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -18,7 +19,7 @@ using std::size_t;
 namespace tcpu {
 
 bool TurboFusion::load(const std::string& dir) {
-    std::ifstream meta(dir + "/fusion.meta");
+    io::InFile meta(dir + "/fusion.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/fusion.meta\n", dir.c_str()); return false; }
     std::string key; float val;
     while (meta >> key >> val) {

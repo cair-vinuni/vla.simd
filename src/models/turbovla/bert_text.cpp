@@ -7,6 +7,7 @@
 #include "bert_text.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -17,7 +18,7 @@ using std::size_t;
 namespace tcpu {
 
 bool BertText::load(const std::string& dir, int fusion_hidden) {
-    std::ifstream meta(dir + "/text.meta");
+    io::InFile meta(dir + "/text.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/text.meta\n", dir.c_str()); return false; }
     std::string key; float val;
     while (meta >> key >> val) {

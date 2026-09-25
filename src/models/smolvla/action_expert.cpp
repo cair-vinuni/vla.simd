@@ -8,6 +8,7 @@
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -52,7 +53,7 @@ ExpertProf& prof() { static thread_local ExpertProf p; return p; }
 } // namespace
 
 bool ActionExpert::load(const std::string& dir) {
-    std::ifstream meta(dir + "/aex.meta");
+    io::InFile meta(dir + "/aex.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/aex.meta\n", dir.c_str()); return false; }
     std::string k; double v;
     int san = cfg.self_attn_every_n;
@@ -101,7 +102,7 @@ bool ActionExpert::load(const std::string& dir) {
     total += (size_t)EH*EH + EH;                           // action_time_mlp_out
     total += (size_t)MAD*EH + MAD;                         // action_out_proj
 
-    std::ifstream bin(dir + "/aex.bin", std::ios::binary);
+    io::InFile bin(dir + "/aex.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/aex.bin\n", dir.c_str()); return false; }
     blob.resize(total - wtotal);
     raw.resize(wtotal);

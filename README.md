@@ -110,6 +110,32 @@ A converted directory is shared through the Hugging Face Hub:
 `--model-dir hf://<user>/<repo>` serves it from there (`@<commit>` pins a
 revision).
 
+### vla.cpp GGUF
+
+SmolVLA, TurboVLA and Octo GGUFs from [vla.cpp](https://github.com/VinRobotics/vla.cpp)
+load without conversion: pass the `.gguf`, a directory holding it, or its Hub repo
+as `--model-dir`. The engine maps the GGUF's tensors onto the arenas the
+converters write, so the same checkpoint loads bit for bit the same either way
+(`tools/check_gguf.py` compares the two).
+
+```sh
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model smolvla \
+    --model-dir hf://vrfai/smolvla-libero-gguf --task "put the bowl on the plate"
+```
+
+A GGUF does not carry everything the engine reads. The server fetches the rest
+once into `~/.cache/vla_simd/gguf` (`$VLA_SIMD_CACHE`), and a file placed beside
+the `.gguf` takes precedence:
+
+| `--model` | from the Hub | notes |
+| --- | --- | --- |
+| `smolvla` | `tok/` (SmolVLM2-500M-Instruct) | `pos_ids shifted` in a `config.txt` beside the GGUF for a checkpoint trained with transformers 4.55-4.57 |
+| `turbovla` | `vocab.txt` (bert-base-uncased), `stats.bin` (TurboVLA's `libero_all4_stats.json`) | vla.cpp's GGUF lacks DINOv3's final norm, so the engine runs without it as vla.cpp does, and warns |
+| `octo` | nothing | set `VLA_OCTO_UNNORM_DATASET` when the GGUF has several datasets' statistics, as vla.cpp requires. `vrfai/octo-small-libero-gguf` was finetuned on the primary camera alone (its wrist tower is untrained), so serve it with `--cams primary` |
+
+`build/vla-simd-gguf info <file>` prints what a GGUF holds, and
+`build/vla-simd-gguf extract <file> <dir>` writes the converted directory it loads as.
+
 ## Checkpoints
 
 The policies evaluated in the paper are public on the Hugging Face Hub:

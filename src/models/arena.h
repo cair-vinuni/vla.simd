@@ -5,6 +5,7 @@
  */
 
 #pragma once
+#include "io/files.h"
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -15,7 +16,7 @@ namespace tcpu {
 // Read a .bin into a float arena. Rejects a size that is not a whole number of
 // floats: resize(bytes/4) then read(bytes) writes up to three bytes past the end.
 inline bool read_arena(const std::string& path, std::vector<float>& data) {
-    std::ifstream bin(path, std::ios::binary);
+    io::InFile bin(path, std::ios::binary);
     if (!bin) return false;
     bin.seekg(0, std::ios::end);
     const std::streamoff end = bin.tellg();
@@ -44,7 +45,7 @@ template<class T> struct ArenaCursor {
 };
 
 inline bool read_floats(const std::string& path, std::vector<float>& out, size_t n) {
-    std::ifstream f(path, std::ios::binary);
+    io::InFile f(path, std::ios::binary);
     if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return false; }
     out.resize(n);
     f.read(reinterpret_cast<char*>(out.data()), (std::streamsize)(n*sizeof(float)));

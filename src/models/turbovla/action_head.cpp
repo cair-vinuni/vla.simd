@@ -7,6 +7,7 @@
 #include "action_head.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -17,7 +18,7 @@ using std::size_t;
 namespace tcpu {
 
 bool TurboActionHead::load(const std::string& dir) {
-    std::ifstream meta(dir + "/head.meta");
+    io::InFile meta(dir + "/head.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/head.meta\n", dir.c_str()); return false; }
     std::string key; float val;
     while (meta >> key >> val) {
