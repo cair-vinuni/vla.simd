@@ -30,10 +30,8 @@ on the same machine or on two; only the client talks to the robot.
 
 ### 1. Server
 
-One environment serves every policy. Installing it compiles the C++ engine
-(the `libvla_simd_*` libraries) into the environment's `vla_simd` package, so
-there is no separate build step. On Apple Silicon, install Homebrew's OpenMP
-first: `brew install cmake libomp`.
+One environment serves every policy.
+On Apple Silicon, install Homebrew's OpenMP first: `brew install cmake libomp`.
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
