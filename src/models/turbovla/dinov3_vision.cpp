@@ -9,6 +9,7 @@
 #include "nn/encoder.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -20,7 +21,7 @@ using std::size_t;
 namespace tcpu {
 
 bool Dinov3Vision::load(const std::string& dir, int img_size) {
-    std::ifstream meta(dir + "/vision.meta");
+    io::InFile meta(dir + "/vision.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/vision.meta\n", dir.c_str()); return false; }
     std::string key; float val;
     while (meta >> key >> val) {
@@ -33,6 +34,7 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
         else if (key == "prefix"    ) cfg.prefix     = (int)val;
         else if (key == "rope_theta") cfg.rope_theta = val;
         else if (key == "ln_eps"    ) cfg.ln_eps     = val;
+        else if (key == "final_norm") cfg.final_norm = (int)val;
     }
 
     grid = cfg.patch > 0 ? img_size/cfg.patch : 0;
@@ -63,7 +65,7 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
                                               + 2*H                // ln2
                                               + I*H + I            // up
                                               + H*I + H)           // down
-                      + 2*H;
+                      + (cfg.final_norm ? 2*H : 0);
     if (data.size() != want) {
         std::fprintf(stderr, "turbovla: %s/vision.bin has %zu floats, expected %zu\n",
                      dir.c_str(), data.size(), want);
@@ -97,8 +99,10 @@ bool Dinov3Vision::load(const std::string& dir, int img_size) {
         l.up.init(uw, ub, cfg.inter, cfg.hidden, Role::Mlp);
         l.down.init(dw, db, cfg.hidden, cfg.inter, Role::Mlp);
     }
-    norm_w = take(H);
-    norm_b = take(H);
+    if (cfg.final_norm) {
+        norm_w = take(H);
+        norm_b = take(H);
+    }
 
     // RoPE table for the fixed grid. Patch centers are normalized to [-1, 1]:
     // the model was trained with random rescale, so transformers recomputes this
@@ -270,9 +274,11 @@ void Dinov3Vision::encode(const float* pixels, int n_views, float* out) const {
         }
     }
 
-    for (int w = 0; w < B; w++)
-        layernorm(out + (size_t)w*NP*H, tok.data() + ((size_t)w*T + cfg.prefix)*H,
-                  norm_w, norm_b, NP, H, cfg.ln_eps);
+    for (int w = 0; w < B; w++) {
+        const float* src = tok.data() + ((size_t)w*T + cfg.prefix)*H;
+        if (cfg.final_norm) layernorm(out + (size_t)w*NP*H, src, norm_w, norm_b, NP, H, cfg.ln_eps);
+        else std::memcpy(out + (size_t)w*NP*H, src, (size_t)NP*H*sizeof(float));
+    }
 
     if (vp.on) {
         const double wall = nn::now_ms() - t_start;

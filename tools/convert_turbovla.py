@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-convert_turbovla.py -- convert a TurboVLA LIBERO checkpoint into the flat
-.meta/.bin arenas the vla.simd engine loads.
+convert_turbovla.py -- convert a TurboVLA LIBERO checkpoint into the vla.simd
+GGUF the engine loads.
 
     python tools/convert_turbovla.py \
         --ckpt build/turbovla_ckpt/object.pth \
-        --out  build/turbovla_object
+        --out  build/turbovla_object/turbovla_object.gguf
 
 Run it in a venv with torch + transformers>=4.57.
 The engine itself needs none of that at runtime.
@@ -22,7 +22,7 @@ real checkpoint weights. Two substitutions make that possible without HF access:
   * BERT gets the same treatment (config only); its tokenizer files are a plain
     ungated download.
 
-Written into <out>/:
+Packed into one GGUF (tools/_gguf.py), as these files:
     config.meta   dims, epsilons, image normalization, special token ids
     stats.bin     proprio mean/std, action min/max (LIBERO eval protocol)
     vocab.txt     BERT WordPiece vocabulary, one token per line
@@ -53,6 +53,7 @@ import types
 import numpy as np
 
 from _common import Arena, log, write_meta
+from _gguf import gguf_output
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -446,7 +447,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True, help="TurboVLA LIBERO .pth")
-    p.add_argument("--out", required=True, help="output directory for the engine files")
+    p.add_argument("--out", required=True,
+                   help="output .gguf, or a dir to write <dir>/<dir>.gguf in")
     p.add_argument("--bert", default="google-bert/bert-base-uncased",
                    help="bert-base-uncased hub id or local directory (config + tokenizer)")
     p.add_argument("--dinov3-config",
@@ -461,7 +463,6 @@ def main():
     args = p.parse_args()
 
     cams = args.cams.split(",")
-    os.makedirs(args.out, exist_ok=True)
     model, _, _ = build_reference(args.ckpt, args.bert, args.dinov3_config)
     if len(cams) != model.num_views:
         sys.exit(f"--cams names {len(cams)} views, the checkpoint has {model.num_views}")
@@ -472,17 +473,18 @@ def main():
     image_mean, image_std = preproc["image_mean"], preproc["image_std"]
     assert abs(preproc["rescale_factor"] - 1.0 / 255.0) < 1e-12, "unexpected rescale_factor"
 
-    log("weights:")
-    dump_vision(model, args.out)
-    dump_text(model, args.out)
-    dump_fusion(model, args.out)
-    dump_head(model, args.out)
-    dump_config(model, args.out, image_mean, image_std, model.text_encoder.tokenizer,
-                args.stats, args.stats_key)
-    with open(os.path.join(args.out, "config.txt"), "w") as f:
-        f.write("".join(f"cam{i} {c}\n" for i, c in enumerate(cams)))
-        if args.task:
-            f.write(f"instruction {args.task}\n")
+    with gguf_output(args.out, "turbovla", source=args.ckpt) as out:
+        log("weights:")
+        dump_vision(model, out.dir)
+        dump_text(model, out.dir)
+        dump_fusion(model, out.dir)
+        dump_head(model, out.dir)
+        dump_config(model, out.dir, image_mean, image_std, model.text_encoder.tokenizer,
+                    args.stats, args.stats_key)
+        with open(os.path.join(out.dir, "config.txt"), "w") as f:
+            f.write("".join(f"cam{i} {c}\n" for i, c in enumerate(cams)))
+            if args.task:
+                f.write(f"instruction {args.task}\n")
 
 
 if __name__ == "__main__":

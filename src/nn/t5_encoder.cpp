@@ -7,6 +7,7 @@
 #include "t5_encoder.h"
 #include "models/arena.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -17,7 +18,7 @@ namespace tcpu {
 namespace nn {
 
 bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* tail) {
-    std::ifstream meta(dir + "/" + stem + ".meta");
+    io::InFile meta(dir + "/" + stem + ".meta");
     if (!meta) return false;
     std::string key;
     double val;

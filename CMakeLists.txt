@@ -128,6 +128,18 @@ endif()
 # ---------------------------------------------------------------------------
 # HAL + shared layer (model-agnostic): reused by every VLA model
 # ---------------------------------------------------------------------------
+# vla.cpp GGUF reader: mounts a .gguf as the converted-directory files the
+# loaders read (src/io/files.h), so every loader below links it through tcpu_ops.
+add_library(tcpu_io STATIC
+  src/io/files.cpp
+  src/io/gguf.cpp
+  src/io/gguf_models.cpp
+  src/io/gguf_smolvla.cpp
+  src/io/gguf_turbovla.cpp
+  src/io/gguf_octo.cpp
+  src/io/gguf_vla_simd.cpp)
+target_link_libraries(tcpu_io PUBLIC vla_flags)
+
 add_library(tcpu_ops STATIC
   src/hal/common/env.cpp
   src/hal/common/blas.cpp
@@ -155,14 +167,14 @@ add_library(tcpu_ops STATIC
   src/nn/conv.cpp
   src/nn/diffusion.cpp
   src/nn/linear_bf16.cpp)   # load-time bf16 init, linked after the hot objects (see file header)
-target_link_libraries(tcpu_ops PUBLIC vla_flags)
+target_link_libraries(tcpu_ops PUBLIC vla_flags tcpu_io)
 
 add_library(tcpu_preprocess STATIC src/preprocess/image.cpp)
 target_link_libraries(tcpu_preprocess PUBLIC vla_flags)
 
 add_library(tcpu_tokenizer STATIC src/tokenizer/tokenizer.cpp src/tokenizer/t5_tokenizer.cpp
                            src/tokenizer/bert_tokenizer.cpp)  # byte-level BPE (Llama-3 / SmolLM2) + sentencepiece unigram (T5) + BERT WordPiece
-target_link_libraries(tcpu_tokenizer PUBLIC vla_flags)
+target_link_libraries(tcpu_tokenizer PUBLIC vla_flags tcpu_io)
 
 # ---------------------------------------------------------------------------
 # Models: one library per VLA architecture under src/models/<name>/
@@ -237,24 +249,37 @@ vla_add_shared(vla_simd_turbovla src/models/turbovla/turbovla_capi.cpp tcpu_turb
 vla_add_shared(vla_simd_impact  src/models/impact/impact_capi.cpp    tcpu_impact)
 vla_add_shared(vla_simd_diffusion src/models/diffusion/diffusion_capi.cpp tcpu_diffusion)
 
+if(NOT SKBUILD)
+  # vla-simd-gguf info|extract: inspect a vla.cpp GGUF, or write it out as the
+  # converted directory it loads as
+  add_executable(vla-simd-gguf src/io/gguf_tool.cpp)
+  target_link_libraries(vla-simd-gguf PRIVATE tcpu_io)
+endif()
+
 if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   enable_testing()
   add_executable(test_ops tests/test_ops.cpp)
   target_link_libraries(test_ops PRIVATE tcpu_ops)
   add_test(NAME ops COMMAND test_ops)
   set_tests_properties(ops PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
+  add_executable(test_gguf tests/test_gguf.cpp)
+  target_link_libraries(test_gguf PRIVATE tcpu_io)
+  add_test(NAME gguf COMMAND test_gguf)
 endif()
 
 # ---------------------------------------------------------------------------
 # Warnings, first-party targets only.
 # ---------------------------------------------------------------------------
 set(VLA_FIRST_PARTY
-  tcpu_ops tcpu_preprocess tcpu_tokenizer tcpu_octo tcpu_act tcpu_smolvla tcpu_turbovla
+  tcpu_io tcpu_ops tcpu_preprocess tcpu_tokenizer tcpu_octo tcpu_act tcpu_smolvla tcpu_turbovla
   tcpu_impact tcpu_diffusion
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
 if(TARGET test_ops)
-  list(APPEND VLA_FIRST_PARTY test_ops)
+  list(APPEND VLA_FIRST_PARTY test_ops test_gguf)
+endif()
+if(TARGET vla-simd-gguf)
+  list(APPEND VLA_FIRST_PARTY vla-simd-gguf)
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   foreach(tgt IN LISTS VLA_FIRST_PARTY)

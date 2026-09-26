@@ -2,12 +2,10 @@
 """
 convert_lerobot_octo.py
 
-Convert a finetuned lerobot Octo checkpoint into the flat .meta/.bin weight format
-of the vla.simd engine.
+Convert a finetuned lerobot Octo checkpoint into the vla.simd GGUF.
 
     python3 tools/convert_lerobot_octo.py \
-        --ckpt khanhnd61/octo_so101_tape \
-        --t5-from build/octo --out build/octo_so101
+        --ckpt khanhnd61/octo_so101_tape --out build/octo_so101/octo_so101.gguf
 
 Why this exists alongside convert_octo.py: that script converts the authoritative
 JAX/flax Octo-Small-1.5, the *base* model. An
@@ -27,18 +25,21 @@ invisible unless reproduced deliberately:
     flax, so `ln_eps` is unchanged.
 
 The language tower is frozen (`freeze_language_encoder=True`) and absent from the
-checkpoint, so t5.meta/t5.bin and the tokenizer are copied from an existing base
-dump rather than reconverted -- pass it with --t5-from.
+checkpoint. It is T5-base unchanged, so t5.meta/t5.bin and the tokenizer are
+exported from the Hugging Face t5-base (bit-identical to the copy inside the
+Octo base checkpoint), or copied from an existing Octo GGUF or directory with
+--t5-from.
 
 Run in a venv with lerobot + torch. Nothing here touches a GPU.
 """
 
 import argparse
 import os
-import shutil
 import sys
 
 import numpy as np
+
+from _gguf import gguf_output, read_files
 
 try:
     import torch
@@ -197,9 +198,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt", required=True, help="hub id or local dir")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--t5-from", default="build/octo",
-                    help="existing dump to copy the frozen t5 tower + tokenizer from")
+    ap.add_argument("--out", required=True,
+                    help="output .gguf, or a dir to write <dir>/<dir>.gguf in")
+    ap.add_argument("--t5-from", default=None,
+                    help="Octo .gguf or converted dir to copy the frozen t5 tower + tokenizer "
+                         "from (default: export them from Hugging Face t5-base)")
     ap.add_argument("--task", default="pick up the tape")
     args = ap.parse_args()
 
@@ -208,8 +211,6 @@ def main():
     if not os.path.isdir(ckpt):
         from huggingface_hub import snapshot_download
         ckpt = snapshot_download(ckpt)
-    out = os.path.expanduser(args.out)
-    os.makedirs(out, exist_ok=True)
 
     print(f"Loading {ckpt} on cpu ...")
     cfg = PreTrainedConfig.from_pretrained(ckpt)
@@ -231,40 +232,45 @@ def main():
     n_heads = 6 if d == 384 else d // 64
     window = cfg.n_obs_steps
 
-    print("Dumping weights ...")
-    dump_stem(sd, f"{ot}.observation_tokenizers.primary.encoder", out, "stem_primary")
-    dump_stem(sd, f"{ot}.observation_tokenizers.wrist.encoder", out, "stem_wrist")
-    dump_transformer(sd, cfg, out, n_layers, d, n_heads, mlp, window)
-    head = policy.model.heads["action"]
-    action_dim = dump_head(sd, head, out, cfg, d)
+    with gguf_output(args.out, "octo", source=args.ckpt) as o:
+        print("Dumping weights ...")
+        dump_stem(sd, f"{ot}.observation_tokenizers.primary.encoder", o.dir, "stem_primary")
+        dump_stem(sd, f"{ot}.observation_tokenizers.wrist.encoder", o.dir, "stem_wrist")
+        dump_transformer(sd, cfg, o.dir, n_layers, d, n_heads, mlp, window)
+        head = policy.model.heads["action"]
+        action_dim = dump_head(sd, head, o.dir, cfg, d)
 
-    # frozen language tower + tokenizer, copied from the base dump
-    src = os.path.expanduser(args.t5_from)
-    for fn in ("t5.meta", "t5.bin"):
-        if not os.path.exists(os.path.join(src, fn)):
-            sys.exit(f"missing {fn} in --t5-from {src}; run convert_octo.py once")
-        shutil.copy2(os.path.join(src, fn), os.path.join(out, fn))
-    if not os.path.isfile(os.path.join(src, "tok", "vocab.txt")):
-        sys.exit(f"missing tok/vocab.txt in --t5-from {src}; "
-                 f"run convert_t5_tokenizer.py {os.path.join(src, 'tok')}")
-    shutil.copytree(os.path.join(src, "tok"), os.path.join(out, "tok"), dirs_exist_ok=True)
-    print(f"  t5 + tok: copied from {src} (frozen, absent from the checkpoint)")
+        # frozen language tower + tokenizer
+        if args.t5_from:
+            src = os.path.expanduser(args.t5_from)
+            files = read_files(src) if src.endswith(".gguf") else {
+                rel: open(os.path.join(src, rel), "rb").read()
+                for rel in ("t5.meta", "t5.bin", "tok/vocab.txt")
+                if os.path.exists(os.path.join(src, rel))}
+            for rel in ("t5.meta", "t5.bin", "tok/vocab.txt"):
+                if rel not in files:
+                    sys.exit(f"missing {rel} in --t5-from {src}")
+                os.makedirs(os.path.dirname(os.path.join(o.dir, rel)), exist_ok=True)
+                with open(os.path.join(o.dir, rel), "wb") as f:
+                    f.write(files[rel])
+            print(f"  t5 + tok: copied from {src} (frozen, absent from the checkpoint)")
+        else:
+            from convert_t5_tokenizer import export, export_encoder
+            export_encoder(o.dir, n_tokens=cfg.tokenizer_max_length)
+            export(os.path.join(o.dir, "tok"))
+            print("  t5 + tok: exported from t5-base (frozen, absent from the checkpoint)")
 
-    amean, astd = stats_of(pre, "action")
-    amean.tofile(f"{out}/stats_action_mean.bin")
-    astd.tofile(f"{out}/stats_action_std.bin")
-    np.ones(action_dim, np.float32).tofile(f"{out}/stats_action_mask.bin")
-    print(f"  stats: action {amean.shape[0]}-dim mean/std, mask all-ones")
+        amean, astd = stats_of(pre, "action")
+        amean.tofile(f"{o.dir}/stats_action_mean.bin")
+        astd.tofile(f"{o.dir}/stats_action_std.bin")
+        np.ones(action_dim, np.float32).tofile(f"{o.dir}/stats_action_mask.bin")
+        print(f"  stats: action {amean.shape[0]}-dim mean/std, mask all-ones")
 
-    with open(f"{out}/config.txt", "w") as f:
-        f.write(f"instruction {args.task}\nwindow {window}\n")
-        f.write(f"steps {cfg.num_diffusion_steps}\n")
-        f.write(f"checkpoint {args.ckpt}\n")
-        f.write(f"action_dim {action_dim}\nhorizon {cfg.chunk_size}\n")
-
-    total = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out)
-                if os.path.isfile(os.path.join(out, f)))
-    print(f"done -> {out} ({total / 1e6:.0f} MB)")
+        with open(f"{o.dir}/config.txt", "w") as f:
+            f.write(f"instruction {args.task}\nwindow {window}\n")
+            f.write(f"steps {cfg.num_diffusion_steps}\n")
+            f.write(f"checkpoint {args.ckpt}\n")
+            f.write(f"action_dim {action_dim}\nhorizon {cfg.chunk_size}\n")
 
 
 if __name__ == "__main__":

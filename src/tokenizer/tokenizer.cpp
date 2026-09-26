@@ -5,6 +5,7 @@
  */
 
 #include "tokenizer.h"
+#include "io/files.h"
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -116,7 +117,7 @@ static size_t gpt2_piece(const std::string& s, size_t i, size_t e) {
 bool Tokenizer::load(const std::string& dir) {
     build_byte2str(byte2str);
 
-    std::ifstream vf(dir + "/vocab.txt");
+    io::InFile vf(dir + "/vocab.txt");
     if (!vf) {
         std::fprintf(stderr, "Tokenizer: cannot open %s/vocab.txt\n", dir.c_str());
         return false;
@@ -128,7 +129,7 @@ bool Tokenizer::load(const std::string& dir) {
         vocab[line.substr(tab+1)] = std::stoi(line.substr(0, tab));
     }
 
-    std::ifstream mf(dir + "/merges.txt");
+    io::InFile mf(dir + "/merges.txt");
     if (!mf) {
         std::fprintf(stderr, "Tokenizer: cannot open %s/merges.txt\n", dir.c_str());
         return false;

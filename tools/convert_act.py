@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-convert_act.py -- convert a lerobot ACT checkpoint into the flat .meta/.bin
-arena the vla.simd engine loads.
+convert_act.py -- convert a lerobot ACT checkpoint into the vla.simd GGUF the
+engine loads.
 
-    python tools/convert_act.py khanhnd61/act_so101_tape build/act
+    python tools/convert_act.py khanhnd61/act_so101_tape build/act/act.gguf
 
 Run it in a venv that has lerobot: the checkpoint is read through ACTPolicy so the
 config, the processor pipeline and the dataset stats come from the same source the
 torch policy uses. The engine itself needs none of that at runtime.
 
-Written into <out>/:
+Packed into one GGUF (tools/_gguf.py), as these files:
     config.txt      img_h/img_w/n_cams/norm_eps + the camera order
     backbone.meta   ResNet-18 stage table (block cin cout stride has_down)
     backbone.bin    stem + basic blocks, BatchNorm folded into the conv in front
@@ -30,6 +30,7 @@ import sys
 import numpy as np
 
 from _common import Arena, dump_detr, dump_resnet18, log, to_numpy, write_meta
+from _gguf import gguf_output
 
 # stats.bin stores mean then std, per feature, in this order.
 STAT_KEYS = ("mean", "std")
@@ -108,11 +109,11 @@ def main():
     p.add_argument("ckpt", nargs="?", default=None,
                    help="lerobot ACT checkpoint (hub id or local dir)")
     p.add_argument("out", nargs="?", default=None,
-                   help="output dir (default: build/act)")
+                   help="output .gguf, or a dir to write <dir>/<dir>.gguf in (default: build/act)")
     p.add_argument("--ckpt", dest="ckpt_flag", default=None,
                    help="same as the positional checkpoint")
     p.add_argument("--out", dest="out_flag", default=None,
-                   help="same as the positional out dir")
+                   help="same as the positional output")
     p.add_argument("--task", default=None, help="instruction to record in config.txt")
     args = p.parse_args()
 
@@ -124,7 +125,6 @@ def main():
     from lerobot.policies.act.modeling_act import ACTPolicy
     from lerobot.policies.factory import make_pre_post_processors
 
-    os.makedirs(args.out, exist_ok=True)
     log(f"Loading {args.ckpt}")
     policy = ACTPolicy.from_pretrained(args.ckpt)
     policy.eval()
@@ -148,22 +148,21 @@ def main():
     _, img_h, img_w = cfg.image_features[cam_keys[0]].shape
     log(f"  {len(cam_keys)} cameras {cam_names} at {img_h}x{img_w}, chunk {cfg.chunk_size}")
 
-    dump_backbone(sd, args.out, policy)
-    state_dim, action_dim, n_1d = dump_transformer(sd, cfg, args.out)
+    with gguf_output(args.out, "act", source=args.ckpt) as out:
+        dump_backbone(sd, out.dir, policy)
+        state_dim, action_dim, n_1d = dump_transformer(sd, cfg, out.dir)
 
-    preprocessor, _ = make_pre_post_processors(
-        cfg,
-        pretrained_path=args.ckpt,
-        preprocessor_overrides={"device_processor": {"device": "cpu"}},
-        postprocessor_overrides={"device_processor": {"device": "cpu"}},
-    )
-    norm_stats = _normalizer_stats(preprocessor)
-    dump_stats(norm_stats, cam_keys, args.out)
-    dump_config(args.out, img_h, img_w, cam_names, 1e-8, args.task)
+        preprocessor, _ = make_pre_post_processors(
+            cfg,
+            pretrained_path=args.ckpt,
+            preprocessor_overrides={"device_processor": {"device": "cpu"}},
+            postprocessor_overrides={"device_processor": {"device": "cpu"}},
+        )
+        norm_stats = _normalizer_stats(preprocessor)
+        dump_stats(norm_stats, cam_keys, out.dir)
+        dump_config(out.dir, img_h, img_w, cam_names, 1e-8, args.task)
 
     log(f"  {state_dim}-d state, {action_dim}-d action, {n_1d} 1-D pos tokens")
-
-    log(f"Wrote {args.out}")
 
 
 def _normalizer_stats(preprocessor):

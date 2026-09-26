@@ -21,6 +21,9 @@ struct TurboVisionConfig {
     int hidden = 768, n_heads = 12, head_dim = 64, inter = 3072;
     int n_layers = 12, patch = 16, prefix = 5;
     float rope_theta = 100.0f, ln_eps = 1e-5f;
+    // 0: the patch tokens leave unnormed. Only a vla.cpp GGUF says so; it drops
+    // the final LayerNorm upstream TurboVLA applies (src/io/gguf_turbovla.cpp).
+    int final_norm = 1;
 
     int patch_dim() const { return 3*patch*patch; }
 };

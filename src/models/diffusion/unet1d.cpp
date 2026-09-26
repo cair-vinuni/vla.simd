@@ -7,6 +7,7 @@
 #include "models/diffusion/unet1d.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -34,7 +35,7 @@ namespace tcpu {
 bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c, bool int8) {
     cfg = c;
     if (cfg.down_dims.empty()) return false;
-    std::ifstream bin(dir + "/" + name + ".bin", std::ios::binary | std::ios::ate);
+    io::InFile bin(dir + "/" + name + ".bin", std::ios::binary | std::ios::ate);
     if (!bin) return false;
     size_t left = (size_t)bin.tellg();
     bin.seekg(0);

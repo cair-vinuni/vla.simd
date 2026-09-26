@@ -6,8 +6,9 @@
 <p><b>Efficient CPU Inference for Language-Conditioned Manipulation</b></p>
 
 <p>
-    <a href="https://arxiv.org/abs/2609.24274">📑 Paper</a> |
-    <a href="https://vla-simd.github.io/">🌐 Project Page</a>
+    <a href="https://arxiv.org/abs/2609.24274"><img src="https://img.shields.io/badge/arXiv-2609.24274-b31b1b.svg" alt="Paper"></a>
+    <a href="https://vla-simd.github.io/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
+    <a href="https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-vla.simd%20bundle-yellow.svg" alt="Hugging Face: vla.simd model bundle"></a>
 </p>
 
 </div>
@@ -21,141 +22,48 @@ the target's instruction-set flags, while the hardware abstraction layer
 selects AVX2 kernels tuned for Intel or AMD Zen, NEON kernels for ARM with
 Accelerate support on Apple Silicon, or a portable scalar fallback.
 
-## Build
+## Rollout
 
-```sh
-cmake -S . -B build && cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
-ctest --test-dir build --output-on-failure
-```
+A rollout has two parts: the `vla.simd` server loads a GGUF checkpoint and serves
+actions on the CPU, and lerobot's client drives the robot against it. They run
+on the same machine or on two; only the client talks to the robot.
 
-Apple Silicon needs Homebrew's OpenMP first: `brew install cmake libomp`.
-Presets (`cmake --preset <name>`): `release`, `debug`, `ci` (release plus
-`-Werror`). Configure with `-DVLA_SANITIZE=address,undefined` for a sanitizer
-build.
+### 1. Server
 
-`pip install .` builds the same libraries through scikit-build-core into the
-`vla-simd` Python package, next to the policy server; [Serve](#serve) installs it
-that way. From a checkout, `python vla_simd/policy_server.py` runs the server
-against `build/` instead.
-
-## Convert
-
-The engine loads flat `.meta`/`.bin` arenas, not framework checkpoints, so every
-policy is converted once, offline. No converter runs at serve time: the server
-still installs torch for lerobot's wire types, but builds no torch model.
-
-**A torch converter must run in the environment its checkpoint was trained in**,
-not one shared venv. Five environments cover the six policies, all of them
-dependency groups in [pyproject.toml](pyproject.toml), which install without
-building the engine:
-
-| venv | install | Python | converts |
-| --- | --- | --- | --- |
-| `.lerobot` | `--group lerobot` | >=3.12 | ACT, Diffusion Policy, SmolVLA |
-| `.impact` | `--group impact` | >=3.12 | IMPACT (from the lerobot fork) |
-| `.turbovla` | `--group turbovla` | >=3.10 | TurboVLA |
-| `.octo` | `--group octo` | 3.10 or 3.11 | Octo (x86-64 or macOS) |
-| `.numpy` | `--group numpy` | >=3.10 | SmolVLA (torch-free) |
-
-Create only the one you need:
-
-```sh
-uv venv .numpy --prompt numpy                   && uv pip install --python .numpy    --group numpy
-uv venv .lerobot --prompt lerobot --python 3.12 && uv pip install --python .lerobot  --group lerobot  --torch-backend cpu
-uv venv .impact --prompt impact --python 3.12   && uv pip install --python .impact   --group impact   --torch-backend cpu
-uv venv .turbovla --prompt turbovla             && uv pip install --python .turbovla --group turbovla --torch-backend cpu
-
-# TurboVLA also needs the upstream checkout and its released checkpoint
-git clone https://github.com/H-EmbodVis/TurboVLA third_party/TurboVLA
-.turbovla/bin/hf download H-EmbodVis/TurboVLA checkpoints/libero/turbovla_libero.pth --local-dir build/turbovla_ckpt
-
-# Octo also needs the upstream checkout, installed without its own pins
-uv venv .octo --prompt octo --python 3.10 && uv pip install --python .octo --group octo
-git clone https://github.com/octo-models/octo third_party/octo
-uv pip install --python .octo -e third_party/octo --no-deps
-```
-
-Convert once per checkpoint:
-
-```sh
-# IMPACT
-.impact/bin/python tools/convert_impact.py --ckpt <hub-id-or-dir> --out build/impact
-
-# ACT
-.lerobot/bin/python tools/convert_act.py --ckpt <hub-id-or-dir> --out build/act
-
-# Diffusion Policy
-.lerobot/bin/python tools/convert_diffusion.py --ckpt <dir> --out build/diffusion
-
-# SmolVLA, with torch or without. --pos-ids is shifted for transformers
-# 4.55-4.57 and identity otherwise (lerobot >= 0.5 trains with transformers 5)
-.lerobot/bin/python tools/convert_lerobot_ckpt.py --ckpt <dir> --out build/smolvla
-.numpy/bin/python tools/convert_hf_safetensors.py <hub-id-or-dir> build/smolvla --pos-ids identity
-
-# TurboVLA
-.turbovla/bin/python tools/convert_turbovla.py --out build/turbovla \
-    --ckpt build/turbovla_ckpt/checkpoints/libero/turbovla_libero.pth
-
-# Octo base model and tokenizer
-.octo/bin/python tools/convert_octo.py build/octo
-.octo/bin/python tools/convert_t5_tokenizer.py build/octo/tok
-
-# Octo finetune saved by lerobot; needs a lerobot that ships
-# lerobot.policies.octo (0.6.1 does not)
-python tools/convert_lerobot_octo.py --ckpt <hub-id-or-dir> --t5-from build/octo --out build/octo_so101
-```
-
-A converted directory is shared through the Hugging Face Hub:
-`.serve/bin/hf upload <user>/<repo> build/<name>` uploads it, and
-`--model-dir hf://<user>/<repo>` serves it from there (`@<commit>` pins a
-revision).
-
-## Checkpoints
-
-The policies evaluated in the paper are public on the Hugging Face Hub:
-
-| policy | checkpoints |
-| --- | --- |
-| ACT | [act-matched_so101-multi-task-clean](https://huggingface.co/khanhnd61/act-matched_so101-multi-task-clean) |
-| IMPACT | [impact_so101-multi-task-clean](https://huggingface.co/khanhnd61/impact_so101-multi-task-clean), [impact-int8_so101-multi-task-clean](https://huggingface.co/khanhnd61/impact-int8_so101-multi-task-clean) (trained for W8A8, serve with `--int8 63`), [impact_libero_spatial](https://huggingface.co/khanhnd61/impact_libero_spatial), [impact_libero_object](https://huggingface.co/khanhnd61/impact_libero_object), [impact_libero_goal](https://huggingface.co/khanhnd61/impact_libero_goal), [impact_libero_10](https://huggingface.co/khanhnd61/impact_libero_10) |
-| SmolVLA | [smolvla_so101-multi-task-clean](https://huggingface.co/khanhnd61/smolvla_so101-multi-task-clean), [smolvla-prune10_so101-multi-task-clean](https://huggingface.co/khanhnd61/smolvla-prune10_so101-multi-task-clean) |
-| Octo | [octo-small_so101-multi-task-clean](https://huggingface.co/khanhnd61/octo-small_so101-multi-task-clean), base [rail-berkeley/octo-small-1.5](https://huggingface.co/rail-berkeley/octo-small-1.5) |
-| TurboVLA | [H-EmbodVis/TurboVLA](https://huggingface.co/H-EmbodVis/TurboVLA) (LIBERO) |
-
-## Serve
-
-Serving is one environment for every policy, and the only one the robot needs.
-Installing the package builds the engine:
+One environment serves every policy.
+On Apple Silicon, install Homebrew's OpenMP first: `brew install cmake libomp`.
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
-uv pip install --python .serve '.[serve]' --torch-backend cpu
+uv pip install --python .serve '.[serve]' --torch-backend cpu --no-sources
 ```
 
-One `vla-simd-serve` serves every policy; `--model` picks which, `--model-dir`
-is the converted directory or its `hf://` Hub repo, and `$CORES` is the OpenMP
-thread count:
+`vla-simd-serve` loads the GGUF and listens for the client.
+`--model-dir` is either a path to `.gguf` file or `hf://<user>/<repo>[@<revision>]/<file>.gguf`.
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
 
-OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve \
-    --model <name> --model-dir build/<name> --port 8080
+OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model impact --port 8080 \
+    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf
 ```
+
+Refer the table below for valid values of `--model`:
 
 | `--model` | notes |
 | --- | --- |
 | `impact`, `act`, `smolvla` | nothing extra |
-| `turbovla` | add `--task "<instruction>"` unless converted with one; frames consumed as given, at the checkpoint's resolution |
-| `octo` | add `--cams front,wrist`, the robot's camera names, primary first; the converter records none. `--cams front` serves a robot without a wrist camera |
+| `turbovla` | add `--task "<instruction>"` unless the GGUF records one; frames consumed as given, at the checkpoint's resolution |
+| `octo` | add `--cams front,wrist`, the robot's camera names, primary first; the GGUF records none. `--cams front` serves a robot without a wrist camera |
 | `diffusion` | prefix `DP_SCHEDULER=DDIM DP_STEPS=10`; the 2-frame history is assembled from the stream |
 
-Octo and Diffusion Policy see consecutive frames only if the client sends every
-frame, so run the client with `--chunk_size_threshold=1.0` for them.
+<details>
+<summary><b>Server options</b></summary>
 
 `--bench N` (or `--soak SEC`; `--json` for JSON output) times N queries after
 warmup and exits, reporting the backend it ran on.
-`--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod:
+`--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod
+(`impact-int8-so101-multi-task.gguf` was trained for it: serve it with `--int8 63`):
 
 | knob | effect |
 | --- | --- |
@@ -167,38 +75,60 @@ warmup and exits, reporting the backend it ran on.
 | `TCPU_ZEN=0`, `TCPU_ZEN=1` | force the Intel or the AMD Zen attention layout on x86; the default follows the CPU vendor |
 | `TCPU_BF16_MLP=1`, `TCPU_BF16_DEQ=0` | bf16 MLP weights on the Pi; keep bf16 checkpoint weights resident on x86 |
 
-The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
-so the robot side runs lerobot unchanged except for its client,
-`lerobot-vla-simd`, which ships in the
-[lerobot fork](https://github.com/khanhnd61-vr/lerobot). It installs into
-`.serve`, or into any Python 3.12 venv on the robot when the server runs in
-Docker or on another machine:
+</details>
 
-```sh
-uv pip install --python .serve \
-    'lerobot[async,feetech] @ git+https://github.com/khanhnd61-vr/lerobot@4b33b84296c0880ebce778d69f16a38d33825575'
+<details>
+<summary><b>Docker</b></summary>
 
-.serve/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 --policy_type=<name> \
-    --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0 --robot.id=my_arm \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
-    --actions_per_chunk=50 \
-    --task="pick up the tape"
-```
-
-### Docker
-
-The image builds the package for the platform it is built on, x86-64 with AVX2
-or aarch64 (a Raspberry Pi 5):
+The server also runs in a container, in place of the `.serve` install above. The
+image builds the package for the platform it is built on, x86-64 with AVX2 or
+aarch64 (a Raspberry Pi 5), and fetches the GGUF itself; the `vla-simd-cache`
+volume keeps the download between runs:
 
 ```sh
 docker build -t vla-simd .
-docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/build/act:/m:ro" vla-simd \
-    --model act --model-dir /m --host 0.0.0.0
+docker run --rm -p 127.0.0.1:8080:8080 -v vla-simd-cache:/root/.cache vla-simd \
+    --model impact --host 0.0.0.0 \
+    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf
 ```
 
-`docker build --platform linux/arm64 -t vla-simd .` builds the Pi image on an
-x86-64 host under QEMU.
+`--host 0.0.0.0` listens inside the container; `-p 127.0.0.1:8080:8080` decides
+who can reach it from outside. `docker build --platform linux/arm64 -t vla-simd .`
+builds the Pi image on an x86-64 host under QEMU.
+
+</details>
+
+### 2. Client
+
+The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
+so the robot side is lerobot's own async client, `lerobot-vla-simd`, from the
+[lerobot fork](https://github.com/khanhnd61-vr/lerobot). The `serve` install
+above already includes it. On a robot machine that does not run the server,
+install the client with:
+
+```sh
+uv venv .client --prompt client --python 3.12
+uv pip install --python .client --group client --torch-backend cpu --no-sources
+```
+
+Then, with the server running, drive the robot (`.client/bin`
+on a client-only machine or re-use `.serve/bin`) with `--policy_type` matching the
+server's `--model`:
+
+```sh
+lerobot-vla-simd --server_address=127.0.0.1:8080 \
+    --policy_type=impact \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=my_arm \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
+    --actions_per_chunk=50 \
+    --task="put the tape into the box"
+```
+
+Octo and Diffusion Policy see consecutive frames only if the client sends every frame,
+so run the client with `--chunk_size_threshold=1.0` for them,
+and `--actions_per_chunk=4` for Octo.
 
 ## Citation
 

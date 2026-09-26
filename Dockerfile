@@ -1,8 +1,8 @@
 FROM python:3.12-slim AS build
-RUN apt-get update && apt-get install -y --no-install-recommends g++
+RUN apt-get update && apt-get install -y --no-install-recommends g++ git
 COPY --from=ghcr.io/astral-sh/uv:0.10.9 /uv /bin/uv
 COPY . /src
-RUN uv venv /opt/venv && uv pip install --python /opt/venv --torch-backend cpu --no-cache '/src[serve]'
+RUN uv venv /opt/venv && uv pip install --python /opt/venv --torch-backend cpu --no-sources --no-cache '/src[serve]'
 
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -r /var/lib/apt/lists/*

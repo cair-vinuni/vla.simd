@@ -9,6 +9,7 @@
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
 #include "ops/lm_ops.h"
+#include "io/files.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -16,7 +17,7 @@
 namespace tcpu {
 
 bool DiffusionHead::load(const std::string& dir) {
-    std::ifstream meta(dir + "/head.meta");
+    io::InFile meta(dir + "/head.meta");
     if (!meta) return false;
     std::string key;
     double val;

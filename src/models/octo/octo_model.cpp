@@ -6,6 +6,7 @@
 
 #include "octo_model.h"
 #include "models/arena.h"
+#include "io/files.h"
 #include "hal/common/env.h"
 #include <chrono>
 #include <cstdio>
@@ -61,6 +62,8 @@ enum : int { I8_TF_ATTN = 1, I8_TF_W1 = 2, I8_TF_W2 = 4, I8_PROJ = 8,
 } // namespace
 
 bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
+    const io::Mount mount(dir);     // before the tokenizer: a GGUF carries tok/
+    if (!mount.ok()) return false;
     if (!tok.load(tok_dir)) return false;
     if (!t5.load(dir)) return false;
     if (!stem_primary.load(dir, "stem_primary")) return false;
