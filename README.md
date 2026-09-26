@@ -22,24 +22,6 @@ the target's instruction-set flags, while the hardware abstraction layer
 selects AVX2 kernels tuned for Intel or AMD Zen, NEON kernels for ARM with
 Accelerate support on Apple Silicon, or a portable scalar fallback.
 
-## Build
-
-```sh
-cmake -S . -B build && cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
-ctest --test-dir build --output-on-failure
-```
-
-Apple Silicon needs Homebrew's OpenMP first: `brew install cmake libomp`.
-Presets (`cmake --preset <name>`): `release`, `debug`, `ci` (release plus
-`-Werror`). Configure with `-DVLA_SANITIZE=address,undefined` for a sanitizer
-build.
-
-`pip install .` builds the same libraries through scikit-build-core into the
-`vla-simd` Python package, next to the policy server; [1. Server](#1-server)
-installs it that way. To run the server against `build/` instead, use the
-checkout's script with that environment's Python:
-`.serve/bin/python vla_simd/policy_server.py`.
-
 ## Rollout
 
 A rollout has two parts: the `vla.simd` server loads a GGUF checkpoint and serves
@@ -48,7 +30,10 @@ on the same machine or on two; only the client talks to the robot.
 
 ### 1. Server
 
-One environment serves every policy. Installing the package builds the engine:
+One environment serves every policy. Installing it compiles the C++ engine
+(the `libvla_simd_*` libraries) into the environment's `vla_simd` package, so
+there is no separate build step. On Apple Silicon, install Homebrew's OpenMP
+first: `brew install cmake libomp`.
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
