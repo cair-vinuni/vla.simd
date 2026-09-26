@@ -39,9 +39,9 @@ build.
 that way. From a checkout, `python vla_simd/policy_server.py` runs the server
 against `build/` instead.
 
-## Serve
+## Rollout
 
-A rollout has two parts: the vla.simd server loads a GGUF checkpoint and serves
+A rollout has two parts: the `vla.simd` server loads a GGUF checkpoint and serves
 actions on the CPU, and lerobot's client drives the robot against it. They run
 on the same machine or on two; only the client talks to the robot.
 
@@ -95,7 +95,7 @@ warmup and exits, reporting the backend it ran on.
 </details>
 
 <details>
-<summary><b>In Docker</b></summary>
+<summary><b>Docker</b></summary>
 
 The server also runs in a container, in place of the `.serve` install above. The
 image builds the package for the platform it is built on, x86-64 with AVX2 or
