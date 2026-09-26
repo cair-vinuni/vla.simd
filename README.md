@@ -6,8 +6,9 @@
 <p><b>Efficient CPU Inference for Language-Conditioned Manipulation</b></p>
 
 <p>
-    <a href="https://arxiv.org/abs/2609.24274">📑 Paper</a> |
-    <a href="https://vla-simd.github.io/">🌐 Project Page</a>
+    <a href="https://arxiv.org/abs/2609.24274"><img src="https://img.shields.io/badge/arXiv-2609.24274-b31b1b.svg" alt="Paper"></a>
+    <a href="https://vla-simd.github.io/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
+    <a href="https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-vla.simd%20bundle-yellow.svg" alt="Hugging Face: vla.simd model bundle"></a>
 </p>
 
 </div>
@@ -37,21 +38,6 @@ build.
 `vla-simd` Python package, next to the policy server; [Serve](#serve) installs it
 that way. From a checkout, `python vla_simd/policy_server.py` runs the server
 against `build/` instead.
-
-## Checkpoints
-
-The policies evaluated in the paper are published as GGUF in the
-[vla.simd model bundle](https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31)
-on the Hugging Face Hub:
-
-| policy | long | multi-task |
-| --- | --- | --- |
-| ACT | | [act-so101-multi-task-gguf](https://huggingface.co/khanhnd61/act-so101-multi-task-gguf) |
-| IMPACT | [impact-so101-long-gguf](https://huggingface.co/khanhnd61/impact-so101-long-gguf) | [impact-so101-multi-task-gguf](https://huggingface.co/khanhnd61/impact-so101-multi-task-gguf) (its `impact-int8-*` file was trained for W8A8: serve it with `--int8 63`) |
-| SmolVLA | [smolvla-so101-long-gguf](https://huggingface.co/khanhnd61/smolvla-so101-long-gguf) | [smolvla-so101-multi-task-gguf](https://huggingface.co/khanhnd61/smolvla-so101-multi-task-gguf) |
-| Octo | [octo-small-so101-long-gguf](https://huggingface.co/khanhnd61/octo-small-so101-long-gguf) | [octo-small-so101-multi-task-gguf](https://huggingface.co/khanhnd61/octo-small-so101-multi-task-gguf) |
-
-IMPACT on LIBERO (spatial, object, goal, 10) is [impact-libero-gguf](https://huggingface.co/khanhnd61/impact-libero-gguf).
 
 ## Serve
 
@@ -120,11 +106,13 @@ frame, so run the client with `--chunk_size_threshold=1.0` for them, and
 server with no robot attached: it sends recorded frames and prints the returned
 actions next to the recorded ones.
 
-### Server options
+<details>
+<summary><b>Server options</b></summary>
 
 `--bench N` (or `--soak SEC`; `--json` for JSON output) times N queries after
 warmup and exits, reporting the backend it ran on.
-`--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod:
+`--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod
+(`impact-int8-so101-multi-task.gguf` was trained for it: serve it with `--int8 63`):
 
 | knob | effect |
 | --- | --- |
@@ -135,6 +123,8 @@ warmup and exits, reporting the backend it ran on.
 | `TCPU_VIEW_THREADS`, `TCPU_EXPERT_THREADS`, `TCPU_OMP_MIN` | threading of the camera views, the SmolVLA expert loop, and the size below which small ops stay single-threaded |
 | `TCPU_ZEN=0`, `TCPU_ZEN=1` | force the Intel or the AMD Zen attention layout on x86; the default follows the CPU vendor |
 | `TCPU_BF16_MLP=1`, `TCPU_BF16_DEQ=0` | bf16 MLP weights on the Pi; keep bf16 checkpoint weights resident on x86 |
+
+</details>
 
 ### Docker
 
