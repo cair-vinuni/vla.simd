@@ -94,7 +94,8 @@ warmup and exits, reporting the backend it ran on.
 
 </details>
 
-#### In Docker
+<details>
+<summary><b>In Docker</b></summary>
 
 The server also runs in a container, in place of the `.serve` install above. The
 image builds the package for the platform it is built on, x86-64 with AVX2 or
@@ -111,6 +112,8 @@ docker run --rm -p 127.0.0.1:8080:8080 -v vla-simd-cache:/root/.cache vla-simd \
 `--host 0.0.0.0` listens inside the container; `-p 127.0.0.1:8080:8080` decides
 who can reach it from outside. `docker build --platform linux/arm64 -t vla-simd .`
 builds the Pi image on an x86-64 host under QEMU.
+
+</details>
 
 ### 2. Run the rollout client
 
