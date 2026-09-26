@@ -4,12 +4,14 @@ policy_server.py
 
 One server for every policy in the tree:
 
-    vla-simd-serve --model act       --model-dir build/act
-    vla-simd-serve --model octo      --model-dir build/octo
-    vla-simd-serve --model impact    --model-dir build/impact
-    vla-simd-serve --model turbovla  --model-dir build/turbovla
-    vla-simd-serve --model smolvla   --model-dir build/smolvla
-    vla-simd-serve --model diffusion --model-dir build/diffusion
+    vla-simd-serve --model act       --model-dir act.gguf
+    vla-simd-serve --model octo      --model-dir octo.gguf
+    vla-simd-serve --model impact    --model-dir impact.gguf
+    vla-simd-serve --model turbovla  --model-dir turbovla.gguf
+    vla-simd-serve --model smolvla   --model-dir smolvla.gguf
+    vla-simd-serve --model diffusion --model-dir diffusion.gguf
+
+--model-dir is a .gguf, a directory holding one, or hf://<user>/<repo>[/<file>.gguf].
 
 It speaks lerobot's async-inference protocol and is a drop-in replacement for
 `lerobot.async_inference.policy_server`: same gRPC service, same messages, same
@@ -23,8 +25,8 @@ state, Octo and Diffusion take a window of observations rather than one, and
 TurboVLA consumes its frames at the checkpoint's resolution without resampling.
 The service, queueing and CLI are shared.
 
-The checkpoint is converted ahead of time, so `pretrained_name_or_path` in the
-client's policy instructions is not fetched: the server serves --model-dir and
+The checkpoint is a GGUF converted ahead of time, so `pretrained_name_or_path`
+in the client's policy instructions is not fetched: the server serves --model-dir and
 warns if the client asked for something else. `actions_per_chunk` is honoured by
 truncating the chunk.
 
@@ -1059,7 +1061,8 @@ def main():
     if not known.model:
         sys.exit(
             "pass --model: " + ", ".join(sorted(MODELS)) + "\n"
-            "  vla-simd-serve --model act --model-dir build/act"
+            "  vla-simd-serve --model impact --model-dir "
+            "hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf"
         )
     spec = MODELS[known.model]
 

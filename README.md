@@ -35,9 +35,10 @@ Presets (`cmake --preset <name>`): `release`, `debug`, `ci` (release plus
 build.
 
 `pip install .` builds the same libraries through scikit-build-core into the
-`vla-simd` Python package, next to the policy server; [Serve](#serve) installs it
-that way. From a checkout, `python vla_simd/policy_server.py` runs the server
-against `build/` instead.
+`vla-simd` Python package, next to the policy server; [1. Server](#1-server)
+installs it that way. To run the server against `build/` instead, use the
+checkout's script with that environment's Python:
+`.serve/bin/python vla_simd/policy_server.py`.
 
 ## Rollout
 
@@ -120,33 +121,31 @@ The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
 so the robot side is lerobot's own async client, `lerobot-vla-simd`, from the
 [lerobot fork](https://github.com/khanhnd61-vr/lerobot). The `serve` install
 above already includes it. On a robot machine that does not run the server,
-install the client alone from a checkout, without building the engine:
+install the client with:
 
 ```sh
 uv venv .client --prompt client --python 3.12
 uv pip install --python .client --group client --torch-backend cpu --no-sources
 ```
 
-Then, with the server running, drive the robot (`.client/bin/lerobot-vla-simd`
-on a client-only machine). `--policy_type` matches the
-server's `--model`, `--server_address` is where the server listens, and
-`--task` is the instruction, sent with every observation:
+Then, with the server running, drive the robot (`.client/bin`
+on a client-only machine or re-use `.serve/bin`) with `--policy_type` matching the
+server's `--model`:
 
 ```sh
-.serve/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 --policy_type=impact \
+lerobot-vla-simd --server_address=127.0.0.1:8080 \
+    --policy_type=impact \
     --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0 --robot.id=my_arm \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=my_arm \
     --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30} }" \
     --actions_per_chunk=50 \
     --task="put the tape into the box"
 ```
 
-Octo and Diffusion Policy see consecutive frames only if the client sends every
-frame, so run the client with `--chunk_size_threshold=1.0` for them, and
-`--actions_per_chunk=4` for Octo, whose chunk is 4 actions.
-`--replay.repo_id=<user>/<dataset>` in place of the `--robot.*` flags checks a
-server with no robot attached: it sends recorded frames and prints the returned
-actions next to the recorded ones.
+Octo and Diffusion Policy see consecutive frames only if the client sends every frame,
+so run the client with `--chunk_size_threshold=1.0` for them,
+and `--actions_per_chunk=4` for Octo.
 
 ## Citation
 
