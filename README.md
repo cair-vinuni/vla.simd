@@ -45,18 +45,17 @@ A rollout has two parts: the `vla.simd` server loads a GGUF checkpoint and serve
 actions on the CPU, and lerobot's client drives the robot against it. They run
 on the same machine or on two; only the client talks to the robot.
 
-### 1. Start the server
+### 1. Server
 
 One environment serves every policy. Installing the package builds the engine:
 
 ```sh
 uv venv .serve --prompt serve --python 3.12
-uv pip install --python .serve '.[serve]' --torch-backend cpu
+uv pip install --python .serve '.[serve]' --torch-backend cpu --no-sources
 ```
 
 `vla-simd-serve` loads the GGUF and listens for the client.
 `--model-dir` is either a path to `.gguf` file or `hf://<user>/<repo>[@<revision>]/<file>.gguf`.
-`$CORES` is the OpenMP thread count:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
@@ -115,19 +114,21 @@ builds the Pi image on an x86-64 host under QEMU.
 
 </details>
 
-### 2. Run the rollout client
+### 2. Client
 
 The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
 so the robot side is lerobot's own async client, `lerobot-vla-simd`, from the
-[lerobot fork](https://github.com/khanhnd61-vr/lerobot). Install it into
-`.serve`, or into any Python 3.12 venv on the robot's machine:
+[lerobot fork](https://github.com/khanhnd61-vr/lerobot). The `serve` install
+above already includes it. On a robot machine that does not run the server,
+install the client alone from a checkout, without building the engine:
 
 ```sh
-uv pip install --python .serve \
-    'lerobot[async,feetech] @ git+https://github.com/khanhnd61-vr/lerobot@4b33b84296c0880ebce778d69f16a38d33825575'
+uv venv .client --prompt client --python 3.12
+uv pip install --python .client --group client --torch-backend cpu --no-sources
 ```
 
-Then, with the server running, drive the robot. `--policy_type` matches the
+Then, with the server running, drive the robot (`.client/bin/lerobot-vla-simd`
+on a client-only machine). `--policy_type` matches the
 server's `--model`, `--server_address` is where the server listens, and
 `--task` is the instruction, sent with every observation:
 
