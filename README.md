@@ -68,24 +68,18 @@ uv venv .serve --prompt serve --python 3.12
 uv pip install --python .serve '.[serve]' --torch-backend cpu
 ```
 
-`vla-simd-serve` loads the GGUF and listens for the client. `--model` names the
-policy (`act`, `impact`, `smolvla`, `octo`, `turbovla` or `diffusion`), and
-`--model-dir` is the checkpoint: a `.gguf` file, a directory holding exactly
-one, or `hf://<user>/<repo>[@<revision>]` with `/<file>.gguf` appended when the
-repo holds several. The GGUF carries the weights, tokenizer, normalization
-statistics and camera order, so nothing else is needed. `$CORES` is the OpenMP
-thread count:
+`vla-simd-serve` loads the GGUF and listens for the client.
+`--model-dir` is either a path to `.gguf` file or `hf://<user>/<repo>[@<revision>]/<file>.gguf`.
+`$CORES` is the OpenMP thread count:
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
 
 OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model impact --port 8080 \
-    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf \
-    --task "put the tape into the box"
+    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf
 ```
 
-Add `--host 0.0.0.0` when the client runs on another machine (the default,
-127.0.0.1, keeps the port local). Per policy:
+Refer the table below for valid values of `--model`:
 
 | `--model` | notes |
 | --- | --- |
@@ -107,7 +101,8 @@ uv pip install --python .serve \
 ```
 
 Then, with the server running, drive the robot. `--policy_type` matches the
-server's `--model`, and `--server_address` is where the server listens:
+server's `--model`, `--server_address` is where the server listens, and
+`--task` is the instruction, sent with every observation:
 
 ```sh
 .serve/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 --policy_type=impact \
