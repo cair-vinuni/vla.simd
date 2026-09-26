@@ -94,6 +94,24 @@ warmup and exits, reporting the backend it ran on.
 
 </details>
 
+#### In Docker
+
+The server also runs in a container, in place of the `.serve` install above. The
+image builds the package for the platform it is built on, x86-64 with AVX2 or
+aarch64 (a Raspberry Pi 5), and fetches the GGUF itself; the `vla-simd-cache`
+volume keeps the download between runs:
+
+```sh
+docker build -t vla-simd .
+docker run --rm -p 127.0.0.1:8080:8080 -v vla-simd-cache:/root/.cache vla-simd \
+    --model impact --host 0.0.0.0 \
+    --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf
+```
+
+`--host 0.0.0.0` listens inside the container; `-p 127.0.0.1:8080:8080` decides
+who can reach it from outside. `docker build --platform linux/arm64 -t vla-simd .`
+builds the Pi image on an x86-64 host under QEMU.
+
 ### 2. Run the rollout client
 
 The server is a drop-in replacement for `lerobot.async_inference.policy_server`,
@@ -125,22 +143,6 @@ frame, so run the client with `--chunk_size_threshold=1.0` for them, and
 `--replay.repo_id=<user>/<dataset>` in place of the `--robot.*` flags checks a
 server with no robot attached: it sends recorded frames and prints the returned
 actions next to the recorded ones.
-
-### Docker
-
-The server also runs in a container; the client then connects to its published
-port as above. The image builds the package for the platform it is built on, x86-64 with AVX2
-or aarch64 (a Raspberry Pi 5):
-
-```sh
-docker build -t vla-simd .
-.serve/bin/hf download khanhnd61/act-so101-multi-task-gguf act-so101-multi-task.gguf --local-dir act
-docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/act:/m:ro" vla-simd \
-    --model act --model-dir /m/act-so101-multi-task.gguf --host 0.0.0.0
-```
-
-`docker build --platform linux/arm64 -t vla-simd .` builds the Pi image on an
-x86-64 host under QEMU.
 
 ## Citation
 
