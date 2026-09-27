@@ -20,24 +20,34 @@ bool OctoTransformer::load(const std::string& dir) {
     if (!meta) return false;
     std::string key;
     double val;
-    while (meta >> key >> val) {
-        if      (key == "d"          ) cfg.d = (int)val;
-        else if (key == "n_layers"   ) cfg.n_layers = (int)val;
-        else if (key == "heads"      ) cfg.heads = (int)val;
-        else if (key == "head_dim"   ) cfg.head_dim = (int)val;
-        else if (key == "mlp"        ) cfg.mlp = (int)val;
-        else if (key == "max_horizon") cfg.max_horizon = (int)val;
-        else if (key == "n_task"     ) cfg.n_task = (int)val;
-        else if (key == "tok_primary") cfg.tok_primary = (int)val;
-        else if (key == "tok_wrist"  ) cfg.tok_wrist = (int)val;
-        else if (key == "n_readout"  ) cfg.n_readout = (int)val;
-        else if (key == "t5_dim"     ) cfg.t5_dim = (int)val;
-        else if (key == "stem_dim"   ) cfg.stem_dim = (int)val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "d"          ) cfg.d = metadata_int(val);
+        else if (key == "n_layers"   ) cfg.n_layers = metadata_int(val);
+        else if (key == "heads"      ) cfg.heads = metadata_int(val);
+        else if (key == "head_dim"   ) cfg.head_dim = metadata_int(val);
+        else if (key == "mlp"        ) cfg.mlp = metadata_int(val);
+        else if (key == "max_horizon") cfg.max_horizon = metadata_int(val);
+        else if (key == "n_task"     ) cfg.n_task = metadata_int(val);
+        else if (key == "tok_primary") cfg.tok_primary = metadata_int(val);
+        else if (key == "tok_wrist"  ) cfg.tok_wrist = metadata_int(val);
+        else if (key == "n_readout"  ) cfg.n_readout = metadata_int(val);
+        else if (key == "t5_dim"     ) cfg.t5_dim = metadata_int(val);
+        else if (key == "stem_dim"   ) cfg.stem_dim = metadata_int(val);
         else if (key == "ln_eps"     ) cfg.ln_eps = (float)val;
         else if (key == "gelu_erf"   ) cfg.gelu_erf = val != 0;
     }
 
+    if (!shape_fits({cfg.d, cfg.d}) || !shape_fits({cfg.heads, cfg.head_dim}) ||
+        cfg.heads*cfg.head_dim != cfg.d || !shape_fits({cfg.mlp, cfg.d}) ||
+        !shape_fits({cfg.n_task, cfg.d}) || !shape_fits({cfg.t5_dim, cfg.d}) ||
+        !shape_fits({cfg.stem_dim, cfg.d}) ||
+        !shape_fits({cfg.max_horizon, cfg.tok_primary, cfg.d}) ||
+        !shape_fits({cfg.max_horizon, cfg.tok_wrist, cfg.d}) ||
+        !shape_fits({cfg.max_horizon, cfg.n_readout, cfg.d}) || cfg.n_layers < 1 ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
     if (!read_arena(dir + "/octo.bin", data)) return false;
+    if ((size_t)cfg.n_layers > data.size() / cfg.d) return false;
 
     const int D = cfg.d;
     // Shapes come from the .meta, the buffer size from the .bin. Linear::init

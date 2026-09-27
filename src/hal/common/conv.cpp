@@ -450,7 +450,7 @@ static float quantize_tensor_i8(const float* x, int8_t* xq, size_t n) {
         const float a = std::fabs(x[i]);
         if (a > amax) amax = a;
     }
-    const float s = amax > 0.0f ? amax*hal::env::i8_clip()/127.0f : 1.0f;
+    const float s = amax > 0.0f ? std::max(amax*hal::env::i8_clip()/127.0f, std::numeric_limits<float>::min()) : 1.0f;
     const float inv = 1.0f/s;
 
     // std::lrint does not vectorize - GCC emits a libm call per element.

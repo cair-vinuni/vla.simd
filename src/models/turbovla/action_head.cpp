@@ -20,21 +20,30 @@ namespace tcpu {
 bool TurboActionHead::load(const std::string& dir) {
     io::InFile meta(dir + "/head.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/head.meta\n", dir.c_str()); return false; }
-    std::string key; float val;
-    while (meta >> key >> val) {
-        if      (key == "hidden"      ) cfg.hidden       = (int)val;
-        else if (key == "n_layers"    ) cfg.n_layers     = (int)val;
-        else if (key == "n_heads"     ) cfg.n_heads      = (int)val;
-        else if (key == "ff"          ) cfg.ff           = (int)val;
-        else if (key == "chunk"       ) cfg.chunk        = (int)val;
-        else if (key == "action_dim"  ) cfg.action_dim   = (int)val;
-        else if (key == "state_dim"   ) cfg.state_dim    = (int)val;
-        else if (key == "state_tokens") cfg.state_tokens = (int)val;
-        else if (key == "state_hidden") cfg.state_hidden = (int)val;
-        else if (key == "mlp_hidden"  ) cfg.mlp_hidden   = (int)val;
-        else if (key == "mlp_layers"  ) cfg.mlp_layers   = (int)val;
+    std::string key; double val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "hidden"      ) cfg.hidden       = metadata_int(val);
+        else if (key == "n_layers"    ) cfg.n_layers     = metadata_int(val);
+        else if (key == "n_heads"     ) cfg.n_heads      = metadata_int(val);
+        else if (key == "ff"          ) cfg.ff           = metadata_int(val);
+        else if (key == "chunk"       ) cfg.chunk        = metadata_int(val);
+        else if (key == "action_dim"  ) cfg.action_dim   = metadata_int(val);
+        else if (key == "state_dim"   ) cfg.state_dim    = metadata_int(val);
+        else if (key == "state_tokens") cfg.state_tokens = metadata_int(val);
+        else if (key == "state_hidden") cfg.state_hidden = metadata_int(val);
+        else if (key == "mlp_hidden"  ) cfg.mlp_hidden   = metadata_int(val);
+        else if (key == "mlp_layers"  ) cfg.mlp_layers   = metadata_int(val);
         else if (key == "ln_eps"      ) cfg.ln_eps       = val;
     }
+
+    if (!shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+        !shape_fits({cfg.n_layers, cfg.hidden, cfg.ff}) ||
+        !shape_fits({cfg.state_tokens, cfg.hidden, cfg.state_hidden}) ||
+        !shape_fits({cfg.state_dim, cfg.state_hidden}) ||
+        !shape_fits({cfg.mlp_layers, cfg.mlp_hidden, cfg.mlp_hidden}) ||
+        !shape_fits({cfg.chunk, cfg.hidden}) || !shape_fits({cfg.chunk, cfg.action_dim}) ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
 
     const bool bad = cfg.hidden < 1 || cfg.n_layers < 1 || cfg.n_heads < 1 || cfg.ff < 1 ||
                      cfg.chunk < 1 || cfg.action_dim < 1 || cfg.state_dim < 1 ||

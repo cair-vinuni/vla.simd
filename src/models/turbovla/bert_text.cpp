@@ -20,19 +20,27 @@ namespace tcpu {
 bool BertText::load(const std::string& dir, int fusion_hidden) {
     io::InFile meta(dir + "/text.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/text.meta\n", dir.c_str()); return false; }
-    std::string key; float val;
-    while (meta >> key >> val) {
-        if      (key == "hidden"    ) cfg.hidden     = (int)val;
-        else if (key == "n_heads"   ) cfg.n_heads    = (int)val;
-        else if (key == "head_dim"  ) cfg.head_dim   = (int)val;
-        else if (key == "inter"     ) cfg.inter      = (int)val;
-        else if (key == "n_layers"  ) cfg.n_layers   = (int)val;
-        else if (key == "vocab"     ) cfg.vocab      = (int)val;
-        else if (key == "max_pos"   ) cfg.max_pos    = (int)val;
-        else if (key == "type_vocab") cfg.type_vocab = (int)val;
+    std::string key; double val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "hidden"    ) cfg.hidden     = metadata_int(val);
+        else if (key == "n_heads"   ) cfg.n_heads    = metadata_int(val);
+        else if (key == "head_dim"  ) cfg.head_dim   = metadata_int(val);
+        else if (key == "inter"     ) cfg.inter      = metadata_int(val);
+        else if (key == "n_layers"  ) cfg.n_layers   = metadata_int(val);
+        else if (key == "vocab"     ) cfg.vocab      = metadata_int(val);
+        else if (key == "max_pos"   ) cfg.max_pos    = metadata_int(val);
+        else if (key == "type_vocab") cfg.type_vocab = metadata_int(val);
         else if (key == "ln_eps"    ) cfg.ln_eps     = val;
     }
     out_dim = fusion_hidden;
+
+    if (!shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+        !shape_fits({cfg.n_layers, cfg.hidden, cfg.inter}) ||
+        !shape_fits({cfg.n_heads, cfg.head_dim}) ||
+        !shape_fits({cfg.vocab, cfg.hidden}) || !shape_fits({cfg.max_pos, cfg.hidden}) ||
+        !shape_fits({cfg.type_vocab, cfg.hidden}) || !shape_fits({out_dim, cfg.hidden}) ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
 
     const bool bad = cfg.hidden < 1 || cfg.n_heads < 1 || cfg.head_dim < 1 || cfg.inter < 1 ||
                      cfg.n_layers < 1 || cfg.vocab < 1 || cfg.max_pos < 1 ||

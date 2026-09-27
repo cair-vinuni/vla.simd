@@ -32,6 +32,8 @@ struct Profile {
 } // namespace
 
 bool TurboVlaModel::load(const std::string& dir) {
+    have_text = false;
+    pad_by_instruction.clear();
     const io::Mount mount(dir);
     if (!mount.ok()) return false;
     io::InFile meta(dir + "/config.meta");
@@ -43,28 +45,31 @@ bool TurboVlaModel::load(const std::string& dir) {
         if (!(ls >> key)) continue;
         if (key == "img_mean" || key == "img_std") {
             float* dst = key == "img_mean" ? cfg.img_mean : cfg.img_std;
-            for (int i = 0; i < 3; i++) ls >> dst[i];
+            for (int i = 0; i < 3; i++)
+                if (!(ls >> dst[i]) || !std::isfinite(dst[i]) ||
+                    (key == "img_std" && dst[i] <= 0)) return false;
             continue;
         }
-        float v = 0.0f;
-        if (!(ls >> v)) continue;
-        if      (key == "img"              ) cfg.img              = (int)v;
-        else if (key == "n_views"          ) cfg.n_views          = (int)v;
-        else if (key == "text_pad"         ) cfg.text_pad         = (int)v;
-        else if (key == "max_text_len"     ) cfg.max_text_len     = (int)v;
-        else if (key == "sub_sentence"     ) cfg.sub_sentence     = (int)v;
-        else if (key == "chunk"            ) cfg.chunk            = (int)v;
-        else if (key == "action_dim"       ) cfg.action_dim       = (int)v;
-        else if (key == "state_dim"        ) cfg.state_dim        = (int)v;
-        else if (key == "cls_id"           ) cfg.cls_id           = (int)v;
-        else if (key == "sep_id"           ) cfg.sep_id           = (int)v;
-        else if (key == "dot_id"           ) cfg.dot_id           = (int)v;
-        else if (key == "question_id"      ) cfg.question_id      = (int)v;
-        else if (key == "pad_id"           ) cfg.pad_id           = (int)v;
-        else if (key == "unk_id"           ) cfg.unk_id           = (int)v;
+        double v = 0.0;
+        if (!(ls >> v) || !std::isfinite(v)) return false;
+        if      (key == "img"              ) cfg.img              = metadata_int(v);
+        else if (key == "n_views"          ) cfg.n_views          = metadata_int(v);
+        else if (key == "text_pad"         ) cfg.text_pad         = metadata_int(v);
+        else if (key == "max_text_len"     ) cfg.max_text_len     = metadata_int(v);
+        else if (key == "sub_sentence"     ) cfg.sub_sentence     = metadata_int(v);
+        else if (key == "chunk"            ) cfg.chunk            = metadata_int(v);
+        else if (key == "action_dim"       ) cfg.action_dim       = metadata_int(v);
+        else if (key == "state_dim"        ) cfg.state_dim        = metadata_int(v);
+        else if (key == "cls_id"           ) cfg.cls_id           = metadata_int(v);
+        else if (key == "sep_id"           ) cfg.sep_id           = metadata_int(v);
+        else if (key == "dot_id"           ) cfg.dot_id           = metadata_int(v);
+        else if (key == "question_id"      ) cfg.question_id      = metadata_int(v);
+        else if (key == "pad_id"           ) cfg.pad_id           = metadata_int(v);
+        else if (key == "unk_id"           ) cfg.unk_id           = metadata_int(v);
         else if (key == "gripper_deadband" ) cfg.gripper_deadband = v;
     }
-    if (cfg.img < 1 || cfg.n_views < 1 || cfg.text_pad < 1 || cfg.text_pad > cfg.max_text_len ||
+    if (!shape_fits({cfg.img, cfg.img, cfg.n_views, 3}) ||
+        !shape_fits({cfg.chunk, cfg.action_dim}) || cfg.img < 1 || cfg.n_views < 1 || cfg.text_pad < 1 || cfg.text_pad > cfg.max_text_len ||
         cfg.chunk < 1 || cfg.action_dim < 1 || cfg.state_dim < 1) {
         std::fprintf(stderr, "turbovla: %s/config.meta shapes do not close (img %d views %d "
                      "text_pad %d/%d chunk %d action %d state %d)\n", dir.c_str(), cfg.img,
@@ -115,6 +120,12 @@ bool TurboVlaModel::load(const std::string& dir) {
     proprio_std .assign(stats.begin()+(std::ptrdiff_t)S,     stats.begin()+(std::ptrdiff_t)(2*S));
     action_min  .assign(stats.begin()+(std::ptrdiff_t)(2*S), stats.begin()+(std::ptrdiff_t)(2*S+A));
     action_max  .assign(stats.begin()+(std::ptrdiff_t)(2*S+A), stats.end());
+    for (float value : stats)
+        if (!std::isfinite(value)) return false;
+    for (float value : proprio_std)
+        if (value < 0) return false;
+    for (size_t i=0; i<A; i++)
+        if (action_max[i] < action_min[i]) return false;
 
     // text_pad.txt: "<length>\t<instruction>" per line. Optional - without it
     // every instruction uses config.meta's text_pad, which is what the reference

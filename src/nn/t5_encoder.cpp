@@ -22,21 +22,26 @@ bool T5Encoder::load(const std::string& dir, const std::string& stem, size_t* ta
     if (!meta) return false;
     std::string key;
     double val;
-    while (meta >> key >> val) {
-        if      (key == "d_model"  ) cfg.d_model = (int)val;
-        else if (key == "n_layers" ) cfg.n_layers = (int)val;
-        else if (key == "n_heads"  ) cfg.n_heads = (int)val;
-        else if (key == "d_kv"     ) cfg.d_kv = (int)val;
-        else if (key == "d_ff"     ) cfg.d_ff = (int)val;
-        else if (key == "vocab"    ) cfg.vocab = (int)val;
-        else if (key == "n_buckets") cfg.n_buckets = (int)val;
-        else if (key == "max_dist" ) cfg.max_dist = (int)val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "d_model"  ) cfg.d_model = metadata_int(val);
+        else if (key == "n_layers" ) cfg.n_layers = metadata_int(val);
+        else if (key == "n_heads"  ) cfg.n_heads = metadata_int(val);
+        else if (key == "d_kv"     ) cfg.d_kv = metadata_int(val);
+        else if (key == "d_ff"     ) cfg.d_ff = metadata_int(val);
+        else if (key == "vocab"    ) cfg.vocab = metadata_int(val);
+        else if (key == "n_buckets") cfg.n_buckets = metadata_int(val);
+        else if (key == "max_dist" ) cfg.max_dist = metadata_int(val);
         else if (key == "eps"      ) cfg.eps = (float)val;
     }
-    if (cfg.n_heads < 1 || cfg.d_kv < 1 || (long long)cfg.n_heads*cfg.d_kv != cfg.d_model ||
-        cfg.n_buckets < 4 || cfg.max_dist <= cfg.n_buckets/4) return false;
+    if (!shape_fits({cfg.d_model, cfg.d_model}) || !shape_fits({cfg.d_model, cfg.d_ff}) ||
+        !shape_fits({cfg.vocab, cfg.d_model}) || !shape_fits({cfg.n_heads, cfg.d_kv}) ||
+        cfg.n_heads*cfg.d_kv != cfg.d_model || cfg.n_layers < 1 ||
+        !shape_fits({cfg.n_buckets, cfg.n_heads}) || cfg.n_buckets < 4 || cfg.n_buckets % 2 ||
+        cfg.max_dist <= cfg.n_buckets/4 || !std::isfinite(cfg.eps) || cfg.eps <= 0) return false;
 
     if (!read_arena(dir + "/" + stem + ".bin", data)) return false;
+    if ((size_t)cfg.n_layers > data.size() / cfg.d_model) return false;
 
     const int D  = cfg.d_model;
     const int FF = cfg.d_ff;

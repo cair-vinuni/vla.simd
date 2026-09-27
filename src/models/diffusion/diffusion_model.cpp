@@ -30,12 +30,13 @@ bool DiffusionModel::load(const std::string& dir) {
     if (!meta) return false;
 
     std::string line;
+    cam_names.clear();
     std::vector<int> dd;
     std::string sched_name = "DDPM";
     while (std::getline(meta, line)) {
         std::istringstream ss(line);
         std::string key;
-        ss >> key;
+        if (!(ss >> key)) continue;
         if      (key == "n_obs_steps")      ss >> cfg.n_obs_steps;
         else if (key == "n_cams")           ss >> cfg.n_cams;
         else if (key == "img_h")            ss >> cfg.img_h;
@@ -61,13 +62,21 @@ bool DiffusionModel::load(const std::string& dir) {
         else if (key == "clip_sample_range") ss >> cfg.clip_sample_range;
         else if (key == "gn_eps")           ss >> cfg.gn_eps;
         else if (key == "scheduler")        ss >> sched_name;
-        else if (key == "film_scale")     { int v; ss >> v; cfg.film_scale = v != 0; }
-        else if (key == "clip_sample")    { int v; ss >> v; cfg.clip_sample = v != 0; }
-        else if (key == "separate_encoders") { int v; ss >> v; cfg.separate_encoder_per_camera = v != 0; }
-        else if (key == "down_dims")      { int v; while (ss >> v) dd.push_back(v); }
+        else if (key == "film_scale")     { int v = 0; ss >> v; cfg.film_scale = v != 0; }
+        else if (key == "clip_sample")    { int v = 0; ss >> v; cfg.clip_sample = v != 0; }
+        else if (key == "separate_encoders") { int v = 0; ss >> v; cfg.separate_encoder_per_camera = v != 0; }
+        else if (key == "down_dims") {
+            int v;
+            while (ss >> v) dd.push_back(v);
+            if (!ss.eof() || dd.empty()) return false;
+            continue;
+        }
         else if (key == "cam")            { std::string n; ss >> n; cam_names.push_back(n); }
+        else continue;
+        if (ss.fail() || !(ss >> std::ws).eof()) return false;
     }
     if (!dd.empty()) cfg.down_dims = dd;
+    if (sched_name != "DDPM" && sched_name != "DDIM") return false;
     cfg.scheduler = (sched_name == "DDIM") ? DPScheduler::DDIM : DPScheduler::DDPM;
 
     // The step count is a deployment knob and the env override is how the
@@ -76,15 +85,24 @@ bool DiffusionModel::load(const std::string& dir) {
     const int steps = hal::env::int_env("DP_STEPS", 0);
     if (steps > 0) cfg.num_inference_steps = steps;
     if (const char* e = std::getenv("DP_SCHEDULER")) {
+        if (std::string(e) != "DDIM" && std::string(e) != "DDPM") return false;
         cfg.scheduler = (std::string(e) == "DDIM") ? DPScheduler::DDIM : DPScheduler::DDPM;
     }
 
-    if (cfg.n_cams <= 0 || cfg.n_obs_steps <= 0) return false;
+    if (!shape_fits({cfg.n_cams, cfg.n_obs_steps, cfg.img_h, cfg.img_w, 3}) ||
+        !shape_fits({cfg.state_dim, cfg.n_obs_steps}) ||
+        !shape_fits({cfg.horizon, cfg.action_dim}) ||
+        !shape_fits({2, cfg.num_keypoints, cfg.n_cams, cfg.n_obs_steps}) ||
+        (long long)cfg.step_embed_dim + (long long)cfg.state_dim*cfg.n_obs_steps +
+            (long long)2*cfg.num_keypoints*cfg.n_cams*cfg.n_obs_steps > INT_MAX ||
+        cfg.crop_h < 0 || cfg.crop_w < 0 || (cfg.crop_h == 0) != (cfg.crop_w == 0) ||
+        cfg.resize_h < 0 || cfg.resize_w < 0) return false;
     if (cfg.n_action_steps <= 0 || (long long)cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon) return false;
     if (cfg.crop_h > cfg.img_h || cfg.crop_w > cfg.img_w) return false;
     if ((cfg.resize_h > 0 && cfg.resize_h != cfg.img_h) || (cfg.resize_w > 0 && cfg.resize_w != cfg.img_w))
         return false;
     if (cfg.num_inference_steps > cfg.num_train_timesteps) return false;
+    if (!sched.init(cfg)) return false;
 
     const int n_enc = cfg.separate_encoder_per_camera ? cfg.n_cams : 1;
     encoders.resize((size_t)n_enc);
@@ -94,7 +112,6 @@ bool DiffusionModel::load(const std::string& dir) {
     }
     const int i8 = hal::env::int_env("DIFFUSION_INT8", 0);
     if (!unet.load(dir, "unet", cfg, (i8 & 1) != 0)) return false;
-    if (!sched.init(cfg)) return false;
     if (i8) {
         int n = unet.n_int8;
         if (i8 & 2)
@@ -109,6 +126,8 @@ bool DiffusionModel::load(const std::string& dir) {
     // scheduler's clip_sample_range of 1.0 the right number.
     io::InFile st(dir + "/stats.bin", std::ios::binary);
     if (!st) return false;
+    if (!file_size_is(st, ((size_t)2*cfg.state_dim + (size_t)2*cfg.action_dim +
+                          (size_t)6*cfg.n_cams)*sizeof(float))) return false;
     read_vec(st, state_min,  cfg.state_dim);
     read_vec(st, state_max,  cfg.state_dim);
     read_vec(st, action_min, cfg.action_dim);
@@ -120,6 +139,16 @@ bool DiffusionModel::load(const std::string& dir) {
         st.read(reinterpret_cast<char*>(img_std .data()+(size_t)c*3), sizeof(float)*3);
     }
     if (!st) return false;
+
+    for (const auto* values : {&state_min, &state_max, &action_min, &action_max, &img_mean, &img_std})
+        for (float value : *values)
+            if (!std::isfinite(value)) return false;
+    for (int i=0; i<cfg.state_dim; i++)
+        if (state_max[i] < state_min[i]) return false;
+    for (int i=0; i<cfg.action_dim; i++)
+        if (action_max[i] < action_min[i]) return false;
+    for (float value : img_std)
+        if (value < 0) return false;
 
     // A converter that wrote identity statistics produces a model that looks
     // healthy in parity (both sides normalize the same way) and commands the

@@ -70,7 +70,8 @@ Supported values of `--model`:
 <summary><b>Server options</b></summary>
 
 `--bench N` (or `--soak SEC`; `--json` for JSON output) times N queries after
-warmup and exits, reporting the backend it ran on.
+warmup and exits. JSON includes median/p95 latency, process peak RSS in bytes,
+checkpoint path, configuration, backend, and runtime settings.
 `--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod
 (`impact-int8-so101-multi-task.gguf` was trained for it: serve it with `--int8 63`):
 
@@ -178,8 +179,9 @@ OMP_NUM_THREADS=4 VLA_TEST_BUILD=build HF_HUB_OFFLINE=1 \
 ```
 
 The reference tests use random weights and matched noise, so they need no model
-downloads. Public-checkpoint comparisons and measured packing results are in the
-[audit report](docs/audit.md).
+downloads. Trained ACT, IMPACT, SmolVLA, and TurboVLA comparisons, measured
+packing and inference results, and remaining validation gaps are in the
+[benchmark report](docs/benchmark.md).
 
 ### Continuous integration
 
@@ -248,7 +250,7 @@ uv pip install --python .octo --group octo
 
 TurboVLA also requires the upstream code checkout described in
 `tools/convert_turbovla.py`. Newer Transformers versions change that model's
-outputs or remove APIs it uses. The [dependency audit](docs/audit.md#dependency-decisions)
+outputs or remove APIs it uses. The [dependency audit](docs/benchmark.md#dependency-decisions)
 records the tested versions and retained caps. Keep Octo in its own environment;
 its NumPy 1.x requirement conflicts with modern LeRobot.
 

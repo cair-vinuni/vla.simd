@@ -12,6 +12,7 @@
 #include "../ops/quant_ops.h"
 #include <cstring>
 #include <cstddef>
+#include <climits>
 using std::size_t;
 
 namespace tcpu {
@@ -63,7 +64,7 @@ void Linear::init(const float* W_, const float* bias_, int N_, int K_, Role role
 }
 
 bool Linear::init_int8() {
-    if (!int8_gemm_available() || N%16 != 0) return false;
+    if (K <= 0 || K > INT_MAX / (255*127) || !int8_gemm_available() || N%16 != 0) return false;
     if (!W && !Wp && !Wb && !Wr16) return false;
 
     // The packer wants a plain [N,K] fp32 matrix, but a layer holds whichever
@@ -164,6 +165,10 @@ void Linear::forward_gelu(float* out, const float* x, int seq) const {
 #endif
     forward(out, x, seq);
     gelu_tanh(out, seq*N);
+}
+
+void Linear::forward_quantized(float* out, const int8_t* x, const float* scales, int seq) const {
+    dense_linear_i8_pre(out, x, scales, Wq, wscale.data(), bias, seq, N, K);
 }
 
 void Linear::forward_add(float* out, const float* x, int seq) const {

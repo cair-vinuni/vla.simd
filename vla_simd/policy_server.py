@@ -1152,6 +1152,7 @@ def main():
     for add in spec.extra_args:
         add(p)
     args = p.parse_args()
+    checkpoint = args.model_dir
 
     # `seed` only exists for the models whose spec adds it, so check what is there
     # rather than assuming every model took every optional flag.
@@ -1159,9 +1160,9 @@ def main():
                      ("bench", 0), ("soak", 0), ("rtc_horizon", 0), ("rtc_delay", 0)):
         if getattr(args, name, None) is None:
             continue
-        if getattr(args, name) < lo:
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) < lo:
             p.error(f"--{name.replace('_', '-')} must be >= {lo}")
-    if args.obs_queue_timeout <= 0:
+    if not math.isfinite(args.obs_queue_timeout) or args.obs_queue_timeout <= 0:
         p.error("--obs-queue-timeout must be > 0")
     if not 0 < getattr(args, "rtc_max_guidance", 1.0) < math.inf:
         p.error("--rtc-max-guidance must be > 0 and finite")
@@ -1234,11 +1235,24 @@ def main():
                 t0 = time.perf_counter()
                 engine.predict(tuple(inp), len(ts))
                 ts.append((time.perf_counter() - t0) * 1000)
-            p10, med, p90 = np.percentile(ts, [10, 50, 90])
+            import platform
+            import resource
+
+            p10, med, p90, p95 = np.percentile(ts, [10, 50, 90, 95])
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             res = {"model": spec.policy_type, "backend": backend, "int8": args.int8 or 0,
                    "threads": int(os.environ["OMP_NUM_THREADS"]), "queries": len(ts),
                    "median_ms": round(float(med), 2), "p10_ms": round(float(p10), 2),
                    "p90_ms": round(float(p90), 2),
+                   "p95_ms": round(float(p95), 2),
+                   "peak_rss_bytes": int(rss if sys.platform == "darwin" else rss * 1024),
+                   "checkpoint": checkpoint, "configuration": engine.describe(),
+                   "platform": platform.platform(), "machine": platform.machine(),
+                   "numpy_version": np.__version__,
+                   "environment": {key: value for key, value in sorted(os.environ.items())
+                                   if key.startswith(("TCPU_", "OMP_", "DP_")) or
+                                   key in ("ACT_INT8", "IMPACT_INT8", "OCTO_INT8", "SMOLVLA_INT8",
+                                           "DIFFUSION_INT8", "SMOLVLA_NUM_STEPS")},
                    "actions_per_s": round(engine.chunk * 1000 / float(med), 1)}
             if args.json:
                 print(json.dumps(res))

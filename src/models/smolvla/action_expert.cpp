@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "models/arena.h"
 #include "action_expert.h"
 #include "hal/common/env.h"
 #include "hal/common/threads.h"
@@ -57,19 +58,20 @@ bool ActionExpert::load(const std::string& dir) {
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/aex.meta\n", dir.c_str()); return false; }
     std::string k; double v;
     int san = cfg.self_attn_every_n;
-    while (meta >> k >> v) {
-        if      (k == "expert_h"         ) cfg.expert_h = (int)v;
-        else if (k == "expert_ffn"       ) cfg.expert_ffn = (int)v;
-        else if (k == "n_q"              ) cfg.n_q = (int)v;
-        else if (k == "n_kv"             ) cfg.n_kv = (int)v;
-        else if (k == "head_dim"         ) cfg.head_dim = (int)v;
+    while (meta >> k) {
+        if (!(meta >> v) || !std::isfinite(v)) return false;
+        if      (k == "expert_h"         ) cfg.expert_h = metadata_int(v);
+        else if (k == "expert_ffn"       ) cfg.expert_ffn = metadata_int(v);
+        else if (k == "n_q"              ) cfg.n_q = metadata_int(v);
+        else if (k == "n_kv"             ) cfg.n_kv = metadata_int(v);
+        else if (k == "head_dim"         ) cfg.head_dim = metadata_int(v);
         else if (k == "eps"              ) cfg.rms_eps = v;
         else if (k == "rope_base"        ) cfg.rope_base = v;
-        else if (k == "n_layers"         ) cfg.n_layers = (int)v;
-        else if (k == "self_attn_every_n") san = (int)v;
-        else if (k == "chunk"            ) cfg.chunk = (int)v;
-        else if (k == "num_steps"        ) cfg.num_steps = (int)v;
-        else if (k == "max_action_dim"   ) cfg.max_action_dim = (int)v;
+        else if (k == "n_layers"         ) cfg.n_layers = metadata_int(v);
+        else if (k == "self_attn_every_n") san = metadata_int(v);
+        else if (k == "chunk"            ) cfg.chunk = metadata_int(v);
+        else if (k == "num_steps"        ) cfg.num_steps = metadata_int(v);
+        else if (k == "max_action_dim"   ) cfg.max_action_dim = metadata_int(v);
         else if (k == "min_period"       ) cfg.min_period = v;
         else if (k == "max_period"       ) cfg.max_period = v;
     }
@@ -82,6 +84,18 @@ bool ActionExpert::load(const std::string& dir) {
     const int steps = hal::env::int_env("SMOLVLA_NUM_STEPS", 0);
     if (steps > 0) cfg.num_steps = steps;
 
+    if (!shape_fits({cfg.n_q, cfg.head_dim}) || !shape_fits({cfg.n_kv, cfg.head_dim}) ||
+        cfg.n_q % cfg.n_kv || cfg.head_dim % 2 || cfg.expert_h % 2 ||
+        !shape_fits({cfg.n_layers, cfg.expert_h, cfg.q_full()}) ||
+        !shape_fits({cfg.n_layers, cfg.kv_full(), cfg.kv_full()}) ||
+        !shape_fits({cfg.n_layers, cfg.expert_ffn, cfg.expert_h}) ||
+        !shape_fits({2, cfg.expert_h, cfg.expert_h}) ||
+        !shape_fits({cfg.chunk, cfg.max_action_dim}) ||
+        !shape_fits({cfg.expert_h, cfg.max_action_dim}) || cfg.num_steps < 1 || san < 0 ||
+        !std::isfinite(cfg.rms_eps) || cfg.rms_eps <= 0 ||
+        !std::isfinite(cfg.rope_base) || cfg.rope_base <= 0 ||
+        !std::isfinite(cfg.min_period) || !std::isfinite(cfg.max_period) ||
+        cfg.min_period <= 0 || cfg.max_period <= cfg.min_period) return false;
     const int EH = cfg.expert_h, EF = cfg.expert_ffn, QF = cfg.q_full(), KV = cfg.kv_full();
     const int NL = cfg.n_layers, MAD = cfg.max_action_dim;
 
@@ -104,6 +118,7 @@ bool ActionExpert::load(const std::string& dir) {
 
     io::InFile bin(dir + "/aex.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/aex.bin\n", dir.c_str()); return false; }
+    if (!file_size_is(bin, total*sizeof(float))) return false;
     blob.resize(total - wtotal);
     raw.resize(wtotal);
     size_t bo = 0, ro = 0;

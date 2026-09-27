@@ -23,21 +23,30 @@ namespace tcpu {
 bool Dinov3Vision::load(const std::string& dir, int img_size) {
     io::InFile meta(dir + "/vision.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/vision.meta\n", dir.c_str()); return false; }
-    std::string key; float val;
-    while (meta >> key >> val) {
-        if      (key == "hidden"    ) cfg.hidden     = (int)val;
-        else if (key == "n_heads"   ) cfg.n_heads    = (int)val;
-        else if (key == "head_dim"  ) cfg.head_dim   = (int)val;
-        else if (key == "inter"     ) cfg.inter      = (int)val;
-        else if (key == "n_layers"  ) cfg.n_layers   = (int)val;
-        else if (key == "patch"     ) cfg.patch      = (int)val;
-        else if (key == "prefix"    ) cfg.prefix     = (int)val;
+    std::string key; double val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "hidden"    ) cfg.hidden     = metadata_int(val);
+        else if (key == "n_heads"   ) cfg.n_heads    = metadata_int(val);
+        else if (key == "head_dim"  ) cfg.head_dim   = metadata_int(val);
+        else if (key == "inter"     ) cfg.inter      = metadata_int(val);
+        else if (key == "n_layers"  ) cfg.n_layers   = metadata_int(val);
+        else if (key == "patch"     ) cfg.patch      = metadata_int(val);
+        else if (key == "prefix"    ) cfg.prefix     = metadata_int(val);
         else if (key == "rope_theta") cfg.rope_theta = val;
         else if (key == "ln_eps"    ) cfg.ln_eps     = val;
-        else if (key == "final_norm") cfg.final_norm = (int)val;
+        else if (key == "final_norm") cfg.final_norm = metadata_int(val);
     }
 
     grid = cfg.patch > 0 ? img_size/cfg.patch : 0;
+    if (!shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+        !shape_fits({cfg.n_layers, cfg.hidden, cfg.inter}) ||
+        !shape_fits({cfg.n_heads, cfg.head_dim}) ||
+        !shape_fits({3, cfg.patch, cfg.patch, cfg.hidden}) ||
+        !shape_fits({img_size, img_size, 3}) || !shape_fits({cfg.prefix, cfg.hidden}) ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0 ||
+        !std::isfinite(cfg.rope_theta)) return false;
+
     const bool bad = cfg.hidden < 1 || cfg.n_heads < 1 || cfg.head_dim < 1 || cfg.inter < 1 ||
                      cfg.n_layers < 1 || cfg.patch < 1 || cfg.prefix < 1 ||
                      cfg.n_heads*cfg.head_dim != cfg.hidden ||

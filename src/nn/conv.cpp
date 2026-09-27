@@ -10,6 +10,7 @@
 #include "../ops/quant_ops.h"
 #include "../ops/lm_ops.h"
 #include <cstddef>
+#include <climits>
 using std::size_t;
 
 namespace tcpu {
@@ -38,7 +39,7 @@ void Conv2d::init(const float* W_, const float* bias_, int Cout_, int k_, int Ci
 
 bool Conv2d::init_int8() {
     const int K = k*k*Cin;
-    if (!int8_gemm_available() || !W || Cout%16 != 0) return false;
+    if (K <= 0 || K > INT_MAX / (255*127) || !int8_gemm_available() || !W || Cout%16 != 0) return false;
 
     packed_i8.resize(packed_i8_words(Cout, K));
     wscale.resize(Cout);

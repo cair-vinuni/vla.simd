@@ -5,6 +5,7 @@
  */
 
 #include "models/diffusion/unet1d.h"
+#include "models/arena.h"
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include "io/files.h"
@@ -34,7 +35,15 @@ namespace tcpu {
 
 bool DPUNet1d::load(const std::string& dir, const std::string& name, const DPConfig& c, bool int8) {
     cfg = c;
-    if (cfg.down_dims.empty()) return false;
+    if (cfg.down_dims.empty() || cfg.down_dims.size() > 30 || cfg.n_groups <= 0 ||
+        cfg.step_embed_dim < 4 || cfg.step_embed_dim % 2 ||
+        !shape_fits({4, cfg.step_embed_dim, cfg.step_embed_dim}) ||
+        cfg.kernel_size < 1 || cfg.kernel_size % 2 == 0 ||
+        cfg.horizon <= 0 || cfg.horizon % (1 << (cfg.down_dims.size()-1)) ||
+        !std::isfinite(cfg.gn_eps) || cfg.gn_eps <= 0) return false;
+    for (int width : cfg.down_dims)
+        if (!shape_fits({2, width, cfg.kernel_size, width}) || width % cfg.n_groups ||
+            !shape_fits({cfg.horizon, width}) || !shape_fits({2, width, cfg.cond_dim()})) return false;
     io::InFile bin(dir + "/" + name + ".bin", std::ios::binary | std::ios::ate);
     if (!bin) return false;
     size_t left = (size_t)bin.tellg();

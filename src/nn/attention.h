@@ -17,6 +17,8 @@ namespace nn {
 // the K^T producers leave the padding columns untouched.
 struct Scratch {
     std::vector<float> h, q, k, v, att, ff, kt;
+    std::vector<int8_t> quantized;
+    std::vector<float> scales;
 };
 
 // Per-op time buckets (the OCTO_PROFILE_TF breakdown). Layers run serially and

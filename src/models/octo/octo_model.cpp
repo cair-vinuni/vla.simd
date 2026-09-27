@@ -62,6 +62,7 @@ enum : int { I8_TF_ATTN = 1, I8_TF_W1 = 2, I8_TF_W2 = 4, I8_PROJ = 8,
 } // namespace
 
 bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
+    lang_cache.clear();
     const io::Mount mount(dir);     // before the tokenizer: a GGUF carries tok/
     if (!mount.ok()) return false;
     if (!tok.load(tok_dir)) return false;
@@ -73,10 +74,11 @@ bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
 
     auto grid = [](const SmallStemConfig& c, int s) {
         for (int i=0; i<c.n_layers; i++) {
-            s = (s+2*c.pad-c.k)/c.stride+1;
-            if (s < 1) return -1;
+            const long long numerator = (long long)s+2LL*c.pad-c.k;
+            if (numerator < 0 || numerator/c.stride >= INT_MAX) return -1;
+            s = (int)(numerator/c.stride+1);
         }
-        return s*s;
+        return shape_fits({s, s}) ? s*s : -1;
     };
     if (t5.cfg.d_model != tf.cfg.t5_dim || head.cfg.emb != tf.cfg.d || tf.cfg.heads*tf.cfg.head_dim != tf.cfg.d ||
         stem_primary.cfg.embed_dim != tf.cfg.stem_dim || stem_wrist.cfg.embed_dim != tf.cfg.stem_dim ||
@@ -87,6 +89,9 @@ bool OctoModel::load(const std::string& dir, const std::string& tok_dir) {
     if (!read_floats(dir + "/stats_action_mean.bin", act_mean, AD)) return false;
     if (!read_floats(dir + "/stats_action_std.bin",  act_std,  AD)) return false;
     if (!read_floats(dir + "/stats_action_mask.bin", act_mask, AD)) return false;
+
+    for (size_t i=0; i<AD; i++)
+        if (act_std[i] < 0 || (act_mask[i] != 0 && act_mask[i] != 1)) return false;
 
     apply_int8();
     return true;

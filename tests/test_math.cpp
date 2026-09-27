@@ -2,6 +2,17 @@
 #include "preprocess/image.h"
 #include "tokenizer/t5_tokenizer.h"
 #include "tokenizer/tokenizer.h"
+#include "models/arena.h"
+#include "models/act/act_transformer.h"
+#include "models/act/resnet_backbone.h"
+#include "models/diffusion/diffusion_model.h"
+#include "models/smolvla/siglip_vision.h"
+#include "models/smolvla/smollm2_lm.h"
+#include "models/smolvla/action_expert.h"
+#include "models/octo/octo_transformer.h"
+#include "models/octo/diffusion_head.h"
+#include "models/turbovla/dinov3_vision.h"
+#include "models/turbovla/bert_text.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -73,6 +84,51 @@ int main(int argc, char** argv) {
     char path[] = "/tmp/vla_tokenizer_XXXXXX";
     if (!mkdtemp(path)) return 1;
     const std::filesystem::path root(path);
+    check(!tcpu::shape_fits({INT_MAX, 2}) && !tcpu::shape_fits({1, -1}) &&
+          tcpu::shape_fits({32, 64}), "invalid shape validation");
+    for (double value : {1.5, 1e100, -1e100, std::numeric_limits<double>::infinity()}) {
+        bool rejected = false;
+        try { tcpu::metadata_int(value); } catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "invalid integer metadata accepted");
+    }
+    for (const char* metadata : {"heads 0\n", "n_enc -1\n", "dim 2147483647\n", "chunk invalid\n"}) {
+        std::ofstream(root / "act.meta") << metadata;
+        std::ofstream(root / "act.bin", std::ios::binary).put(0);
+        tcpu::ActTransformer model;
+        check(!model.load(path, 512, 0), "invalid ACT metadata accepted");
+    }
+    {
+        std::vector<float> weights(64*7*7*3+64);
+        std::ofstream bin(root / "backbone.bin", std::ios::binary);
+        bin.write((const char*)weights.data(), weights.size()*sizeof(float));
+        bin.close();
+        for (const char* stride : {"2", "0", "2.5", "2garbage"}) {
+            std::ofstream(root / "backbone.meta") << "stem_stride " << stride << '\n';
+            tcpu::ResNetBackbone model;
+            check(model.load(path) == (std::string(stride) == "2"), "convolution stride validation");
+        }
+    }
+    for (const char* metadata : {"scheduler DDM\n", "film_scale invalid\n", "down_dims 32 garbage\n",
+                                 "n_cams 2147483647\n", "crop_h -1\n"}) {
+        std::ofstream(root / "diffusion.meta") << metadata;
+        tcpu::DiffusionModel model;
+        check(!model.load(path), "invalid diffusion metadata accepted");
+    }
+    auto rejects = [&](const char* file, const std::string& field, auto load) {
+        for (const char* value : {"1e100", "1.5", "invalid"}) {
+            std::ofstream(root / file) << field << ' ' << value << '\n';
+            bool rejected = false;
+            try { rejected = !load(); } catch (const std::invalid_argument&) { rejected = true; }
+            check(rejected, "malformed numeric metadata accepted");
+        }
+    };
+    rejects("vit.meta", "hidden", [&] { return tcpu::SiglipVision{}.load(path); });
+    rejects("vlm.meta", "hidden", [&] { return tcpu::SmollmVlm{}.load(path); });
+    rejects("aex.meta", "expert_h", [&] { return tcpu::ActionExpert{}.load(path); });
+    rejects("octo.meta", "d", [&] { return tcpu::OctoTransformer{}.load(path); });
+    rejects("head.meta", "hidden", [&] { return tcpu::DiffusionHead{}.load(path); });
+    rejects("vision.meta", "hidden", [&] { return tcpu::Dinov3Vision{}.load(path, 256); });
+    rejects("text.meta", "hidden", [&] { return tcpu::BertText{}.load(path, 256); });
     {
         std::ofstream(root / "vocab.txt") << "0\ta\n1\tb\n2\tab\n";
         std::ofstream(root / "merges.txt") << "a b\n";

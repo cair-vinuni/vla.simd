@@ -12,6 +12,75 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 from vla_simd import gguf_stage, policy_server
 
 
+def check_smolvla(args):
+    from dataclasses import fields
+    import draccus
+    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+    from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK
+    from transformers import AutoTokenizer
+
+    raw_config = json.loads((Path(args.checkpoint) / "config.json").read_text())
+    if raw_config.pop("type") != "smolvla":
+        raise ValueError("expected a SmolVLA checkpoint")
+    if "prune_vlm_layers" not in {field.name for field in fields(SmolVLAConfig)}:
+        if raw_config.pop("prune_vlm_layers", []):
+            raise ValueError("this reference LeRobot version does not support pruned VLM layers")
+    config = draccus.decode(SmolVLAConfig, raw_config)
+    config.device = "cpu"
+    config.load_vlm_weights = False
+    reference = SmolVLAPolicy.from_pretrained(args.checkpoint, config=config).float().eval()
+    tokenizer = AutoTokenizer.from_pretrained(config.vlm_model_name)
+    stats = {}
+    for path in sorted(Path(args.checkpoint).glob("*normalizer*.safetensors")):
+        stats.update(load_file(path))
+    engine = policy_server.SmolvlaEngine(SimpleNamespace(
+        lib=str(Path(args.build) / f"libvla_simd_smolvla{policy_server.LIB_EXT}"),
+        model_dir=gguf_stage.stage(args.gguf, "smolvla", args.cache),
+        tok_dir=None, rtc_horizon=0, rtc_max_guidance=10, rtc_delay=None, fps=30))
+    rng = np.random.default_rng(0)
+    errors = []
+    try:
+        for i in range(args.samples):
+            task = args.task if i % 2 == 0 else "put the red cup on the table"
+            height, width = ((engine.img_size, engine.img_size) if i % 2 == 0 else (480, 640))
+            frames = rng.integers(0, 256, (engine.n_views, height, width, 3), dtype=np.uint8)
+            state = np.ascontiguousarray(stats["observation.state.mean"].numpy() +
+                                         rng.standard_normal(engine.state_dim).astype(np.float32))
+            ids, mask = engine.tokenize(task)
+            tokens = tokenizer([task.rstrip("\n") + "\n"], padding="max_length", truncation=True,
+                               max_length=engine.tok_maxlen, return_tensors="pt")
+            np.testing.assert_array_equal(ids, tokens.input_ids[0].numpy())
+            np.testing.assert_array_equal(mask, tokens.attention_mask[0].numpy())
+            batch = {
+                "observation.state": (torch.from_numpy(state).unsqueeze(0) -
+                                      stats["observation.state.mean"]) / (stats["observation.state.std"] + 1e-8),
+                OBS_LANGUAGE_TOKENS: tokens.input_ids,
+                OBS_LANGUAGE_ATTENTION_MASK: tokens.attention_mask.bool(),
+            }
+            keys = [f"observation.images.{name}" for name in engine.cam_names]
+            if len(keys) != engine.n_views or any(key not in config.image_features for key in keys):
+                raise ValueError("GGUF camera names do not match the reference configuration")
+            batch.update((key, torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float() / 255)
+                         for key, frame in zip(keys, frames))
+            noise = rng.standard_normal((engine.chunk, config.max_action_dim), dtype=np.float32)
+            with torch.inference_mode():
+                expected = reference.predict_action_chunk(batch, noise=torch.from_numpy(noise).unsqueeze(0))[0].numpy()
+            actual = engine._run(frames.ctypes.data_as(policy_server.U8P), engine.n_views, height, width,
+                                 ids.ctypes.data_as(policy_server.I32P), mask.ctypes.data_as(policy_server.I32P),
+                                 engine.tok_maxlen, state.ctypes.data_as(policy_server.F32P),
+                                 noise.ctypes.data_as(policy_server.F32P), 0)
+            mean = stats["action.mean"].numpy()
+            scale = stats["action.std"].numpy() + 1e-8
+            normalized = (actual - mean) / scale
+            np.testing.assert_allclose(normalized, expected, rtol=3e-4, atol=3e-4)
+            np.testing.assert_allclose(actual, expected*scale+mean, rtol=3e-4, atol=1e-2)
+            errors.append(float(np.max(np.abs(normalized-expected))))
+    finally:
+        engine.close()
+    print(json.dumps({"samples": args.samples, "max_normalized_error": max(errors)}))
+
+
 def check_turbovla(args):
     import convert_turbovla as converter
     from huggingface_hub import snapshot_download
@@ -61,7 +130,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
     parser.add_argument("gguf")
-    parser.add_argument("--model", choices=("act", "impact", "turbovla"), default="act")
+    parser.add_argument("--model", choices=("act", "impact", "turbovla", "smolvla"), default="act")
     parser.add_argument("--task", default="Put the tape into the box")
     parser.add_argument("--build", default="build")
     parser.add_argument("--cache", default=None)
@@ -73,6 +142,8 @@ def main():
         parser.error("--samples must be positive")
     if args.model == "turbovla":
         return check_turbovla(args)
+    if args.model == "smolvla":
+        return check_smolvla(args)
     if args.model == "act":
         from lerobot.policies.act.configuration_act import ACTConfig as Config
         from lerobot.policies.act.modeling_act import ACTPolicy as Policy

@@ -1,4 +1,5 @@
 import concurrent.futures
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,8 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -19,6 +21,34 @@ sys.path.insert(0, str(ROOT / "tools"))
 import _gguf
 import convert_hf_safetensors
 from vla_simd import gguf_stage, policy_server
+
+
+class Benchmark(unittest.TestCase):
+    def test_json_and_invalid_timing(self):
+        engine = SimpleNamespace(
+            chunk=1, lib=SimpleNamespace(vla_backend_name=Mock(return_value=b"scalar"),
+                                        vla_int8_available=Mock(return_value=0)),
+            describe=Mock(return_value="test configuration"), predict=Mock(), close=Mock(),
+            warmup_input=Mock(return_value=(np.zeros((1, 1, 1, 3), np.uint8),)))
+        argv = ["serve", "--model", "act", "--model-dir", "test.gguf", "--bench", "2", "--json"]
+        output = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(sys, "stdout", output), \
+             patch.object(gguf_stage, "stage", return_value="staged"), \
+             patch.object(policy_server.MODELS["act"], "engine_cls", return_value=engine):
+            policy_server.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["checkpoint"], "test.gguf")
+        self.assertEqual(result["queries"], 2)
+        self.assertGreater(result["peak_rss_bytes"], 0)
+        self.assertGreaterEqual(result["p95_ms"], result["median_ms"])
+        self.assertEqual(engine.predict.call_count, 4)
+        engine.close.assert_called_once()
+        for option in ("--soak", "--obs-queue-timeout"):
+            for value in ("nan", "inf"):
+                with patch.object(sys, "argv", argv + [option, value]), \
+                     patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as error:
+                    policy_server.main()
+                self.assertEqual(error.exception.code, 2)
 
 
 class Checkpoints(unittest.TestCase):
