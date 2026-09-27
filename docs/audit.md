@@ -100,7 +100,7 @@ Seven subprocess runs packed four 64 MiB zero-filled files plus a small text
 config on the local `/tmp` filesystem:
 
 | Metric, median | Before | After |
-| --- | ---: | ---: |
+| --- | --- | --- |
 | Packing wall time | 170.48 ms | 61.30 ms |
 | Process peak RSS | 294,088 KiB | 19,424 KiB |
 
@@ -165,15 +165,29 @@ low-bit weights. Adopting that approach here would require a new weight format,
 representative VLA accuracy measurements, and backend benchmarks. Neither paper
 justifies changing the current numerical path without those checks.
 
-All three C++ suites passed in Release, scalar, and sanitizer builds with
-warnings as errors. Forced Zen dispatch and one/eight-thread operator runs also
+During the initial audit, all three C++ suites passed in Release, scalar, and
+sanitizer builds with warnings as errors. Forced Zen dispatch and one/eight-thread operator runs also
 passed. All 16 Python tests passed in the reference environment; the minimal
 wheel environment passed with six optional tests skipped. Each of the six shared
 libraries loaded from the wheel and Docker image and exported the ABI symbol.
 The installed CMake consumer linked and ran, all three Docker protocol tests
 passed, and every dependency group resolved separately. CI retains ARM NEON and
 Apple Accelerate coverage and adds a scalar row and Python/protocol regressions.
-Native ARM, Apple, and AMD hardware runs were unavailable locally. No remote CI run was triggered.
+
+The [CI follow-up](../README.md#continuous-integration) passed all 19 Python tests
+without skips in a fresh environment using the workflow's install command. It
+also passed Release, scalar, and sanitizer tests, the installed CMake consumer,
+and wheel and Docker package checks. The new regressions cover atomic checkpoint
+publication, integer metadata bounds, tensor-part collisions, invalid engine
+outputs, and observation timing. CI now requires the complete reference suite
+and tests installed packages in isolated Python mode.
+
+All three Markdown files passed lint and local-link checks; actionlint and
+ShellCheck passed for the workflow. The change filter passed 16 cases covering
+documentation, code, deletions, renames, and missing base revisions. A local Docker
+rebuild reused the serving-dependency layer. GitHub CI runtime and remote cache
+reuse have not been measured. Native ARM, Apple, and AMD hardware runs were
+unavailable locally. No remote CI run was triggered.
 
 The parser tests target reproduced failures; they are not an exhaustive fuzzing
 campaign or a security certification for arbitrary checkpoints. Model-specific

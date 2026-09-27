@@ -272,6 +272,7 @@ if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   target_link_libraries(test_math PRIVATE tcpu_diffusion tcpu_preprocess tcpu_tokenizer)
   add_test(NAME math COMMAND test_math)
   set_tests_properties(math PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
+  set_tests_properties(ops gguf math PROPERTIES TIMEOUT 120)
 endif()
 
 # ---------------------------------------------------------------------------

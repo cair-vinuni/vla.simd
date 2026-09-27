@@ -14,7 +14,8 @@ import numpy as np
 BUILD = Path(os.environ.get("VLA_TEST_BUILD", "build"))
 
 
-@unittest.skipUnless(importlib.util.find_spec("diffusers") and (BUILD / "test_math").is_file(),
+@unittest.skipUnless(importlib.util.find_spec("diffusers") and importlib.util.find_spec("torch") and
+                     (BUILD / "test_math").is_file(),
                      "requires diffusers, torch and a CMake build")
 class Schedulers(unittest.TestCase):
     def test_reference_trajectories(self):
@@ -26,7 +27,8 @@ class Schedulers(unittest.TestCase):
                     for clip in (0, 1):
                         with self.subTest(kind=kind, schedule=schedule, train=train, steps=steps, clip=clip):
                             output = subprocess.check_output(
-                                [str(BUILD / "test_math"), schedule, str(train), str(steps), kind, str(clip)], text=True)
+                                [str(BUILD / "test_math"), schedule, str(train), str(steps), kind, str(clip)],
+                                text=True, timeout=10)
                             got = np.loadtxt(io.StringIO(output), ndmin=2)
                             scheduler = cls(num_train_timesteps=train, beta_schedule=schedule, clip_sample=bool(clip))
                             scheduler.set_timesteps(steps)
@@ -48,8 +50,7 @@ class DiffusionPolicy(unittest.TestCase):
     def test_exported_policy(self):
         import torch
         from diffusers import DDIMScheduler, DDPMScheduler
-        sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "tools"),
-                        str(Path(__file__).resolve().parents[1])]
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         import convert_diffusion as converter
         from vla_simd import policy_server
 

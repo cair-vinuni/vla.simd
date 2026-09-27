@@ -6,16 +6,24 @@
 <p><b>Efficient CPU Inference for Language-Conditioned Manipulation</b></p>
 
 <p>
-    <a href="https://arxiv.org/abs/2609.24274"><img src="https://img.shields.io/badge/arXiv-2609.24274-b31b1b.svg" alt="Paper"></a>
-    <a href="https://vla-simd.github.io/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
-    <a href="https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-vla.simd%20bundle-yellow.svg" alt="Hugging Face: vla.simd model bundle"></a>
+    <a href="https://arxiv.org/abs/2609.24274">
+      <img src="https://img.shields.io/badge/arXiv-2609.24274-b31b1b.svg" alt="Paper">
+    </a>
+    <a href="https://vla-simd.github.io/">
+      <img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project page">
+    </a>
+    <a href="https://huggingface.co/collections/khanhnd61/vlasimd-model-bundle-6ab649fa9d1f2e8b66512a31">
+      <img
+        src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-vla.simd%20bundle-yellow.svg"
+        alt="Hugging Face: vla.simd model bundle">
+    </a>
 </p>
 
 </div>
 
-A pure C++ inference engine for Vision-Language-Action policies on **CPUs**,
-with no GPU, CUDA, or ggml dependency. Built with its own tensors, operators,
-and SIMD kernels, the engine keeps kernels easy to inspect, tune, and replace.
+A C++ inference engine for Vision-Language-Action policies on CPUs,
+with its own tensors, operators, and SIMD kernels. The model runtime has no
+GPU, CUDA, or ggml dependency.
 
 One codebase supports x86-64, Apple Silicon, and Raspberry Pi. CMake configures
 the target's instruction-set flags, while the hardware abstraction layer
@@ -39,7 +47,8 @@ uv pip install --python .serve '.[serve]' --torch-backend cpu --no-sources
 ```
 
 `vla-simd-serve` loads the GGUF and listens for the client.
-`--model-dir` is either a path to `.gguf` file or `hf://<user>/<repo>[@<revision>]/<file>.gguf`.
+`--model-dir` accepts a local `.gguf` file or
+`hf://<user>/<repo>[@<revision>]/<file>.gguf`.
 
 ```sh
 export CORES=6    # 8 on the M4, 16 on the i9, 12 on the Ryzen, 4 on a Pi 5
@@ -48,9 +57,9 @@ OMP_NUM_THREADS=$CORES .serve/bin/vla-simd-serve --model impact --port 8080 \
     --model-dir hf://khanhnd61/impact-so101-multi-task-gguf/impact-so101-multi-task.gguf
 ```
 
-Refer the table below for valid values of `--model`:
+Supported values of `--model`:
 
-| `--model` | notes |
+| `--model` | Notes |
 | --- | --- |
 | `impact`, `act`, `smolvla` | nothing extra |
 | `turbovla` | add `--task "<instruction>"` unless the GGUF records one; frames consumed as given, at the checkpoint's resolution |
@@ -65,7 +74,7 @@ warmup and exits, reporting the backend it ran on.
 `--int8 MASK` runs the W8A8 path on CPUs with AVX-VNNI or dotprod
 (`impact-int8-so101-multi-task.gguf` was trained for it: serve it with `--int8 63`):
 
-| knob | effect |
+| Setting | Effect |
 | --- | --- |
 | `--int8 MASK` | `ACT_INT8` / `IMPACT_INT8`: 1 encoder attention, 2 encoder w1, 4 encoder w2, 8 token projections, 16 decoder, 32 ResNet convolutions. `SMOLVLA_INT8`: 1/2/4 ViT attention/w1/w2, 8 ViT patch embed and connector, 16 language model, 32 action expert. `OCTO_INT8`: 1/2/4 transformer attention/w1/w2, 8 token projections, 16 stem convolutions, 32 diffusion head. `DIFFUSION_INT8`: 1 UNet convolutions, 2 ResNet convolutions |
 | `DP_SCHEDULER`, `DP_STEPS` | Diffusion Policy sampler (`DDPM` or `DDIM`) and step count |
@@ -111,12 +120,12 @@ uv venv .client --prompt client --python 3.12
 uv pip install --python .client --group client --torch-backend cpu --no-sources
 ```
 
-Then, with the server running, drive the robot (`.client/bin`
-on a client-only machine or re-use `.serve/bin`) with `--policy_type` matching the
-server's `--model`:
+With the server running, start the client with `--policy_type` matching the
+server's `--model`. Use `.serve/bin/lerobot-vla-simd` if you installed the client
+in the serving environment instead:
 
 ```sh
-lerobot-vla-simd --server_address=127.0.0.1:8080 \
+.client/bin/lerobot-vla-simd --server_address=127.0.0.1:8080 \
     --policy_type=impact \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM0 \
@@ -148,16 +157,69 @@ For memory and undefined-behavior checks, configure a separate Debug build with
 `TCPU_ZEN=1 ctest --test-dir build --output-on-failure` exercises the Zen dispatch
 path. This does not replace testing on AMD hardware.
 
-The Python regressions use the standard library's test runner:
+The Python regressions use the standard library's test runner. The serving
+environment runs the core and protocol tests:
 
 ```sh
-VLA_TEST_BUILD=build .serve/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+OMP_NUM_THREADS=4 VLA_TEST_BUILD=build \
+  .serve/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Reference tests skip when their optional dependencies are absent. Run them in
-the LeRobot converter environment for Diffusers scheduler and complete small
-Diffusion Policy comparisons. Public-checkpoint comparisons and measured packing
-results are recorded in the [audit report](docs/audit.md).
+Reference tests skip when Diffusers or a CMake build is absent. To run every
+Python test in one environment, install the serving dependencies with the
+Diffusion extra:
+
+```sh
+uv venv .venv-test --python 3.12
+uv pip install --python .venv-test -r pyproject.toml --extra serve \
+  'lerobot[diffusion]' --torch-backend cpu --no-sources
+OMP_NUM_THREADS=4 VLA_TEST_BUILD=build HF_HUB_OFFLINE=1 \
+  .venv-test/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The reference tests use random weights and matched noise, so they need no model
+downloads. Public-checkpoint comparisons and measured packing results are in the
+[audit report](docs/audit.md).
+
+### Continuous integration
+
+The [workflow](.github/workflows/build.yml) always checks every tracked Markdown
+file with PyMarkdown and validates its own YAML and shell commands with actionlint.
+Changes limited to Markdown, README images, or Markdown lint settings skip the
+build jobs. Use the manual workflow trigger to run the full matrix anyway.
+
+Code changes run these checks:
+
+| Check | Coverage |
+| --- | --- |
+| C++ matrix | GCC and Clang on x86; Release, Debug, and scalar; ARM NEON; Apple Accelerate; Zen dispatch on x86 |
+| Linux Release | CMake installation and C consumer; all Python, protocol, and Diffusers reference tests, with skips treated as failures |
+| Sanitizers | Address, undefined behavior, and float-to-integer overflow |
+| Wheel | Core tests in isolated Python mode against the installed package; ABI checks for all six libraries |
+| Docker | Native x86 and ARM builds; protocol tests and ABI checks against the installed image |
+
+The Release build also supplies the installation and reference checks. uv caches
+Python dependencies. Docker installs serving dependencies before copying source
+files, then caches build layers separately for x86 and ARM. C++ tests have a
+two-minute timeout; Python subprocess checks have a ten-second timeout.
+
+Actions are pinned to commit SHAs: checkout 7.0.1, setup-uv 10.2.0,
+setup-buildx-action 4.4.1, and build-push-action 7.4.0. Tool versions are uv
+0.12.19, PyMarkdown 0.9.40, and actionlint 1.7.12. The actionlint download is
+verified by SHA-256. The standalone `install` job is now part of Linux Release;
+branch protection that required `install` must use the Release matrix check.
+
+Run the same Markdown check locally:
+
+```sh
+git ls-files -z '*.md' | xargs -0 uvx --from pymarkdownlnt==0.9.40 \
+  pymarkdown --config .pymarkdown.json scan
+```
+
+The lint settings allow the README's HTML header and collapsible sections,
+enable GitHub tables, and limit prose lines to 100 characters. Code blocks and
+tables can be wider. Live external-link checks stay outside CI to avoid network
+flakiness.
 
 ## Converter environments
 
@@ -205,9 +267,11 @@ its NumPy 1.x requirement conflicts with modern LeRobot.
 
 `vla.simd` is released under the [Apache 2.0 license](LICENSE).
 
-## Acknowledgement
+## Acknowledgements
 
-- [ACT](https://huggingface.co/papers/2304.13705) and [lerobot](https://github.com/huggingface/lerobot) - the reference implementations and the async-inference protocol
+- [ACT](https://huggingface.co/papers/2304.13705) and
+  [LeRobot](https://github.com/huggingface/lerobot) - reference implementations
+  and the async-inference protocol
 - [Octo](https://github.com/octo-models/octo) - the authoritative JAX model
 - [TurboVLA](https://github.com/H-EmbodVis/TurboVLA) - the LIBERO checkpoints
 - [Diffusion Policy](https://arxiv.org/abs/2303.04137) - the U-Net action denoiser (Chi et al., 2023)

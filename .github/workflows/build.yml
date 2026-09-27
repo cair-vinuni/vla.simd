@@ -5,96 +5,116 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # One tree, three platforms. All with -Werror, all asserting the vector
-  # backend was picked over the scalar fallback.
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        name: Select checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [[ "$BASE_SHA" =~ ^0+$ ]]; then
+            echo 'code=true' >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE_SHA" HEAD -- . ':(glob,exclude)**/*.md' ':(exclude)assets/' ':(exclude).pymarkdown.json'; then
+            echo 'code=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'code=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: '0.12.19'
+          enable-cache: true
+          cache-dependency-glob: '.github/workflows/build.yml'
+      - name: Check all Markdown
+        run: git ls-files -z '*.md' | xargs -0 uvx --from pymarkdownlnt==0.9.40 pymarkdown --config .pymarkdown.json scan
+      - name: Check workflow syntax and shell commands
+        run: |
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
   build:
+    needs: quality
+    if: needs.quality.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04,     build_type: Release }
+          - { os: ubuntu-24.04,     build_type: Release, full: true }
           - { os: ubuntu-24.04,     build_type: Debug }
           - { os: ubuntu-24.04,     build_type: Release, cmake_extra: -DVLA_SCALAR=ON, scalar: true }
           - { os: ubuntu-24.04,     build_type: Release, cxx: clang++ }
           - { os: ubuntu-24.04-arm, build_type: Release }
           - { os: ubuntu-24.04-arm, build_type: Debug }
           - { os: ubuntu-24.04-arm, build_type: Release, cxx: g++-12 }
-          # cmake_extra is empty for every row but this one. The macOS runners are
-          # virtualized, and there AppleClang resolves -mcpu=native to a CPU
-          # without dotprod, so gemm_i8.cpp's vdotq_s32 kernels fail to compile.
-          # A real Mac detects its own part correctly, so CMakeLists keeps
-          # native as the default and only CI pins the floor.
           - { os: macos-latest,     build_type: Release, cmake_extra: -DVLA_APPLE_MCPU=apple-m1 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - if: runner.os == 'macOS'
         run: brew install libomp
       - if: matrix.cxx == 'clang++'
         run: sudo apt-get install -y libomp-dev
-      - name: configure
+      - name: Configure
         env:
           CXX: ${{ matrix.cxx }}
+          BUILD_TYPE: ${{ matrix.build_type }}
+          CMAKE_EXTRA: ${{ matrix.cmake_extra }}
         run: |
           cmake -S . -B build \
-                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
                 -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-                ${{ matrix.cmake_extra }}
-      - run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
-      # The ISA flags once lived in CMAKE_CXX_FLAGS_RELEASE, so other build types
-      # compiled the HAL without them and src/hal/arch.h fell back to the scalar
-      # kernels. Assert they reach the actual compile line, in every build type.
-      - name: the ISA flags reach the HAL compile line
-        if: ${{ !matrix.scalar }}
+                ${CMAKE_EXTRA:+"$CMAKE_EXTRA"}
+      - run: cmake --build build --parallel "$(getconf _NPROCESSORS_ONLN)"
+      - name: Check backend compiler flags
+        env:
+          SCALAR: ${{ matrix.scalar }}
         run: |
-          python3 - <<'EOF'
-          import json, platform, sys
+          python3 - <<'PY'
+          import json, os, platform, sys
           db = json.load(open("build/compile_commands.json"))
           tu = next(e for e in db if e["file"].endswith("src/hal/common/gemm.cpp"))
           cmd = tu.get("command") or " ".join(tu["arguments"])
           mach = platform.machine()
-          want = ["-mavx2", "-mfma"] if mach == "x86_64" else (
-              ["-mcpu=apple-m1"] if sys.platform == "darwin" else ["-march=armv8-a+simd"])
+          want = ["-DTCPU_FORCE_SCALAR=1"] if os.environ["SCALAR"] == "true" else (
+              ["-mavx2", "-mfma"] if mach == "x86_64" else (
+                  ["-mcpu=apple-m1"] if sys.platform == "darwin" else ["-march=armv8-a+simd"]))
           want.append("-fopenmp")
           missing = [f for f in want if f not in cmd]
           if missing:
               sys.exit(f"{mach}: {missing} absent from the HAL compile line:\n{cmd}")
           print(f"{mach}: {want} present")
-          EOF
+          PY
       - run: ctest --test-dir build --output-on-failure
-      - if: runner.arch == 'X64'
+      - if: runner.arch == 'X64' && !matrix.scalar
         run: TCPU_ZEN=1 ctest --test-dir build --output-on-failure
-
-  sanitize:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVLA_SANITIZE=address,undefined -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-      - run: cmake --build build -j$(nproc)
-      - run: ctest --test-dir build --output-on-failure
-
-  # Installs, exports, and links from an out-of-tree consumer.
-  install:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - run: cmake --preset release && cmake --build --preset release -j$(nproc)
-      - run: cmake --install build --prefix "$PWD/stage"
-      - name: find_package + link
+      - if: matrix.full
+        name: Install and check CMake exports
         run: |
-          mkdir -p /tmp/c && cd /tmp/c
+          cmake --install build --prefix "$RUNNER_TEMP/stage"
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
           cat > CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.21)
           project(consumer C)
@@ -106,36 +126,81 @@ jobs:
           #include <vla_simd.h>
           int main(void){ return vla_abi_version() == VLA_ABI_VERSION ? 0 : 1; }
           EOF
-          cmake -S . -B b -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/stage"
-          cmake --build b
-          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/stage/lib" ./b/use
-      # vla_abi_version lived in act_capi.cpp only, so the other libraries
-      # did not export the symbol their own header declares.
-      - name: every library exports the ABI symbol
-        run: |
-          for l in act smolvla octo turbovla impact diffusion; do
-            nm -D --defined-only "stage/lib/libvla_simd_$l.so" | grep -q vla_abi_version \
-              || { echo "libvla_simd_$l.so is missing vla_abi_version"; exit 1; }
+          cmake -S . -B build -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/stage"
+          cmake --build build
+          ./build/use
+          for model in act smolvla octo turbovla impact diffusion; do
+            nm -D --defined-only "$RUNNER_TEMP/stage/lib/libvla_simd_$model.so" | grep vla_abi_version
           done
+      - if: matrix.full
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: '0.12.19'
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - if: matrix.full
+        name: Run Python and reference tests without skips
+        env:
+          OMP_NUM_THREADS: '4'
+          VLA_TEST_BUILD: build
+          HF_HUB_OFFLINE: '1'
+        run: |
+          uv venv "$RUNNER_TEMP/reference" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/reference" -r pyproject.toml --extra serve 'lerobot[diffusion]' --torch-backend cpu --no-sources
+          "$RUNNER_TEMP/reference/bin/python" - <<'PY'
+          import sys, unittest
+          suite = unittest.defaultTestLoader.discover("tests")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(not result.wasSuccessful() or bool(result.skipped))
+          PY
+
+  sanitize:
+    needs: quality
+    if: needs.quality.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVLA_SANITIZE=address,undefined,float-cast-overflow -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - run: cmake --build build --parallel "$(nproc)"
+      - run: ctest --test-dir build --output-on-failure
 
   wheel:
+    needs: quality
+    if: needs.quality.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7.0.1
-      - run: python3 -m pip wheel --no-deps -w dist .
-      - run: python3 -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
-      - run: /tmp/w/bin/python -m unittest discover -s tests -p 'test_*.py'
-      - name: the installed server opens every library
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: '0.12.19'
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv build --wheel
+      - name: Test the installed wheel
         run: |
-          /tmp/w/bin/python -I - <<'EOF'
+          uv venv "$RUNNER_TEMP/wheel" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/wheel" dist/*.whl
+          "$RUNNER_TEMP/wheel/bin/python" -I -m unittest discover -s tests -p test_python.py -v
+          "$RUNNER_TEMP/wheel/bin/python" -I - <<'PY'
+          from pathlib import Path
+          import sys
           from vla_simd import policy_server as s
+          assert Path(s.__file__).is_relative_to(sys.prefix), s.__file__
           for name, spec in s.MODELS.items():
-              s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              lib = s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              assert lib.vla_abi_version() == s.VLA_ABI_VERSION, name
               print(name, spec.default_lib)
-          EOF
+          PY
 
   docker:
+    needs: quality
+    if: needs.quality.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -143,15 +208,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7.0.1
-      - run: docker build -t vla-simd .
-      - run: docker run --rm vla-simd --model act --help
-      - run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" vla-simd -m unittest discover -s /tests -p test_server.py
-      - name: the image opens every library
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Build and cache the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          load: true
+          push: false
+          tags: vla-simd:ci
+          cache-from: type=gha,scope=vla-simd-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=vla-simd-${{ runner.arch }}
+      - run: docker run --rm vla-simd:ci --model act --help
+      - run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" vla-simd:ci -I -m unittest discover -s /tests -p test_server.py -v
+      - name: Check every installed library
         run: |
-          docker run --rm -i --entrypoint python vla-simd - <<'EOF'
+          docker run --rm -i --entrypoint python vla-simd:ci -I - <<'PY'
           from vla_simd import policy_server as s
           for name, spec in s.MODELS.items():
-              s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              lib = s._open_lib(spec.default_lib, f"vla_simd_{name}")
+              assert lib.vla_abi_version() == s.VLA_ABI_VERSION, name
               print(name, spec.default_lib)
-          EOF
+          PY

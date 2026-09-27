@@ -165,6 +165,28 @@ static void test_reader(const std::string& dir) {
     duplicate.u32("same", 2);
     write(dir + "/bad.gguf", duplicate.bytes());
     CHECK(!b.open(dir + "/bad.gguf"), "duplicate metadata accepted");
+    Writer misaligned;
+    misaligned.tensor("offset", {1}, io::GGML_F32, f, sizeof(float));
+    const uint64_t offset = 1;
+    std::memcpy(misaligned.info.data() + misaligned.info.size() - sizeof offset, &offset, sizeof offset);
+    write(dir + "/bad.gguf", misaligned.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "misaligned tensor offset accepted");
+    Writer array;
+    array.key("array", io::GGUF_ARRAY);
+    Writer::put<uint32_t>(array.kv, io::GGUF_F64);
+    Writer::put<uint64_t>(array.kv, 1000000);
+    write(dir + "/bad.gguf", array.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "truncated metadata array accepted");
+    for (double count : {-1.0, 0.5, 4294967296.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+        Writer invalid;
+        invalid.f64("count", count);
+        write(dir + "/bad.gguf", invalid.bytes());
+        CHECK(b.open(dir + "/bad.gguf"), "count fixture rejected before conversion");
+        std::string error;
+        io::TensorReader reader{b, error};
+        CHECK(reader.u32("count") == 0 && !reader.ok(), "invalid integer metadata accepted");
+    }
     for (double alignment : {-32.0, 0.5, std::numeric_limits<double>::infinity()}) {
         Writer a;
         a.f64("general.alignment", alignment);
@@ -230,6 +252,21 @@ static void test_mount(const std::string& dir) {
         io::Files files;
         std::string error;
         CHECK(g.open(path) && !io::adapt_gguf(g, io::Sidecar{dir}, files, error), "unsafe embedded path accepted");
+    }
+    for (const auto& names : std::vector<std::vector<std::string>>{
+            {"weights.bin:1"}, {"weights.bin:0", "weights.bin:2"},
+            {"weights.bin", "weights.bin:0"}, {"weights.bin:0", "weights.bin"}}) {
+        Writer bad;
+        bad.s("general.architecture", "vla-simd");
+        bad.u32("vla_simd.format", 1);
+        for (const auto& name : names)
+            bad.tensor(name, {1}, io::GGML_F32, weights.data(), sizeof(float));
+        write(path, bad.bytes());
+        io::Gguf g;
+        io::Files files;
+        std::string error;
+        CHECK(g.open(path) && !io::adapt_gguf(g, io::Sidecar{dir}, files, error),
+              "misordered or colliding tensor parts accepted");
     }
     unlink(path.c_str());
 }

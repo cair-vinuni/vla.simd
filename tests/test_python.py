@@ -2,17 +2,19 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import pickle
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
+sys.path.insert(0, str(ROOT / "tools"))
 
 import _gguf
 import convert_hf_safetensors
@@ -51,6 +53,28 @@ class Checkpoints(unittest.TestCase):
                 _gguf.pack(self.source, self.path, "act", "test", {"weights.bin": layout})
             self.assertEqual(self.path.read_bytes(), whole)
 
+    def test_pack_publication(self):
+        self.pack()
+        whole = self.path.read_bytes()
+        with patch.object(_gguf.os, "replace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.pack("changed\n")
+        self.assertEqual(self.path.read_bytes(), whole)
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"source", "model.gguf"})
+        replace = os.replace
+        barrier = threading.Barrier(4)
+
+        def publish(source, destination):
+            barrier.wait(timeout=5)
+            replace(source, destination)
+
+        with patch.object(_gguf.os, "replace", publish), concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            writes = [pool.submit(_gguf.pack, self.source, self.path, "act", "test", {}) for _ in range(4)]
+            for future in writes:
+                future.result(timeout=10)
+        self.assertEqual(_gguf.read_files(self.path)["config.txt"], b"changed\n")
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"source", "model.gguf"})
+
     def test_metadata_bounds(self):
         for value in (struct.pack("<Q", 100), struct.pack("<Q", 1) + b"x" + struct.pack("<IIQ", 9, 0, 999)):
             self.path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, 1) + value)
@@ -68,7 +92,8 @@ class Checkpoints(unittest.TestCase):
         binary = Path(os.environ.get("VLA_TEST_BUILD", "build")) / "vla-simd-gguf"
 
         def extract(out):
-            return subprocess.run([str(binary), "extract", str(self.path), str(out)], capture_output=True)
+            return subprocess.run([str(binary), "extract", str(self.path), str(out)],
+                                  capture_output=True, timeout=10)
 
         target = self.root / "target"
         self.assertEqual(extract(target).returncode, 0)
@@ -162,8 +187,26 @@ class Inputs(unittest.TestCase):
                 policy_server.ObservationAdapter._as_uint8(frame)
 
     def test_pickle_rejects_globals(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(pickle.UnpicklingError):
             policy_server._loads(b"cos\nsystem\n(S'false'\ntR.")
+
+    def test_engine_rejects_invalid_results_and_closed_handle(self):
+        engine = object.__new__(policy_server._Engine)
+        engine.chunk = engine.action_dim = 1
+        engine.name = "test"
+        engine.h = 1
+        engine.lock = threading.Lock()
+
+        def predict(handle, output):
+            output[0] = np.nan
+            return 0
+
+        engine._fn = lambda _: predict
+        with self.assertRaisesRegex(RuntimeError, "nonfinite actions"):
+            engine._run()
+        engine.h = None
+        with self.assertRaisesRegex(RuntimeError, "engine is closed"):
+            engine._run()
 
 
 if __name__ == "__main__":
