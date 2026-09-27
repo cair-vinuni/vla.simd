@@ -23,6 +23,7 @@ jobs:
         include:
           - { os: ubuntu-24.04,     build_type: Release }
           - { os: ubuntu-24.04,     build_type: Debug }
+          - { os: ubuntu-24.04,     build_type: Release, cmake_extra: -DVLA_SCALAR=ON, scalar: true }
           - { os: ubuntu-24.04,     build_type: Release, cxx: clang++ }
           - { os: ubuntu-24.04-arm, build_type: Release }
           - { os: ubuntu-24.04-arm, build_type: Debug }
@@ -36,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - if: runner.os == 'macOS'
         run: brew install libomp
       - if: matrix.cxx == 'clang++'
@@ -54,6 +55,7 @@ jobs:
       # compiled the HAL without them and src/hal/arch.h fell back to the scalar
       # kernels. Assert they reach the actual compile line, in every build type.
       - name: the ISA flags reach the HAL compile line
+        if: ${{ !matrix.scalar }}
         run: |
           python3 - <<'EOF'
           import json, platform, sys
@@ -77,7 +79,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVLA_SANITIZE=address,undefined -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
       - run: cmake --build build -j$(nproc)
       - run: ctest --test-dir build --output-on-failure
@@ -87,7 +89,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - run: cmake --preset release && cmake --build --preset release -j$(nproc)
       - run: cmake --install build --prefix "$PWD/stage"
       - name: find_package + link
@@ -120,9 +122,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - run: python3 -m pip wheel --no-deps -w dist .
       - run: python3 -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
+      - run: /tmp/w/bin/python -m unittest discover -s tests -p 'test_*.py'
       - name: the installed server opens every library
         run: |
           /tmp/w/bin/python -I - <<'EOF'
@@ -140,9 +143,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - run: docker build -t vla-simd .
       - run: docker run --rm vla-simd --model act --help
+      - run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" vla-simd -m unittest discover -s /tests -p test_server.py
       - name: the image opens every library
         run: |
           docker run --rm -i --entrypoint python vla-simd - <<'EOF'

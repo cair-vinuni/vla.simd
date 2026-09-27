@@ -53,13 +53,22 @@ static void naive_linear(std::vector<double>& y, std::vector<double>& mag, const
         }
 }
 
-static void expect_close(const char* what, const std::vector<float>& got, const std::vector<double>& ref,
-                         const std::vector<double>& mag, double rel) {
+static double scaled_error(const std::vector<float>& got, const std::vector<double>& ref,
+                           const std::vector<double>& mag) {
+    if (got.size() != ref.size() || got.size() != mag.size()) return INFINITY;
     double worst = 0.0;
     for (size_t i = 0; i < got.size(); i++) {
+        if (!std::isfinite(got[i]) || !std::isfinite(ref[i]) ||
+            !std::isfinite(mag[i]) || mag[i] < 0.0) return INFINITY;
         const double e = std::fabs(got[i] - ref[i])/(mag[i] + 1e-30);
         if (e > worst) worst = e;
     }
+    return worst;
+}
+
+static void expect_close(const char* what, const std::vector<float>& got, const std::vector<double>& ref,
+                         const std::vector<double>& mag, double rel) {
+    const double worst = scaled_error(got, ref, mag);
     CHECK(worst <= rel, "%s: worst scaled error %.3e > %.1e", what, worst, rel);
 }
 
@@ -183,6 +192,7 @@ static void test_eltwise() {
     auto run = [&](void (*f)(float*, int), double (*r)(double), double tol, const char* name) {
         std::vector<float> y(x);
         f(y.data(), n);
+        for (float v : y) CHECK(std::isfinite(v), "%s: nonfinite output", name);
         double worst = 0.0;
         for (int i = 0; i < n; i++) {
             const double e = std::fabs(y[i] - r(x[i]))/std::max(std::fabs(r(x[i])), 1.0);
@@ -208,6 +218,8 @@ static void test_norms() {
         std::vector<float> y((size_t)seq*H), z((size_t)seq*H);
         rmsnorm(y.data(), x.data(), w.data(), seq, H, 1e-6f);
         layernorm(z.data(), x.data(), w.data(), b.data(), seq, H, 1e-5f);
+        for (float v : y) CHECK(std::isfinite(v), "rmsnorm: nonfinite output");
+        for (float v : z) CHECK(std::isfinite(v), "layernorm: nonfinite output");
         double wr = 0.0, wl = 0.0;
         for (int t = 0; t < seq; t++) {
             double ss = 0.0, mu = 0.0, var = 0.0;
@@ -235,6 +247,8 @@ static void test_conv() {
         conv2d(y.data(), x.data(), W.data(), b.data(), H, Wd, Cin, Cout, k, st, pd);
         pack_weights16(W.data(), Wp.data(), Cout, K);
         conv2d_packed(yp.data(), x.data(), Wp.data(), b.data(), H, Wd, Cin, Cout, k, st, pd);
+        for (float v : y) CHECK(std::isfinite(v), "conv2d: nonfinite output");
+        for (float v : yp) CHECK(std::isfinite(v), "conv2d_packed: nonfinite output");
         double worst = 0.0;
         for (int oy = 0; oy < Ho; oy++)
             for (int ox = 0; ox < Wo; ox++)
@@ -260,6 +274,7 @@ static void test_conv() {
     auto x = rv((size_t)T*Cin), W = rv((size_t)Cin*k*Cout, -.1f, .1f), b = rv(Cout);
     std::vector<float> y((size_t)To*Cout);
     conv_transpose1d(y.data(), x.data(), W.data(), b.data(), T, Cin, Cout, k, st, pd);
+    for (float v : y) CHECK(std::isfinite(v), "conv_transpose1d: nonfinite output");
     double worst = 0.0;
     for (int o = 0; o < To; o++)
         for (int co = 0; co < Cout; co++) {
@@ -281,6 +296,7 @@ static void test_conv() {
     std::vector<float> g1((size_t)P*C), g2((size_t)P*C);
     groupnorm(g1.data(), gx.data(), gs.data(), gb.data(), P, C, G, 1e-5f, false);
     groupnorm(g2.data(), gx.data(), gs.data(), gb.data(), P, C, G, 1e-5f, false);
+    for (float v : g1) CHECK(std::isfinite(v), "groupnorm: nonfinite output");
     CHECK(same_bits(g1, g2), "groupnorm is not deterministic");
     double gw = 0.0;
     const int gc = C/G;
@@ -299,6 +315,9 @@ static void test_conv() {
 }
 
 int main() {
+    CHECK(std::isinf(scaled_error({NAN}, {0}, {1})), "comparison accepts NaN");
+    CHECK(std::isinf(scaled_error({INFINITY}, {0}, {1})), "comparison accepts infinity");
+    CHECK(std::isinf(scaled_error({0}, {}, {1})), "comparison accepts shape mismatch");
     test_linear();
     test_attention();
     test_eltwise();

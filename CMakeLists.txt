@@ -44,7 +44,10 @@ add_library(vla_flags INTERFACE)
 target_compile_features(vla_flags INTERFACE cxx_std_17)
 target_include_directories(vla_flags INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+option(VLA_SCALAR "Build the portable scalar backend" OFF)
+if(VLA_SCALAR)
+  target_compile_definitions(vla_flags INTERFACE TCPU_FORCE_SCALAR=1)
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   message(WARNING "vla_simd: no ISA flags for ${CMAKE_CXX_COMPILER_ID}; "
                   "the HAL will fall back to the scalar backend")
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
@@ -117,7 +120,7 @@ else()
                   "and every OMP_NUM_THREADS recipe in the docs is inert")
 endif()
 
-if(APPLE)
+if(APPLE AND NOT VLA_SCALAR)
   # Accelerate sgemm (AMX) is the default Apple GEMM backend; TCPU_ACCEL=0 to
   # A/B it. NEW_LAPACK because the legacy CBLAS entry points are deprecated
   # since macOS 13.3.
@@ -265,6 +268,10 @@ if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   add_executable(test_gguf tests/test_gguf.cpp)
   target_link_libraries(test_gguf PRIVATE tcpu_io)
   add_test(NAME gguf COMMAND test_gguf)
+  add_executable(test_math tests/test_math.cpp)
+  target_link_libraries(test_math PRIVATE tcpu_diffusion tcpu_preprocess tcpu_tokenizer)
+  add_test(NAME math COMMAND test_math)
+  set_tests_properties(math PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -276,7 +283,7 @@ set(VLA_FIRST_PARTY
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
 if(TARGET test_ops)
-  list(APPEND VLA_FIRST_PARTY test_ops test_gguf)
+  list(APPEND VLA_FIRST_PARTY test_ops test_gguf test_math)
 endif()
 if(TARGET vla-simd-gguf)
   list(APPEND VLA_FIRST_PARTY vla-simd-gguf)

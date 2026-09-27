@@ -39,6 +39,9 @@ static bool is_space(uint32_t cp) {
 }
 
 bool T5Tokenizer::load(const std::string& dir) {
+    piece_id.clear();
+    scores.clear();
+    max_piece_len = 1;
     io::InFile f(dir + "/vocab.txt");
     if (!f) return false;
 

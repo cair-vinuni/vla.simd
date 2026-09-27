@@ -28,13 +28,14 @@ GGUF loads exactly like the directory it replaces.
 """
 
 import contextlib
+import math
 import os
 import shutil
 import struct
 import sys
 import tempfile
+from pathlib import PurePosixPath
 
-import numpy as np
 
 FORMAT = 1
 ALIGN = 32
@@ -78,7 +79,8 @@ def gguf_output(out, model, source=""):
 
 
 def _files(root):
-    for d, _, names in os.walk(root):
+    for d, dirs, names in os.walk(root):
+        dirs.sort()
         for n in sorted(names):
             p = os.path.join(d, n)
             yield os.path.relpath(p, root).replace(os.sep, "/"), p
@@ -95,48 +97,61 @@ def pack(root, path, model, source, layout):
           ("vla_simd.model", _KV_STRING, model),
           ("vla_simd.format", _KV_U32, FORMAT),
           ("vla_simd.source", _KV_STRING, str(source or ""))]
-    tensors = []                                   # (name, type id, n elements, bytes)
+    tensors = []
     for rel, p in _files(root):
-        data = open(p, "rb").read()
-        if not rel.endswith(".bin") or not data:       # an empty .bin is an empty file
+        length = os.path.getsize(p)
+        if not rel.endswith(".bin") or not length:
+            with open(p, "rb") as f:
+                data = f.read()
             try:
                 kv.append((f"vla_simd.file.{rel}", _KV_STRING, data.decode("utf-8")))
             except UnicodeDecodeError:
                 sys.exit(f"{rel}: not UTF-8 text; name binary files *.bin")
             continue
-        parts, at = [], 0
-        for i, (ty, n) in enumerate(layout.get(rel, [("F32", None)])):
-            n = len(data) - at if n is None else n
-            parts.append((ty, data[at:at + n]))
-            at += n
-        if at != len(data):
-            sys.exit(f"{rel}: layout covers {at} of {len(data)} bytes")
-        for i, (ty, blob) in enumerate(parts):
+        parts = layout.get(rel, [("F32", None)])
+        at = 0
+        for i, (ty, n) in enumerate(parts):
+            n = length - at if n is None else n
             tid, size = TYPES[ty]
-            if not blob or len(blob) % size:
-                sys.exit(f"{rel}: part {i} is {len(blob)} bytes, empty or not a whole number of {ty}")
+            if not isinstance(n, int) or n <= 0 or n % size or n > length - at:
+                raise ValueError(f"{rel}: invalid {ty} part {i} of {n} bytes")
             name = rel if len(parts) == 1 else f"{rel}:{i}"
-            tensors.append((name, tid, len(blob) // size, blob))
+            tensors.append((name, tid, n // size, p, at, n))
+            at += n
+        if at != length:
+            raise ValueError(f"{rel}: layout covers {at} of {length} bytes")
 
-    head = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(kv))
+    head = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(kv)))
     for key, ty, val in kv:
         head += _str(key) + struct.pack("<I", ty)
         head += _str(val) if ty == _KV_STRING else struct.pack("<I", val)
     offsets, off = [], 0
-    for name, tid, n, blob in tensors:
+    for name, tid, n, _, _, length in tensors:
         off = (off + ALIGN - 1) // ALIGN * ALIGN
         offsets.append(off)
         head += _str(name) + struct.pack("<IQIQ", 1, n, tid, off)
-        off += len(blob)
-    tmp = path + ".part"
-    with open(tmp, "wb") as f:
-        f.write(head)
-        f.write(b"\0" * (-len(head) % ALIGN))
-        base = f.tell()
-        for (name, tid, n, blob), o in zip(tensors, offsets):
-            f.write(b"\0" * (base + o - f.tell()))
-            f.write(blob)
-    os.replace(tmp, path)
+        off += length
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(path)), delete=False) as f:
+            tmp = f.name
+            f.write(head)
+            f.write(b"\0" * (-len(head) % ALIGN))
+            base = f.tell()
+            for (_, _, _, src, start, length), o in zip(tensors, offsets):
+                f.write(b"\0" * (base + o - f.tell()))
+                with open(src, "rb") as inp:
+                    inp.seek(start)
+                    while length:
+                        chunk = inp.read(min(length, 1 << 20))
+                        if not chunk:
+                            raise ValueError(f"{src}: truncated during packing")
+                        f.write(chunk)
+                        length -= len(chunk)
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
     return os.path.getsize(path)
 
 
@@ -149,6 +164,8 @@ def read_files(path):
 
     def rd(fmt):
         nonlocal o
+        if struct.calcsize(fmt) > len(buf) - o:
+            raise ValueError(f"{path}: truncated GGUF")
         v = struct.unpack_from(fmt, buf, o)
         o += struct.calcsize(fmt)
         return v[0] if len(v) == 1 else v
@@ -156,6 +173,8 @@ def read_files(path):
     def rs():
         nonlocal o
         n = rd("<Q")
+        if n > len(buf) - o:
+            raise ValueError(f"{path}: truncated string")
         s = buf[o:o + n]
         o += n
         return s.decode("utf-8")
@@ -163,33 +182,74 @@ def read_files(path):
     if buf[:4] != b"GGUF":
         raise ValueError(f"{path} is not a GGUF file")
     o = 4
-    _, n_t, n_kv = rd("<IQQ")
+    version, n_t, n_kv = rd("<IQQ")
+    if version not in (2, 3) or n_t > len(buf) // 24 or n_kv > len(buf) // 12:
+        raise ValueError(f"{path}: invalid GGUF header")
     files, arch = {}, None
+    alignment, format_version, keys = ALIGN, None, set()
+
+    def file_name(name):
+        if not name or "\0" in name or PurePosixPath(name).is_absolute() or any(
+                p in ("", ".", "..") for p in name.split("/")):
+            raise ValueError(f"{path}: invalid embedded path {name!r}")
+        return name
     scalar = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?",
               10: "<Q", 11: "<q", 12: "<d"}
     for _ in range(n_kv):
         key, ty = rs(), rd("<I")
+        if key in keys:
+            raise ValueError(f"{path}: duplicate metadata {key}")
+        keys.add(key)
         if ty == _KV_STRING:
             val = rs()
             if key == "general.architecture":
                 arch = val
             elif key.startswith("vla_simd.file."):
-                files[key[len("vla_simd.file."):]] = val.encode("utf-8")
+                files[file_name(key[len("vla_simd.file."):])] = val.encode("utf-8")
         elif ty == 9:
             raise ValueError(f"{path}: arrays are not part of the vla.simd format")
         else:
-            rd(scalar[ty])
+            if ty not in scalar:
+                raise ValueError(f"{path}: invalid metadata type {ty}")
+            val = rd(scalar[ty])
+            if key == "general.alignment":
+                if ty != _KV_U32 or val == 0 or val & (val - 1):
+                    raise ValueError(f"{path}: invalid alignment")
+                alignment = val
+            elif key == "vla_simd.format":
+                format_version = val
     if arch != "vla-simd":
         raise ValueError(f"{path} is a '{arch}' GGUF, not a vla.simd one")
+    if format_version != FORMAT:
+        raise ValueError(f"{path}: unsupported vla.simd format {format_version}")
     infos = []
+    names = set()
     for _ in range(n_t):
         name, nd = rs(), rd("<I")
+        if name in names or not 1 <= nd <= 4:
+            raise ValueError(f"{path}: invalid tensor info {name}")
+        names.add(name)
         ne = [rd("<Q") for _ in range(nd)]
         ty, off = rd("<IQ")
-        size = next(s for t, s in TYPES.values() if t == ty)
-        infos.append((name, int(np.prod(ne)) * size, off))
-    base = (o + ALIGN - 1) // ALIGN * ALIGN
+        size = next((s for t, s in TYPES.values() if t == ty), None)
+        if size is None or any(d == 0 for d in ne) or off % alignment:
+            raise ValueError(f"{path}: invalid tensor {name}")
+        infos.append((name, math.prod(ne) * size, off))
+    base = (o + alignment - 1) // alignment * alignment
+    if base > len(buf):
+        raise ValueError(f"{path}: truncated alignment padding")
+    parts = {}
     for name, nbytes, off in infos:
+        if base + off + nbytes > len(buf):
+            raise ValueError(f"{path}: truncated tensor {name}")
         rel = name.rsplit(":", 1)[0] if ":" in name and name.rsplit(":", 1)[1].isdigit() else name
+        file_name(rel)
+        if rel != name:
+            part = parts.get(rel, 0)
+            if name != f"{rel}:{part}" or (part == 0 and rel in files):
+                raise ValueError(f"{path}: invalid tensor part {name}")
+            parts[rel] = part + 1
+        elif rel in files:
+            raise ValueError(f"{path}: duplicate embedded file {rel}")
         files[rel] = files.get(rel, b"") + buf[base + off:base + off + nbytes]
     return files

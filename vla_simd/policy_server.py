@@ -163,6 +163,7 @@ class _Engine:
         self._fn("load").argtypes = [ctypes.c_char_p] * len(dirs)
         self._fn("load").restype = ctypes.c_void_p
         self._fn("free").argtypes = [ctypes.c_void_p]
+        self._fn("free").restype = None
         for i in ints:
             self._fn(i).argtypes = [ctypes.c_void_p]
             self._fn(i).restype = ctypes.c_int32
@@ -193,6 +194,8 @@ class _Engine:
         state = np.ascontiguousarray(np.asarray(state, np.float32).reshape(-1))
         if state.size != self.state_dim:
             raise ValueError(f"state has {state.size} values, the checkpoint wants {self.state_dim}")
+        if not np.isfinite(state).all():
+            raise ValueError("state must contain only finite values")
         return state
 
     @staticmethod
@@ -205,9 +208,13 @@ class _Engine:
     def _run(self, *argv, after=(), fn="predict"):
         out = np.empty((self.chunk, self.action_dim), np.float32)
         with self.lock:
+            if not self.h:
+                raise RuntimeError("engine is closed")
             rc = self._fn(fn)(self.h, *argv, out.ctypes.data_as(F32P), *after)
         if rc != 0:
             raise RuntimeError(f"vla_{self.name}_{fn} failed (rc={rc})")
+        if not np.isfinite(out).all():
+            raise RuntimeError(f"vla_{self.name}_{fn} returned nonfinite actions")
         return out
 
     def close(self):
@@ -345,20 +352,20 @@ class SmolvlaEngine(_Engine):
 
     def tokenize(self, task):
         """Cached ids/mask. The engine appends lerobot's trailing newline itself."""
-        if task not in self._tokens:
-            if len(self._tokens) >= self.TOKEN_CACHE_MAX:
-                self._tokens.clear()
-            ids = np.zeros(self.tok_maxlen, np.int32)
-            mask = np.zeros(self.tok_maxlen, np.int32)
-            with self.lock:   # tokenize enters the same handle as predict
+        with self.lock:
+            if task not in self._tokens:
+                if len(self._tokens) >= self.TOKEN_CACHE_MAX:
+                    self._tokens.clear()
+                ids = np.zeros(self.tok_maxlen, np.int32)
+                mask = np.zeros(self.tok_maxlen, np.int32)
                 n = self.lib.vla_smolvla_tokenize(
                     self.h, task.encode(),
                     ids.ctypes.data_as(I32P), mask.ctypes.data_as(I32P))
-            if n < 0:
-                raise RuntimeError("vla_smolvla_tokenize failed")
-            logger.info("task %r -> %d tokens %s", task, n, ids[:n].tolist())
-            self._tokens[task] = (ids, mask)
-        return self._tokens[task]
+                if n < 0:
+                    raise RuntimeError("vla_smolvla_tokenize failed")
+                logger.info("task %r -> %d tokens %s", task, n, ids[:n].tolist())
+                self._tokens[task] = (ids, mask)
+            return self._tokens[task]
 
     def predict(self, adapted, seed, rtc=None):
         """frames [n_views, H, W, 3] uint8 native res -> [chunk, action_dim]."""
@@ -516,6 +523,8 @@ class DiffusionEngine(_Engine):
         state = np.ascontiguousarray(np.asarray(adapted[1], np.float32))
         if state.shape != (self.n_obs_steps, self.state_dim):
             raise ValueError(f"state {state.shape} != {(self.n_obs_steps, self.state_dim)}")
+        if not np.isfinite(state).all():
+            raise ValueError("state must contain only finite values")
 
         # The prior plus one buffer per DDPM step; DDIM reads only the prior, but
         # the engine indexes the array either way, so it is always sized for the
@@ -598,10 +607,12 @@ class ObservationAdapter:
 
     @staticmethod
     def _as_uint8(img):
-        if img.ndim != 3 or img.shape[2] != 3:
+        if img.ndim != 3 or img.shape[2] != 3 or min(img.shape[:2]) <= 0:
             raise ValueError(f"expected an HxWx3 RGB frame, got {img.shape}")
         if img.dtype == np.uint8:
             return img
+        if not np.isfinite(img).all():
+            raise ValueError("camera frames must contain only finite values")
         # a client that already scaled to [0,1] floats
         scale = 255.0 if float(img.max()) <= 1.0 else 1.0
         return np.clip(img * scale, 0, 255).astype(np.uint8)
@@ -675,6 +686,8 @@ class History:
     """
 
     def __init__(self, n):
+        if n < 1:
+            raise ValueError("history length must be positive")
         self.n = n
         self.items = []
         self.lock = threading.Lock()
@@ -864,6 +877,8 @@ def build_servicer_class(spec):
         def __init__(self, engine, cfg):
             self.engine = engine
             self.cfg = cfg
+            self._session_lock = threading.RLock()
+            self._generation = 0
             self.observation_queue = Queue(maxsize=1)
             self.shutdown_event = threading.Event()
 
@@ -878,6 +893,7 @@ def build_servicer_class(spec):
             self.n_queries = 0
 
         def _reset(self):
+            self._generation += 1
             self.shutdown_event.set()
             self.observation_queue = Queue(maxsize=1)
             with self._predicted_lock:
@@ -893,92 +909,114 @@ def build_servicer_class(spec):
         # -- rpc -------------------------------------------------------------
         def Ready(self, request, context):  # noqa: N802
             logger.info("client %s ready", context.peer())
-            self._reset()
-            self.shutdown_event.clear()
+            with self._session_lock:
+                self._reset()
+                self.shutdown_event.clear()
             return services_pb2.Empty()
 
         def SendPolicyInstructions(self, request, context):  # noqa: N802
-            try:
-                specs = _loads(request.data)
-                if not isinstance(specs, RemotePolicyConfig):
-                    raise TypeError(f"expected a RemotePolicyConfig, got {type(specs)}")
-                if specs.policy_type != spec.policy_type:
-                    raise ValueError(
-                        f"this server serves {spec.policy_type} only, "
-                        f"the client asked for {specs.policy_type!r}"
-                    )
-                if not isinstance(specs.actions_per_chunk, int) or specs.actions_per_chunk < 1:
-                    raise ValueError(
-                        f"actions_per_chunk must be an int >= 1, got {specs.actions_per_chunk!r}")
+            with self._session_lock:
+                try:
+                    specs = _loads(request.data)
+                    if not isinstance(specs, RemotePolicyConfig):
+                        raise TypeError(f"expected a RemotePolicyConfig, got {type(specs)}")
+                    if specs.policy_type != spec.policy_type:
+                        raise ValueError(
+                            f"this server serves {spec.policy_type} only, "
+                            f"the client asked for {specs.policy_type!r}"
+                        )
+                    if not isinstance(specs.actions_per_chunk, int) or specs.actions_per_chunk < 1:
+                        raise ValueError(
+                            f"actions_per_chunk must be an int >= 1, got {specs.actions_per_chunk!r}")
 
-                # The checkpoint is the converted one in --model-dir; a mismatch
-                # here is the classic "served the wrong model" bug, so it is loud.
-                if self.cfg.checkpoint and specs.pretrained_name_or_path != self.cfg.checkpoint:
-                    logger.warning(
-                        "client asked for %r but this server serves %r from %s",
-                        specs.pretrained_name_or_path, self.cfg.checkpoint, self.cfg.model_dir,
-                    )
+                    # The checkpoint is the converted one in --model-dir; a mismatch
+                    # here is the classic "served the wrong model" bug, so it is loud.
+                    if self.cfg.checkpoint and specs.pretrained_name_or_path != self.cfg.checkpoint:
+                        logger.warning(
+                            "client asked for %r but this server serves %r from %s",
+                            specs.pretrained_name_or_path, self.cfg.checkpoint, self.cfg.model_dir,
+                        )
 
-                self.lerobot_features = specs.lerobot_features
-                self.adapter = spec.adapter_cls(self.engine, specs.lerobot_features)
-                self.actions_per_chunk = min(specs.actions_per_chunk, self.engine.chunk)
-            except Exception as e:
-                # a bare raise inside a handler reaches the client as UNKNOWN
-                logger.exception("rejecting policy instructions from %s", context.peer())
-                context.abort(_grpc_status().INVALID_ARGUMENT, str(e))
+                    adapter = spec.adapter_cls(self.engine, specs.lerobot_features)
+                    self._reset()
+                    self.shutdown_event.clear()
+                    self.lerobot_features = specs.lerobot_features
+                    self.adapter = adapter
+                    self.actions_per_chunk = min(specs.actions_per_chunk, self.engine.chunk)
+                except Exception as e:
+                    # a bare raise inside a handler reaches the client as UNKNOWN
+                    logger.exception("rejecting policy instructions from %s", context.peer())
+                    context.abort(_grpc_status().INVALID_ARGUMENT, str(e))
 
-            logger.info(
-                "policy instructions from %s | actions_per_chunk %d (chunk %d) | cameras %s",
-                context.peer(), self.actions_per_chunk, self.engine.chunk, self.adapter.camera_keys,
-            )
-            return services_pb2.Empty()
+                logger.info(
+                    "policy instructions from %s | actions_per_chunk %d (chunk %d) | cameras %s",
+                    context.peer(), self.actions_per_chunk, self.engine.chunk, self.adapter.camera_keys,
+                )
+                return services_pb2.Empty()
 
         def SendObservations(self, request_iterator, context):  # noqa: N802
+            with self._session_lock:
+                generation = self._generation
             received = receive_bytes_in_chunks(
                 request_iterator, None, self.shutdown_event, f"{spec.policy_type}_policy_server")
-            adapter = self.adapter
-            try:
-                obs = _loads(received)
-                if not isinstance(obs, TimedObservation):
-                    raise TypeError(f"expected a TimedObservation, got {type(obs)}")
-                adapted = adapter(obs.get_observation()) if hasattr(adapter, "history") else None
-            except Exception as e:
-                logger.exception("bad observation from %s", context.peer())
-                context.abort(_grpc_status().INVALID_ARGUMENT, f"bad observation: {e}")
-            if not self._enqueue(obs, adapted):
-                logger.debug("observation #%s filtered out", obs.get_timestep())
-            return services_pb2.Empty()
+            with self._session_lock:
+                if generation != self._generation:
+                    return services_pb2.Empty()
+                adapter = self.adapter
+                if adapter is None:
+                    context.abort(_grpc_status().FAILED_PRECONDITION, "no policy instructions received yet")
+                try:
+                    obs = _loads(received)
+                    if not isinstance(obs, TimedObservation):
+                        raise TypeError(f"expected a TimedObservation, got {type(obs)}")
+                    if (not isinstance(obs.get_timestep(), int) or obs.get_timestep() < 0
+                            or not math.isfinite(obs.get_timestamp())):
+                        raise ValueError("invalid observation timestamp or timestep")
+                    adapted = adapter(obs.get_observation()) if hasattr(adapter, "history") else None
+                except Exception as e:
+                    logger.exception("bad observation from %s", context.peer())
+                    context.abort(_grpc_status().INVALID_ARGUMENT, f"bad observation: {e}")
+                if not self._enqueue(obs, adapted):
+                    logger.debug("observation #%s filtered out", obs.get_timestep())
+                return services_pb2.Empty()
 
         def GetActions(self, request, context):  # noqa: N802
+            with self._session_lock:
+                generation, queue = self._generation, self.observation_queue
             try:
-                obs, adapted, stamp = self.observation_queue.get(timeout=self.cfg.obs_queue_timeout)
+                obs, adapted, stamp = queue.get(timeout=self.cfg.obs_queue_timeout)
             except Empty:
                 return services_pb2.Empty()
 
-            try:
-                with self._predicted_lock:
-                    self._predicted_timesteps.add(obs.get_timestep())
+            with self._session_lock:
+                if generation != self._generation:
+                    return services_pb2.Empty()
+                try:
+                    with self._predicted_lock:
+                        self._predicted_timesteps.add(obs.get_timestep())
 
-                t0 = time.perf_counter()
-                chunk = self._predict(obs, adapted, stamp)
-                inference_ms = (time.perf_counter() - t0) * 1000
+                    t0 = time.perf_counter()
+                    chunk = self._predict(obs, adapted, stamp)
+                    inference_ms = (time.perf_counter() - t0) * 1000
 
-                with self._query_lock:
-                    n = self.n_queries
-                if n % 10 == 1:
-                    logger.info(
-                        "chunk #%s | %d actions | %.0f ms | action[0]=%s",
-                        obs.get_timestep(), len(chunk), inference_ms,
-                        np.round(np.asarray(chunk[0].get_action()), 3).tolist(),
-                    )
-                buf = io.BytesIO()
-                ActionPickler(buf).dump(chunk)
-                return services_pb2.Actions(data=buf.getvalue())
-            except Exception as e:
-                # An empty reply is what a timed-out queue returns, so a broken
-                # engine would be indistinguishable from a quiet client.
-                logger.exception("inference failed for observation #%s", obs.get_timestep())
-                context.abort(_grpc_status().INTERNAL, f"inference failed: {e}")
+                    with self._query_lock:
+                        n = self.n_queries
+                    if n % 10 == 1:
+                        logger.info(
+                            "chunk #%s | %d actions | %.0f ms | action[0]=%s",
+                            obs.get_timestep(), len(chunk), inference_ms,
+                            np.round(np.asarray(chunk[0].get_action()), 3).tolist(),
+                        )
+                    buf = io.BytesIO()
+                    ActionPickler(buf).dump(chunk)
+                    return services_pb2.Actions(data=buf.getvalue())
+                except Exception as e:
+                    with self._predicted_lock:
+                        self._predicted_timesteps.discard(obs.get_timestep())
+                    # An empty reply is what a timed-out queue returns, so a broken
+                    # engine would be indistinguishable from a quiet client.
+                    logger.exception("inference failed for observation #%s", obs.get_timestep())
+                    context.abort(_grpc_status().INTERNAL, f"inference failed: {e}")
 
         # -- internals -------------------------------------------------------
         def _sanity_ok(self, obs, previous):
@@ -1012,7 +1050,6 @@ def build_servicer_class(spec):
 
             if adapted is None:
                 adapted = self.adapter(timed_obs.get_observation())
-            self.last_processed_obs = timed_obs
 
             # Reserve AND advance under one lock. Incrementing only after
             # _predict returned let two concurrent workers take the same index,
@@ -1022,6 +1059,7 @@ def build_servicer_class(spec):
                 self.n_queries += 1
             kw = {"rtc": (timed_obs.get_timestep(), self.actions_per_chunk, *stamp)} if stamp else {}
             actions = self.engine.predict(adapted, self.cfg.seed + index, **kw)[: self.actions_per_chunk]
+            self.last_processed_obs = timed_obs
 
             t0 = timed_obs.get_timestamp()
             i0 = timed_obs.get_timestep()

@@ -1,6 +1,6 @@
 FROM python:3.12-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends g++ git
-COPY --from=ghcr.io/astral-sh/uv:0.10.9 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /bin/uv
 COPY . /src
 RUN uv venv /opt/venv && uv pip install --python /opt/venv --torch-backend cpu --no-sources --no-cache '/src[serve]'
 

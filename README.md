@@ -130,6 +130,66 @@ Octo and Diffusion Policy see consecutive frames only if the client sends every 
 so run the client with `--chunk_size_threshold=1.0` for them,
 and `--actions_per_chunk=4` for Octo.
 
+## Build and test
+
+The C++ engine needs CMake 3.21+, a C++17 compiler, and OpenMP for parallel
+inference. Python and Torch are needed for conversion and serving, not for the
+shared libraries.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+```
+
+Use `-DVLA_SCALAR=ON` to test the portable backend on a SIMD-capable host.
+For memory and undefined-behavior checks, configure a separate Debug build with
+`-DVLA_SANITIZE=address,undefined,float-cast-overflow`. On x86,
+`TCPU_ZEN=1 ctest --test-dir build --output-on-failure` exercises the Zen dispatch
+path. This does not replace testing on AMD hardware.
+
+The Python regressions use the standard library's test runner:
+
+```sh
+VLA_TEST_BUILD=build .serve/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Reference tests skip when their optional dependencies are absent. Run them in
+the LeRobot converter environment for Diffusers scheduler and complete small
+Diffusion Policy comparisons. Public-checkpoint comparisons and measured packing
+results are recorded in the [audit report](docs/audit.md).
+
+## Converter environments
+
+Create one environment per group. Install groups from this repository's root;
+`uv pip install --group` installs the conversion dependencies without building
+the engine.
+
+| Purpose | Group or extra | Python | Compatibility |
+| --- | --- | --- | --- |
+| Serving all models | `.[serve]` | 3.12+ | LeRobot fork wire protocol; CPU Torch |
+| Robot client only | `client` | 3.12+ | Same fork as the server |
+| Torch-free safetensors conversion | `numpy` | 3.10+ | NumPy 2.x |
+| ACT, Diffusion, Torch SmolVLA conversion | `lerobot` | 3.12+ | LeRobot 0.6.x dependency limits |
+| IMPACT conversion | `impact` | 3.12+ | Fork with the IMPACT implementation |
+| TurboVLA conversion | `turbovla` | 3.10+ | Transformers 4.57.1 preserves DINOv3 hidden-state semantics |
+| Original JAX Octo conversion | `octo` | 3.10–3.11 | Legacy JAX/Flax/NumPy pins |
+
+```sh
+uv venv .lerobot --python 3.12
+uv pip install --python .lerobot --group lerobot --torch-backend cpu --no-sources
+uv venv .turbovla --python 3.12
+uv pip install --python .turbovla --group turbovla --torch-backend cpu --no-sources
+uv venv .octo --python 3.11
+uv pip install --python .octo --group octo
+```
+
+TurboVLA also requires the upstream code checkout described in
+`tools/convert_turbovla.py`. Newer Transformers versions change that model's
+outputs or remove APIs it uses. The [dependency audit](docs/audit.md#dependency-decisions)
+records the tested versions and retained caps. Keep Octo in its own environment;
+its NumPy 1.x requirement conflicts with modern LeRobot.
+
 ## Citation
 
 ```bibtex

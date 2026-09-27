@@ -7,6 +7,7 @@
 #include "io/gguf.h"
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -16,7 +17,10 @@ namespace io {
 
 int64_t GgufTensor::numel() const {
     int64_t n = 1;
-    for (int64_t d : ne) n *= d;
+    for (int64_t d : ne) {
+        if (d <= 0 || n > std::numeric_limits<int64_t>::max() / d) return 0;
+        n *= d;
+    }
     return n;
 }
 
@@ -75,7 +79,9 @@ bool value(Cursor& c, uint32_t type, GgufValue& v) {
 
     v.elem = c.get<uint32_t>();
     const uint64_t n = c.get<uint64_t>();
-    if (!c.ok || n > c.n) return false;          // each element takes at least a byte
+    const size_t sizes[] = {1, 1, 2, 2, 4, 4, 4, 1, 8, 0, 8, 8, 8};
+    if (!c.ok || v.elem >= sizeof(sizes) / sizeof(*sizes) || sizes[v.elem] == 0 ||
+        n > (c.n - c.off) / sizes[v.elem]) return false;
     if (v.elem == GGUF_U8 || v.elem == GGUF_I8) {
         if (!c.need(n)) return false;
         v.bytes.assign(c.p + c.off, c.p + c.off + n);
@@ -132,6 +138,13 @@ Gguf::~Gguf() {
 }
 
 bool Gguf::open(const std::string& path) {
+    if (map) munmap(map, map_len);
+    map = nullptr;
+    map_len = 0;
+    kv.clear();
+    table.clear();
+    index.clear();
+    err.clear();
     file = path;
     const int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) { err = "cannot open " + path; return false; }
@@ -166,7 +179,10 @@ bool Gguf::open(const std::string& path) {
             err = path + ": corrupt metadata at key '" + key + "'";
             return false;
         }
-        kv[key] = std::move(v);
+        if (!kv.emplace(key, std::move(v)).second) {
+            err = path + ": duplicate metadata " + key;
+            return false;
+        }
     }
 
     struct Info { uint64_t offset; };
@@ -183,6 +199,7 @@ bool Gguf::open(const std::string& path) {
             if (v == 0 || v > (uint64_t)1 << 40) { err = path + ": bad shape for " + t.name; return false; }
             t.ne[d] = (int64_t)v;
         }
+        if (t.numel() == 0) { err = path + ": overflowing shape for " + t.name; return false; }
         t.type = c.get<uint32_t>();
         offsets.push_back({c.get<uint64_t>()});
         if (!c.ok) { err = path + ": corrupt tensor info"; return false; }
@@ -191,18 +208,29 @@ bool Gguf::open(const std::string& path) {
         table.push_back(std::move(t));
     }
 
-    const size_t align = (size_t)num("general.alignment", 32);
+    const GgufValue* alignment = get("general.alignment");
+    if (alignment && alignment->type != GGUF_U32) {
+        err = path + ": general.alignment must be uint32";
+        return false;
+    }
+    const size_t align = alignment ? (size_t)alignment->num : 32;
     if (align == 0 || (align & (align - 1))) { err = path + ": bad general.alignment"; return false; }
-    const size_t base = (c.off + align - 1) / align * align;
+    const size_t padding = (align - c.off % align) % align;
+    if (!c.need(padding)) { err = path + ": truncated alignment padding"; return false; }
+    const size_t base = c.off + padding;
     for (size_t i = 0; i < table.size(); i++) {
         GgufTensor& t = table[i];
         const size_t eb = type_bytes(t.type);
         // Quantized types have no fixed element size; they are rejected when
         // widened, but their extent is unknown, so they get no data pointer.
         if (eb == 0) continue;
+        if ((uint64_t)t.numel() > std::numeric_limits<size_t>::max() / eb) {
+            err = path + ": overflowing tensor size for " + t.name;
+            return false;
+        }
         t.nbytes = (size_t)t.numel() * eb;
         const uint64_t off = offsets[i].offset;
-        if (off > map_len || base > map_len - off || t.nbytes > map_len - base - off) {
+        if (off % align || off > map_len || base > map_len - off || t.nbytes > map_len - base - off) {
             err = path + ": tensor " + t.name + " runs past the end of the file";
             return false;
         }
@@ -239,9 +267,13 @@ const GgufTensor* Gguf::tensor(const std::string& name) const {
 
 bool tensor_f32(const GgufTensor& t, std::vector<float>& out, std::string& err) {
     const size_t n = (size_t)t.numel();
-    if (!t.data || t.type == GGML_I8 || t.type == GGML_I32) {
+    if (!t.data || n == 0 || (t.type != GGML_F32 && t.type != GGML_F16 && t.type != GGML_BF16)) {
         err = t.name + ": element type " + std::to_string(t.type) +
               " is not supported (F32, F16 and BF16 are)";
+        return false;
+    }
+    if (n > t.nbytes / type_bytes(t.type)) {
+        err = t.name + ": truncated tensor data";
         return false;
     }
     out.resize(n);
@@ -267,6 +299,7 @@ bool tensor_f32(const GgufTensor& t, std::vector<float>& out, std::string& err) 
 uint16_t f32_to_bf16(float x) {
     uint32_t u;
     std::memcpy(&u, &x, 4);
+    if ((u & 0x7FFFFFFFu) > 0x7F800000u) return (uint16_t)((u >> 16) | 0x40u);
     const uint32_t lsb = (u >> 16) & 1;
     return (uint16_t)((u + 0x7FFF + lsb) >> 16);
 }

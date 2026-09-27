@@ -5,6 +5,7 @@
 
 #include "io/files.h"
 #include "io/gguf.h"
+#include "io/gguf_models.h"
 #include "io/json.h"
 #include <cmath>
 #include <cstdint>
@@ -12,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
+#include <limits>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -147,6 +150,32 @@ static void test_reader(const std::string& dir) {
     write(dir + "/bad.gguf", bad);
     io::Gguf b;
     CHECK(!b.open(dir + "/bad.gguf"), "bad version accepted");
+    CHECK(g.open(path), "reopen: %s", g.error().c_str());
+    Writer empty;
+    write(dir + "/bad.gguf", empty.bytes());
+    CHECK(g.open(dir + "/bad.gguf") && g.tensors().empty() && g.keys().empty(), "reopen retains state");
+    CHECK(!g.open(dir + "/missing.gguf"), "missing file accepted");
+    CHECK(g.open(path) && g.error().empty(), "reopen retains error");
+    Writer overflow;
+    overflow.tensor("overflow", {uint64_t(1) << 32, uint64_t(1) << 32}, io::GGML_F32, f, sizeof f);
+    write(dir + "/bad.gguf", overflow.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "overflowing shape accepted");
+    Writer duplicate;
+    duplicate.u32("same", 1);
+    duplicate.u32("same", 2);
+    write(dir + "/bad.gguf", duplicate.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "duplicate metadata accepted");
+    for (double alignment : {-32.0, 0.5, std::numeric_limits<double>::infinity()}) {
+        Writer a;
+        a.f64("general.alignment", alignment);
+        write(dir + "/bad.gguf", a.bytes());
+        CHECK(!b.open(dir + "/bad.gguf"), "invalid alignment accepted");
+    }
+    for (uint32_t nan_bits : {0x7F800001u, 0x7FFFFFFFu, 0xFF800001u, 0xFFFFFFFFu}) {
+        std::memcpy(&x, &nan_bits, sizeof x);
+        const uint16_t h = io::f32_to_bf16(x);
+        CHECK((h & 0x7F80) == 0x7F80 && (h & 0x7F) != 0, "bf16 lost NaN");
+    }
     unlink((dir + "/cut.gguf").c_str());
     unlink((dir + "/bad.gguf").c_str());
 }
@@ -171,6 +200,38 @@ static void test_mount(const std::string& dir) {
     io::InFile missing(dir + "/nope.meta");
     CHECK(!missing, "missing file tests false");
     unlink((dir + "/vit.meta").c_str());
+    Writer w;
+    w.s("general.architecture", "vla-simd");
+    w.u32("vla_simd.format", 1);
+    std::vector<float> weights(1 << 18, 1.5f);
+    w.tensor("weights.bin", {weights.size()}, io::GGML_F32, weights.data(), weights.size()*sizeof(float));
+    const std::string path = dir + "/own.gguf";
+    write(path, w.bytes());
+    {
+        io::Mount first(path);
+        io::InFile one(path + "/weights.bin", std::ios::binary);
+        CHECK(first.ok() && one, "first load");
+        auto second = std::async(std::launch::async, [&] {
+            io::Mount mount(path);
+            io::InFile two(path + "/weights.bin", std::ios::binary);
+            float value = 0;
+            two.read((char*)&value, sizeof value);
+            return mount.ok() && two && value == 1.5f;
+        });
+        CHECK(second.get(), "concurrent load lost consumed weights");
+    }
+    for (const char* rel : {"../escape.txt", "/absolute.txt", "tok/../../escape"}) {
+        Writer bad;
+        bad.s("general.architecture", "vla-simd");
+        bad.u32("vla_simd.format", 1);
+        bad.s(std::string("vla_simd.file.") + rel, "bad");
+        write(path, bad.bytes());
+        io::Gguf g;
+        io::Files files;
+        std::string error;
+        CHECK(g.open(path) && !io::adapt_gguf(g, io::Sidecar{dir}, files, error), "unsafe embedded path accepted");
+    }
+    unlink(path.c_str());
 }
 
 static void test_json() {
@@ -184,6 +245,13 @@ static void test_json() {
           "python non-finite");
     CHECK(!io::Json::parse("{\"a\": }", j), "reject malformed");
     CHECK(!io::Json::parse("[1] x", j), "reject trailing");
+    CHECK(io::Json::parse("[1]", j) && j.arr.size() == 1, "reparse retains array");
+    CHECK(io::Json::parse(R"({"a": "old", "a": "new"})", j) && j.at("a")->str == "new",
+          "duplicate JSON key does not replace value");
+    for (const char* s : {R"("\u12zz")", R"("\uD800")", R"("\uDC00")", "\"a\nb\"",
+                          "[01]", "[+1]", "[.5]", "[1.]", "[0x1]", "[1e]"})
+        CHECK(!io::Json::parse(s, j), "invalid JSON accepted: %s", s);
+    CHECK(io::Json::parse(R"("\uD83D\uDE00")", j) && j.str == "\xF0\x9F\x98\x80", "surrogate pair");
 }
 
 int main() {

@@ -115,6 +115,8 @@ static size_t gpt2_piece(const std::string& s, size_t i, size_t e) {
 }
 
 bool Tokenizer::load(const std::string& dir) {
+    vocab.clear();
+    ranks.clear();
     build_byte2str(byte2str);
 
     io::InFile vf(dir + "/vocab.txt");

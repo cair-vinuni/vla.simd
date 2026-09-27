@@ -1,0 +1,170 @@
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
+
+import _gguf
+import convert_hf_safetensors
+from vla_simd import gguf_stage, policy_server
+
+
+class Checkpoints(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.path = self.root / "model.gguf"
+
+    def pack(self, text="chunk 2\n", layout=None):
+        (self.source / "config.txt").write_text(text)
+        (self.source / "weights.bin").write_bytes(struct.pack("<4f", 1, 2, 3, 4))
+        _gguf.pack(self.source, self.path, "act", "test", layout or {})
+
+    def test_roundtrip_and_parts(self):
+        self.pack(layout={"weights.bin": [("F32", 8), ("BF16", 8)]})
+        files = _gguf.read_files(self.path)
+        self.assertEqual(files, {p.name: p.read_bytes() for p in self.source.iterdir()})
+        whole = self.path.read_bytes()
+        for cut in (3, 20, len(whole) // 2, len(whole) - 1):
+            self.path.write_bytes(whole[:cut])
+            with self.assertRaises(ValueError):
+                _gguf.read_files(self.path)
+
+    def test_reject_bad_layout_preserves_destination(self):
+        self.pack()
+        whole = self.path.read_bytes()
+        for layout in ([('F32', -4), ('F32', 20)], [('F32', 20)], [('F32', 4)]):
+            with self.assertRaises(ValueError):
+                _gguf.pack(self.source, self.path, "act", "test", {"weights.bin": layout})
+            self.assertEqual(self.path.read_bytes(), whole)
+
+    def test_metadata_bounds(self):
+        for value in (struct.pack("<Q", 100), struct.pack("<Q", 1) + b"x" + struct.pack("<IIQ", 9, 0, 999)):
+            self.path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, 1) + value)
+            with self.assertRaises(ValueError):
+                gguf_stage.read_metadata(self.path)
+
+    @unittest.skipUnless((Path(os.environ.get("VLA_TEST_BUILD", "build")) / "vla-simd-gguf").is_file(),
+                         "requires a CMake build")
+    def test_extraction_refuses_symlinks_and_overwrite(self):
+        self.pack()
+        nested = self.source / "nested" / "deeper"
+        nested.mkdir(parents=True)
+        (nested / "config.txt").write_text("nested")
+        _gguf.pack(self.source, self.path, "act", "test", {})
+        binary = Path(os.environ.get("VLA_TEST_BUILD", "build")) / "vla-simd-gguf"
+
+        def extract(out):
+            return subprocess.run([str(binary), "extract", str(self.path), str(out)], capture_output=True)
+
+        target = self.root / "target"
+        self.assertEqual(extract(target).returncode, 0)
+        self.assertEqual((target / "nested/deeper/config.txt").read_text(), "nested")
+        self.assertNotEqual(extract(target).returncode, 0)
+        link = self.root / "link"
+        link.symlink_to(target, target_is_directory=True)
+        self.assertNotEqual(extract(link).returncode, 0)
+        for name in ("config.txt", "nested"):
+            output = self.root / ("out-" + name)
+            output.mkdir()
+            (output / name).symlink_to(target / name, target_is_directory=name == "nested")
+            self.assertNotEqual(extract(output).returncode, 0)
+        self.assertEqual((target / "config.txt").read_text(), "chunk 2\n")
+
+    def test_cache_replacement_and_concurrency(self):
+        self.pack()
+        cache = self.root / "cache"
+        first = gguf_stage.stage(str(self.path), "act", str(cache))
+        self.pack("chunk 3\n")
+        second = gguf_stage.stage(str(self.path), "act", str(cache))
+        self.assertNotEqual(first, second)
+        self.assertEqual((Path(second) / "config.txt").read_text(), "chunk 3\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            paths = list(pool.map(lambda _: gguf_stage.stage(str(self.path), "act", str(self.root / "parallel")), range(16)))
+        self.assertEqual(len(set(paths)), 1)
+        self.assertEqual((Path(paths[0]) / "config.txt").read_text(), "chunk 3\n")
+        (self.root / "config.txt").write_text("chunk 4\n")
+        third = gguf_stage.stage(str(self.path), "act", str(cache))
+        self.assertEqual((Path(third) / "config.txt").read_text(), "chunk 4\n")
+
+    def test_interrupted_staging_retries(self):
+        self.pack()
+        cache = self.root / "cache"
+        populate = gguf_stage._populate
+
+        def fail(gguf, out, *args):
+            (Path(out) / "config.txt").write_text("partial")
+            raise OSError("interrupted")
+
+        with patch.object(gguf_stage, "_populate", fail), self.assertRaises(OSError):
+            gguf_stage.stage(str(self.path), "act", str(cache))
+        self.assertEqual(list(cache.iterdir()), [])
+        with patch.object(gguf_stage, "_populate", populate):
+            path = gguf_stage.stage(str(self.path), "act", str(cache))
+        self.assertEqual((Path(path) / "config.txt").read_text(), "chunk 2\n")
+
+
+class Inputs(unittest.TestCase):
+    def test_bf16_nan_and_rounding(self):
+        bits = np.array([0x7F800001, 0x7FFFFFFF, 0xFFFFFFFF, 0x3F808000, 0x3F818000], np.uint32)
+        got = convert_hf_safetensors.f32_to_bf16(bits.view(np.float32))
+        self.assertTrue(np.all((got[:3] & 0x7F80) == 0x7F80))
+        self.assertTrue(np.all((got[:3] & 0x7F) != 0))
+        np.testing.assert_array_equal(got[3:], [0x3F80, 0x3F82])
+
+    def test_safetensors_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.safetensors"
+            header = json.dumps({"w": {"dtype": "F32", "shape": [2], "data_offsets": [-4, 4]}}).encode()
+            path.write_bytes(struct.pack("<Q", len(header)) + header + b"\0" * 8)
+            reader = convert_hf_safetensors.Safetensors(path)
+            try:
+                with self.assertRaises(ValueError):
+                    reader.bits("w")
+            finally:
+                reader.mm.close()
+                reader.f.close()
+            path.write_bytes(struct.pack("<Q", 1 << 63))
+            with self.assertRaises(ValueError):
+                convert_hf_safetensors.Safetensors(path)
+
+    def test_history_padding(self):
+        history = policy_server.History(2)
+        values, mask = history.push(1)
+        self.assertEqual(values, [1, 1])
+        np.testing.assert_array_equal(mask, [0, 1])
+        self.assertEqual(history.push(2)[0], [1, 2])
+        self.assertEqual(history.push(3)[0], [2, 3])
+        with self.assertRaises(ValueError):
+            policy_server.History(0)
+
+    def test_nonfinite_observations(self):
+        engine = object.__new__(policy_server._Engine)
+        engine.state_dim = 2
+        for state in ([1, np.nan], [np.inf, 1], [1]):
+            with self.assertRaises(ValueError):
+                engine._state(state)
+        for frame in (np.empty((0, 2, 3), np.uint8), np.full((2, 2, 3), np.nan)):
+            with self.assertRaises(ValueError):
+                policy_server.ObservationAdapter._as_uint8(frame)
+
+    def test_pickle_rejects_globals(self):
+        with self.assertRaises(Exception):
+            policy_server._loads(b"cos\nsystem\n(S'false'\ntR.")
+
+
+if __name__ == "__main__":
+    unittest.main()
