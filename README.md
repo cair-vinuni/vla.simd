@@ -46,6 +46,19 @@ uv venv .serve --prompt serve --python 3.12
 uv pip install --python .serve '.[serve]' --torch-backend cpu --no-sources
 ```
 
+On Windows on Arm (Snapdragon X), build with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw),
+CMake and Ninja on `PATH`, and a native ARM64 Python: an x64 Python cannot load
+the ARM64 engine. This installs the engine and `--bench`; the `serve` extra
+(lerobot, torch) is untested there.
+
+```bat
+set CMAKE_GENERATOR=Ninja
+set CC=clang
+set CXX=clang++
+uv venv .serve --python cpython-3.12-windows-aarch64-none
+uv pip install --python .serve\Scripts\python.exe --only-binary numpy .
+```
+
 `vla-simd-serve` loads the GGUF and listens for the client.
 `--model-dir` accepts a local `.gguf` file or
 `hf://<user>/<repo>[@<revision>]/<file>.gguf`.

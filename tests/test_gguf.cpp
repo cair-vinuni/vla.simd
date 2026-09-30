@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -77,16 +78,19 @@ struct Writer {
 };
 
 static std::string tmpdir() {
-    const char* t = std::getenv("TMPDIR");
-    std::string tmpl = std::string(t && *t ? t : "/tmp") + "/test_gguf_XXXXXX";
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    return mkdtemp(buf.data()) ? std::string(buf.data()) : std::string();
+    // TMPDIR on POSIX, GetTempPath on Windows, /tmp otherwise
+    std::string tmpl = (std::filesystem::temp_directory_path() / "test_gguf_XXXXXX").string();
+    return mkdtemp(tmpl.data()) ? tmpl : std::string();
 }
 
 static void write(const std::string& path, const std::string& bytes) {
+    // Replace rather than truncate: Windows refuses to truncate a file that an
+    // open Gguf still maps, and a silently stale fixture would test nothing.
+    std::remove(path.c_str());
     std::ofstream f(path, std::ios::binary);
     f.write(bytes.data(), (std::streamsize)bytes.size());
+    f.close();
+    CHECK(f.good(), "cannot write fixture %s", path.c_str());
 }
 
 static void test_reader(const std::string& dir) {
@@ -204,8 +208,10 @@ static void test_reader(const std::string& dir) {
 
 static void test_mount(const std::string& dir) {
     // model.gguf from test_reader: a directory with one .gguf mounts as a GGUF
-    CHECK(io::find_gguf(dir) == dir + "/model.gguf", "dir with one gguf");
-    CHECK(io::find_gguf(dir + "/model.gguf") == dir + "/model.gguf", "gguf file");
+    // compared as paths: on Windows the result spells separators as '/'
+    const std::filesystem::path model = dir + "/model.gguf";
+    CHECK(std::filesystem::path(io::find_gguf(dir)) == model, "dir with one gguf");
+    CHECK(std::filesystem::path(io::find_gguf(dir + "/model.gguf")) == model, "gguf file");
     {
         // ...and an architecture no adapter knows is a load failure, not a plain dir
         io::Mount m(dir);
@@ -242,7 +248,12 @@ static void test_mount(const std::string& dir) {
         });
         CHECK(second.get(), "concurrent load lost consumed weights");
     }
-    for (const char* rel : {"../escape.txt", "/absolute.txt", "tok/../../escape"}) {
+    std::vector<std::string> unsafe{"../escape.txt", "/absolute.txt", "tok/../../escape"};
+#if defined(_WIN32)
+    // separators and roots that only Windows paths have
+    unsafe.insert(unsafe.end(), {"C:drive.txt", "..\\escape.txt", "\\\\server\\share\\x"});
+#endif
+    for (const std::string& rel : unsafe) {
         Writer bad;
         bad.s("general.architecture", "vla-simd");
         bad.u32("vla_simd.format", 1);

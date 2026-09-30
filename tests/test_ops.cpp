@@ -5,6 +5,7 @@
 #include "ops/quant_ops.h"
 #include "nn/attention.h"
 #include "nn/conv.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

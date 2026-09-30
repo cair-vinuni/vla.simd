@@ -18,7 +18,9 @@ namespace io {
 
 static bool relative_file(const std::string& name) {
     const std::filesystem::path p(name);
-    if (name.empty() || name.find('\0') != std::string::npos || p.is_absolute()) return false;
+    // has_root_path, not is_absolute: on Windows "/x" and "C:x" are not absolute
+    // but still escape the directory they are joined to.
+    if (name.empty() || name.find('\0') != std::string::npos || p.has_root_path()) return false;
     for (const auto& part : p)
         if (part == ".." || part == "." || part.empty()) return false;
     return true;

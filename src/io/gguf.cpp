@@ -6,11 +6,18 @@
 
 #include "io/gguf.h"
 #include <cstring>
-#include <fcntl.h>
 #include <limits>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace tcpu {
 namespace io {
@@ -131,34 +138,87 @@ float f16_to_f32(uint16_t h) {
     return f;
 }
 
+// Read-only view of a whole file. Returns nullptr with `err` set on failure;
+// files shorter than a GGUF header are refused before mapping.
+void* map_file(const std::string& path, size_t& len, std::string& err) {
+#if defined(_WIN32)
+    // Paths arrive as UTF-8, as they do on every other platform.
+    const int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+    std::wstring wpath(wn > 0 ? wn : 0, L'\0');
+    if (wn <= 0 || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, &wpath[0], wn)) {
+        err = "cannot open " + path;
+        return nullptr;
+    }
+    HANDLE fh = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE) { err = "cannot open " + path; return nullptr; }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(fh, &size) || size.QuadPart < 24) {
+        CloseHandle(fh);
+        err = path + ": not a GGUF file (too short)";
+        return nullptr;
+    }
+    HANDLE mh = CreateFileMappingW(fh, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    CloseHandle(fh);
+    void* view = mh ? MapViewOfFile(mh, FILE_MAP_READ, 0, 0, 0) : nullptr;
+    if (mh) CloseHandle(mh);                     // the view keeps the mapping alive
+    if (!view) { err = "cannot map " + path; return nullptr; }
+    len = (size_t)size.QuadPart;
+    return view;
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) { err = "cannot open " + path; return nullptr; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 24) {
+        ::close(fd);
+        err = path + ": not a GGUF file (too short)";
+        return nullptr;
+    }
+    void* view = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (view == MAP_FAILED) { err = "cannot map " + path; return nullptr; }
+    len = (size_t)st.st_size;
+    return view;
+#endif
+}
+
+void unmap_file(void* view, size_t len) {
+#if defined(_WIN32)
+    (void)len;
+    UnmapViewOfFile(view);
+#else
+    munmap(view, len);
+#endif
+}
+
 } // namespace
 
 Gguf::~Gguf() {
-    if (map) munmap(map, map_len);
+    release();
 }
 
-bool Gguf::open(const std::string& path) {
-    if (map) munmap(map, map_len);
+void Gguf::release() {
+    if (map) unmap_file(map, map_len);
     map = nullptr;
     map_len = 0;
     kv.clear();
     table.clear();
     index.clear();
+}
+
+bool Gguf::open(const std::string& path) {
+    release();
     err.clear();
     file = path;
-    const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) { err = "cannot open " + path; return false; }
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 24) {
-        ::close(fd);
-        err = path + ": not a GGUF file (too short)";
-        return false;
-    }
-    map_len = (size_t)st.st_size;
-    map = mmap(nullptr, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
-    ::close(fd);
-    if (map == MAP_FAILED) { map = nullptr; err = "cannot map " + path; return false; }
+    map = map_file(path, map_len, err);
+    if (!map) { map_len = 0; return false; }
+    if (parse(path)) return true;
+    // A rejected file is not held: Windows cannot rewrite a file while it is mapped.
+    release();
+    return false;
+}
 
+bool Gguf::parse(const std::string& path) {
     Cursor c{(const uint8_t*)map, map_len};
     if (std::memcmp(c.p, "GGUF", 4) != 0) { err = path + ": bad magic, not a GGUF file"; return false; }
     c.off = 4;

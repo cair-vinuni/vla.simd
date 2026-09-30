@@ -65,7 +65,7 @@ from queue import Empty, Full, Queue
 import numpy as np
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_EXT = ".dylib" if sys.platform == "darwin" else ".so"
+LIB_EXT = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")
 LIB_DIRS = (*(sys.modules[__package__].__path__ if __package__ else ()), os.path.join(HERE, "build"))
 
 U8P = ctypes.POINTER(ctypes.c_uint8)
@@ -100,8 +100,49 @@ def _loads(data):
     return _WireUnpickler(io.BytesIO(data)).load()
 
 
+def _disable_power_throttling():
+    """Opt out of Windows power throttling (EcoQoS). Windows throttles a process
+    it sees as background work, which includes anything started over SSH or as
+    a service. On a Snapdragon X that kept an 8-thread ACT query on half the
+    cores: 275 ms instead of 147 ms. A policy server is latency-bound."""
+    from ctypes import wintypes
+
+    class State(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                    ("StateMask", wintypes.ULONG)]
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.SetProcessInformation.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    # ProcessPowerThrottling = 4; control EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION, both off
+    state = State(1, 0x1 | 0x4, 0)
+    if not kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4, ctypes.byref(state),
+                                          ctypes.sizeof(state)):
+        logger.warning("could not opt out of Windows power throttling")
+
+
 def _peak_rss_bytes():
     """Peak resident set size of this process so far, in bytes."""
+    if sys.platform == "win32":
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        *((name, ctypes.c_size_t) for name in (
+                            "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                            "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                            "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage"))]
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.K32GetProcessMemoryInfo.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD)
+        counters = Counters(cb=ctypes.sizeof(Counters))
+        if not kernel32.K32GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            return 0
+        return int(counters.PeakWorkingSetSize)
     import resource
 
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1180,6 +1221,8 @@ def main():
     logging.basicConfig(
         level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger.setLevel(logging.INFO)
+    if sys.platform == "win32":
+        _disable_power_throttling()
 
     if args.int8 is not None:
         if spec.policy_type not in ("act", "diffusion", "impact", "octo", "smolvla"):

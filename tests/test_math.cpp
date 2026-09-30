@@ -81,8 +81,9 @@ int main(int argc, char** argv) {
         check(image[i] == -1 && image[8+i] == 1, "constant image resize");
         check(std::fabs(image[4+i] - (127.0/255*2-1)) < 1e-7, "image normalization");
     }
-    char path[] = "/tmp/vla_tokenizer_XXXXXX";
-    if (!mkdtemp(path)) return 1;
+    std::string temp = (std::filesystem::temp_directory_path() / "vla_tokenizer_XXXXXX").string();
+    if (!mkdtemp(temp.data())) return 1;
+    const char* path = temp.c_str();
     const std::filesystem::path root(path);
     check(!tcpu::shape_fits({INT_MAX, 2}) && !tcpu::shape_fits({1, -1}) &&
           tcpu::shape_fits({32, 64}), "invalid shape validation");

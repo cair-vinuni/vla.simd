@@ -58,7 +58,7 @@ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
   set(VLA_APPLE_MCPU "native" CACHE STRING "-mcpu for Apple arm64 (CI overrides with apple-m1)")
   target_compile_options(vla_flags INTERFACE -mcpu=${VLA_APPLE_MCPU})
   message(STATUS "vla_simd arm64: -mcpu=${VLA_APPLE_MCPU} (apple)")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
   # Off by default: 8% slower than the baseline on a Cortex-A76 (see above).
   # The knob is here so another part can A/B it.
   option(VLA_ARM_NATIVE "Build aarch64 with -mcpu=native (build host only)" OFF)
@@ -118,6 +118,27 @@ if(OpenMP_CXX_FOUND)
 else()
   message(WARNING "vla_simd: OpenMP not found - the engine will run single-threaded "
                   "and every OMP_NUM_THREADS recipe in the docs is inert")
+endif()
+
+# MinGW (llvm-mingw): ctypes resolves a DLL's dependencies from the DLL's own
+# directory, not PATH, so the toolchain runtimes are copied next to the libraries.
+set(VLA_RUNTIME_DLLS "")
+if(MINGW)
+  get_filename_component(VLA_MINGW_ROOT "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(VLA_MINGW_ROOT "${VLA_MINGW_ROOT}" DIRECTORY)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(VLA_MINGW_TRIPLE aarch64-w64-mingw32)
+  else()
+    set(VLA_MINGW_TRIPLE x86_64-w64-mingw32)
+  endif()
+  foreach(dll libomp.dll libc++.dll libunwind.dll)
+    find_file(VLA_DLL_${dll} ${dll} HINTS "${VLA_MINGW_ROOT}/${VLA_MINGW_TRIPLE}/bin" "${VLA_MINGW_ROOT}/bin"
+              NO_DEFAULT_PATH)
+    if(VLA_DLL_${dll})
+      list(APPEND VLA_RUNTIME_DLLS "${VLA_DLL_${dll}}")
+    endif()
+  endforeach()
+  message(STATUS "vla_simd runtime DLLs: ${VLA_RUNTIME_DLLS}")
 endif()
 
 if(APPLE AND NOT VLA_SCALAR)
@@ -243,6 +264,10 @@ function(vla_add_shared name capi_src)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(${name} PRIVATE -fno-semantic-interposition)
   endif()
+  if(VLA_RUNTIME_DLLS)
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VLA_RUNTIME_DLLS} $<TARGET_FILE_DIR:${name}>)
+  endif()
 endfunction()
 
 vla_add_shared(vla_simd_octo    src/models/octo/octo_capi.cpp       tcpu_octo)
@@ -252,9 +277,10 @@ vla_add_shared(vla_simd_turbovla src/models/turbovla/turbovla_capi.cpp tcpu_turb
 vla_add_shared(vla_simd_impact  src/models/impact/impact_capi.cpp    tcpu_impact)
 vla_add_shared(vla_simd_diffusion src/models/diffusion/diffusion_capi.cpp tcpu_diffusion)
 
-if(NOT SKBUILD)
+if(NOT SKBUILD AND NOT WIN32)
   # vla-simd-gguf info|extract: inspect a vla.cpp GGUF, or write it out as the
-  # converted directory it loads as
+  # converted directory it loads as. POSIX only: extraction relies on openat and
+  # O_NOFOLLOW to refuse symlinked destinations.
   add_executable(vla-simd-gguf src/io/gguf_tool.cpp)
   target_link_libraries(vla-simd-gguf PRIVATE tcpu_io)
 endif()
@@ -317,7 +343,11 @@ endif()
 if(SKBUILD)
   install(TARGETS vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla
                   vla_simd_impact vla_simd_diffusion
-          LIBRARY DESTINATION vla_simd)
+          LIBRARY DESTINATION vla_simd
+          RUNTIME DESTINATION vla_simd)
+  if(VLA_RUNTIME_DLLS)
+    install(FILES ${VLA_RUNTIME_DLLS} DESTINATION vla_simd)
+  endif()
   return()
 endif()
 
@@ -334,6 +364,9 @@ install(TARGETS vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla
         ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES include/vla_simd.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(VLA_RUNTIME_DLLS)
+  install(FILES ${VLA_RUNTIME_DLLS} DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 install(EXPORT vla_simdTargets NAMESPACE vla::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vla_simd)
 

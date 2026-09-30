@@ -39,6 +39,11 @@
 #include <sys/auxv.h>
 #elif defined(__APPLE__)
 #include <sys/sysctl.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 using std::size_t;
 
@@ -48,6 +53,9 @@ using hal::env::gemm_force_static;
 
 #ifndef HWCAP_ASIMDDP
 #define HWCAP_ASIMDDP (1 << 20)
+#endif
+#ifndef PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE
+#define PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE 43
 #endif
 
 bool int8_gemm_available() {
@@ -63,6 +71,8 @@ bool int8_gemm_available() {
         if (sysctlbyname("hw.optional.arm.FEAT_DotProd", &has, &sz, nullptr, 0) != 0)
             return false;
         return has != 0;
+#elif defined(_WIN32)
+        return IsProcessorFeaturePresent(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE) != 0;
 #else
         return false;
 #endif

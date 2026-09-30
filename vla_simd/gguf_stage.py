@@ -28,6 +28,7 @@ import hashlib
 import tempfile
 import json
 import os
+import shutil
 import struct
 
 import numpy as np
@@ -109,6 +110,25 @@ def read_metadata(path):
     return meta
 
 
+def _link(src, dst):
+    """Symlink dst to src. Windows needs a privilege (or Developer Mode) for
+    that; without it a directory is copied and a file is hard-linked, or copied
+    when it is on another volume."""
+    try:
+        os.symlink(src, dst, target_is_directory=os.path.isdir(src))
+        return
+    except OSError:
+        if os.name != "nt":
+            raise
+    if os.path.isdir(src):
+        shutil.copytree(src, dst)
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 def _hub_file(repo, name):
     from huggingface_hub import hf_hub_download
     return hf_hub_download(repo, name)
@@ -183,7 +203,7 @@ def stage(path, model, cache_root=None):
     if os.path.isdir(out):
         return out
     with tempfile.TemporaryDirectory(prefix=".stage-", dir=cache_root) as work:
-        os.symlink(real, os.path.join(work, os.path.basename(gguf)))
+        _link(real, os.path.join(work, os.path.basename(gguf)))
         _populate(gguf, work, meta, own, arch)
         try:
             os.rename(work, out)
@@ -199,7 +219,7 @@ def _populate(gguf, out, meta, own, arch):
     for name in SIDECARS:
         src, dst = os.path.join(src_dir, name), os.path.join(out, name)
         if os.path.exists(src) and not os.path.lexists(dst):
-            os.symlink(os.path.realpath(src), dst)
+            _link(os.path.realpath(src), dst)
 
     def missing(name):
         return not os.path.exists(os.path.join(out, name))
@@ -218,7 +238,7 @@ def _populate(gguf, out, meta, own, arch):
         config += [f"chunk {meta['smolvla.chunk_size']}", f"num_steps {meta['smolvla.num_steps']}"]
     elif arch == "turbovla":
         if missing("vocab.txt"):
-            os.symlink(_hub_file(BERT_TOKENIZER, "vocab.txt"), os.path.join(out, "vocab.txt"))
+            _link(_hub_file(BERT_TOKENIZER, "vocab.txt"), os.path.join(out, "vocab.txt"))
         if missing("stats.bin"):
             _turbovla_stats(os.path.join(out, "stats.bin"), *TURBOVLA_STATS, meta)
         config += [f"cam{i} {c}" for i, c in enumerate(TURBOVLA_CAMS)]
