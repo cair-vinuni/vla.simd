@@ -63,6 +63,11 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
   # The knob is here so another part can A/B it.
   option(VLA_ARM_NATIVE "Build aarch64 with -mcpu=native (build host only)" OFF)
   set(VLA_ARM_FLAGS "" CACHE STRING "override the aarch64 -march/-mcpu flags entirely")
+  # Rows of the mr x 16 fp32 GEMM register tile, chosen per core by the register
+  # tile selection in docs/benchmark (4: Cortex-A76).
+  set(VLA_NEON_MR "4" CACHE STRING "NEON fp32 GEMM register tile rows (1-6)")
+  target_compile_definitions(vla_flags INTERFACE TCPU_NEON_MR=${VLA_NEON_MR})
+  message(STATUS "vla_simd NEON register tile: ${VLA_NEON_MR}x16")
   if(VLA_ARM_FLAGS)
     separate_arguments(VLA_ARM_FLAG_LIST NATIVE_COMMAND "${VLA_ARM_FLAGS}")
     target_compile_options(vla_flags INTERFACE ${VLA_ARM_FLAG_LIST})
