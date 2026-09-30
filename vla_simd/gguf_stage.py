@@ -226,9 +226,10 @@ def _populate(gguf, out, meta, own, arch):
 
     config = []
     if own:
-        # everything is inside; the server itself reads config.txt from disk
+        # everything is inside; the server itself reads config.txt from disk.
+        # newline="": the stored bytes as they are, with no CR added on Windows
         if missing("config.txt"):
-            with open(os.path.join(out, "config.txt"), "w", encoding="utf-8") as f:
+            with open(os.path.join(out, "config.txt"), "w", encoding="utf-8", newline="") as f:
                 f.write(meta.get("vla_simd.file.config.txt", ""))
         return out
     if arch == "smolvla":
@@ -248,6 +249,6 @@ def _populate(gguf, out, meta, own, arch):
         raise SystemExit(f"{gguf}: vla.cpp architecture '{arch}' is not supported "
                          "(smolvla, turbovla and octo are)")
     if missing("config.txt") and config:
-        with open(os.path.join(out, "config.txt"), "w") as f:
+        with open(os.path.join(out, "config.txt"), "w", encoding="utf-8", newline="") as f:
             f.write("\n".join(config) + "\n")
     return out

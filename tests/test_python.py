@@ -73,7 +73,7 @@ class Checkpoints(unittest.TestCase):
         self.path = self.root / "model.gguf"
 
     def pack(self, text="chunk 2\n", layout=None):
-        (self.source / "config.txt").write_text(text)
+        (self.source / "config.txt").write_bytes(text.encode())   # no CR on Windows
         (self.source / "weights.bin").write_bytes(struct.pack("<4f", 1, 2, 3, 4))
         _gguf.pack(self.source, self.path, "act", "test", layout or {})
 
@@ -105,9 +105,12 @@ class Checkpoints(unittest.TestCase):
         self.assertEqual({p.name for p in self.root.iterdir()}, {"source", "model.gguf"})
         replace = os.replace
         barrier = threading.Barrier(4)
+        waited = threading.local()
 
         def publish(source, destination):
-            barrier.wait(timeout=5)
+            if not getattr(waited, "done", False):   # a Windows retry does not wait again
+                waited.done = True
+                barrier.wait(timeout=5)
             replace(source, destination)
 
         with patch.object(_gguf.os, "replace", publish), concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:

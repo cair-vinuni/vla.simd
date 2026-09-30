@@ -34,6 +34,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 from pathlib import PurePosixPath
 
 
@@ -89,6 +90,20 @@ def _files(root):
 def _str(s):
     b = s.encode("utf-8")
     return struct.pack("<Q", len(b)) + b
+
+
+def _publish(tmp, path):
+    """os.replace, retried on Windows: there, replacing a file that another
+    writer is replacing at the same moment is refused (PermissionError) rather
+    than serialized."""
+    for attempt in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 49:
+                raise
+            time.sleep(0.02)
 
 
 def pack(root, path, model, source, layout):
@@ -148,7 +163,7 @@ def pack(root, path, model, source, layout):
                             raise ValueError(f"{src}: truncated during packing")
                         f.write(chunk)
                         length -= len(chunk)
-        os.replace(tmp, path)
+        _publish(tmp, path)
     finally:
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
