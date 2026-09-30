@@ -40,11 +40,23 @@ class Benchmark(unittest.TestCase):
         self.assertEqual(result["checkpoint"], "test.gguf")
         self.assertEqual(result["queries"], 2)
         self.assertGreater(result["peak_rss_bytes"], 0)
+        self.assertGreater(result["baseline_rss_bytes"], 0)
+        self.assertLessEqual(result["baseline_rss_bytes"], result["peak_rss_bytes"])
+        self.assertEqual(result["warmup"], 2)
         self.assertGreaterEqual(result["p95_ms"], result["median_ms"])
         self.assertEqual(engine.predict.call_count, 4)
         engine.close.assert_called_once()
-        for option in ("--soak", "--obs-queue-timeout"):
-            for value in ("nan", "inf"):
+        engine.predict.reset_mock()
+        output = io.StringIO()
+        with patch.object(sys, "argv", argv + ["--warmup", "5"]), patch.object(sys, "stdout", output), \
+             patch.object(gguf_stage, "stage", return_value="staged"), \
+             patch.object(policy_server.MODELS["act"], "engine_cls", return_value=engine):
+            policy_server.main()
+        self.assertEqual(json.loads(output.getvalue())["warmup"], 5)
+        self.assertEqual(engine.predict.call_count, 7)
+        for option, values in (("--soak", ("nan", "inf")), ("--obs-queue-timeout", ("nan", "inf")),
+                               ("--warmup", ("0",))):
+            for value in values:
                 with patch.object(sys, "argv", argv + [option, value]), \
                      patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as error:
                     policy_server.main()

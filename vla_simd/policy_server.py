@@ -100,6 +100,14 @@ def _loads(data):
     return _WireUnpickler(io.BytesIO(data)).load()
 
 
+def _peak_rss_bytes():
+    """Peak resident set size of this process so far, in bytes."""
+    import resource
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(rss if sys.platform == "darwin" else rss * 1024)
+
+
 def read_config(model_dir):
     """<model-dir>/config.txt, written by the converter.
 
@@ -1142,6 +1150,8 @@ def main():
                    help="gRPC receive/send cap; grpc's own default is 4 MB (default: 64)")
     p.add_argument("--int8", type=int, default=None, metavar="MASK",
                    help="W8A8 layer-group bitmask, exported as <MODEL>_INT8 (act, diffusion, impact, octo, smolvla)")
+    p.add_argument("--warmup", type=int, default=2, metavar="N",
+                   help="untimed predictions after loading, before serving or timing (default: 2)")
     p.add_argument("--bench", type=int, default=0, metavar="N",
                    help="time N queries after warmup, print the latency and exit")
     p.add_argument("--soak", type=float, default=0.0, metavar="SEC",
@@ -1157,7 +1167,7 @@ def main():
     # `seed` only exists for the models whose spec adds it, so check what is there
     # rather than assuming every model took every optional flag.
     for name, lo in (("fps", 1), ("port", 1), ("workers", 1), ("max_message_mb", 1), ("seed", 0),
-                     ("bench", 0), ("soak", 0), ("rtc_horizon", 0), ("rtc_delay", 0)):
+                     ("warmup", 1), ("bench", 0), ("soak", 0), ("rtc_horizon", 0), ("rtc_delay", 0)):
         if getattr(args, name, None) is None:
             continue
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < lo:
@@ -1176,6 +1186,9 @@ def main():
             p.error(f"--int8 is not implemented for {spec.policy_type}")
         os.environ[f"{spec.policy_type.upper()}_INT8"] = str(args.int8)
 
+    # Everything the checkpoint adds is measured against this: the interpreter
+    # with the server and NumPy imported, before any download, staging or load.
+    baseline_rss = _peak_rss_bytes()
     if args.model_dir.startswith("hf://"):
         # hf://<user>/<repo>[@<revision>][/<file>.gguf]: a file picks one GGUF of
         # several in the repo, and only that file is downloaded
@@ -1217,7 +1230,8 @@ def main():
     try:
         # Warm up before the first client: the first predict pays for every
         # scratch allocation and a cold weight arena.
-        engine.predict(engine.warmup_input(), 0)
+        for _ in range(args.warmup - 1):
+            engine.predict(engine.warmup_input(), 0)
         t0 = time.time()
         engine.predict(engine.warmup_input(), 0)
         logger.info("warm inference: %.0f ms per chunk", (time.time() - t0) * 1000)
@@ -1236,16 +1250,15 @@ def main():
                 engine.predict(tuple(inp), len(ts))
                 ts.append((time.perf_counter() - t0) * 1000)
             import platform
-            import resource
 
             p10, med, p90, p95 = np.percentile(ts, [10, 50, 90, 95])
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             res = {"model": spec.policy_type, "backend": backend, "int8": args.int8 or 0,
-                   "threads": int(os.environ["OMP_NUM_THREADS"]), "queries": len(ts),
+                   "threads": int(os.environ["OMP_NUM_THREADS"]), "warmup": args.warmup,
+                   "queries": len(ts),
                    "median_ms": round(float(med), 2), "p10_ms": round(float(p10), 2),
                    "p90_ms": round(float(p90), 2),
                    "p95_ms": round(float(p95), 2),
-                   "peak_rss_bytes": int(rss if sys.platform == "darwin" else rss * 1024),
+                   "peak_rss_bytes": _peak_rss_bytes(), "baseline_rss_bytes": baseline_rss,
                    "checkpoint": checkpoint, "configuration": engine.describe(),
                    "platform": platform.platform(), "machine": platform.machine(),
                    "numpy_version": np.__version__,
