@@ -161,12 +161,15 @@ def main():
             # 1. threads
             sweep = {}
             backend, int8_ok = None, True
-            for t in threads:
+            # High to low: a run right after a lighter one inherits turbo power budget
+            # (Intel PL2) and reads up to 25% fast, so the heavy counts go first and
+            # every point is measured at the sustained clock.
+            for t in sorted(threads, reverse=True):
                 med, res = r.run("threads", model, precision, t, {}, mask, 5, a.sweep_queries)
                 sweep[t] = med
                 if res:
                     backend = res["backend"]
-                elif precision == "int8" and t == threads[0]:
+                elif precision == "int8" and t == max(threads):
                     int8_ok = False
                     break
             if not int8_ok or backend is None:
