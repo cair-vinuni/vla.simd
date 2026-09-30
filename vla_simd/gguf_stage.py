@@ -173,7 +173,10 @@ def stage(path, model, cache_root=None):
         for item in paths:
             if os.path.exists(item):
                 st = os.stat(item)
-                stamp.append((os.path.realpath(item), st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+                # The inode catches an atomic replacement of the same size that
+                # lands within one filesystem timestamp tick.
+                stamp.append((os.path.realpath(item), st.st_dev, st.st_ino, st.st_size,
+                              st.st_mtime_ns, st.st_ctime_ns))
     digest = hashlib.sha256(repr(stamp).encode()).hexdigest()[:20]
     out = os.path.join(cache_root, f"{stem}-{digest}")
     os.makedirs(cache_root, exist_ok=True)
