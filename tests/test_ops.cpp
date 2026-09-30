@@ -3,6 +3,9 @@
 #include "ops/conv_ops.h"
 #include "ops/lm_ops.h"
 #include "ops/quant_ops.h"
+#include "nn/attention.h"
+#include "nn/conv.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -53,17 +56,60 @@ static void naive_linear(std::vector<double>& y, std::vector<double>& mag, const
         }
 }
 
-static void expect_close(const char* what, const std::vector<float>& got, const std::vector<double>& ref,
-                         const std::vector<double>& mag, double rel) {
+static double scaled_error(const std::vector<float>& got, const std::vector<double>& ref,
+                           const std::vector<double>& mag) {
+    if (got.size() != ref.size() || got.size() != mag.size()) return INFINITY;
     double worst = 0.0;
     for (size_t i = 0; i < got.size(); i++) {
+        if (!std::isfinite(got[i]) || !std::isfinite(ref[i]) ||
+            !std::isfinite(mag[i]) || mag[i] < 0.0) return INFINITY;
         const double e = std::fabs(got[i] - ref[i])/(mag[i] + 1e-30);
         if (e > worst) worst = e;
     }
+    return worst;
+}
+
+static void expect_close(const char* what, const std::vector<float>& got, const std::vector<double>& ref,
+                         const std::vector<double>& mag, double rel) {
+    const double worst = scaled_error(got, ref, mag);
     CHECK(worst <= rel, "%s: worst scaled error %.3e > %.1e", what, worst, rel);
 }
 
 static void test_linear() {
+    {
+        const int width = std::numeric_limits<int>::max() / (255*127) + 1;
+        std::vector<float> weights((size_t)16*width, 1), input(width, 1), out(16);
+        nn::Linear linear;
+        linear.init(weights.data(), nullptr, 16, width, nn::Linear::Role::Generic);
+        CHECK(!linear.init_int8(), "unsafe INT8 linear reduction accepted");
+        linear.forward(out.data(), input.data(), 1);
+        for (float value : out) CHECK(value == width, "wide linear fallback changed output");
+        nn::Conv2d conv;
+        conv.init(weights.data(), nullptr, 16, 1, width);
+        CHECK(!conv.init_int8(), "unsafe INT8 convolution reduction accepted");
+        conv.forward(out.data(), input.data(), 1, 1, 1, 0);
+        for (float value : out) CHECK(value == width, "wide convolution fallback changed output");
+    }
+    for (float magnitude : {0.0f, std::numeric_limits<float>::denorm_min(), 1e-37f, 1.0f}) {
+        for (int width : {3, 16, 33}) {
+            std::vector<float> x(width);
+            for (int i=0; i<width; i++) x[i] = (i % 2 ? -1 : 1)*magnitude;
+            std::vector<int8_t> q(i8_kpad(width));
+            float scale = 0;
+            quantize_act_i8(x.data(), q.data(), &scale, 1, width);
+            CHECK(std::isfinite(scale) && scale > 0, "invalid quantization scale");
+            for (int i=0; i<width; i++) {
+                CHECK(q[i] >= -127, "quantization escaped symmetric range");
+                CHECK(std::fabs((double)q[i]*scale-x[i]) <= (double)scale*.51,
+                      "quantization error exceeds half a bin");
+            }
+            for (int i=width; i<i8_kpad(width); i++) CHECK(q[i] == 0, "nonzero quantization padding");
+            std::vector<float> weights((size_t)16*width, magnitude), scales(16);
+            std::vector<int32_t> packed(packed_i8_words(16, width));
+            pack_weights_i8(weights.data(), (int8_t*)packed.data(), scales.data(), 16, width);
+            for (float s : scales) CHECK(std::isfinite(s) && s > 0, "invalid weight scale");
+        }
+    }
     const int shapes[][3] = {{1, 16, 3}, {7, 48, 64}, {50, 768, 1027}, {13, 64, 17}, {257, 96, 48}};
     for (auto& s : shapes) {
         const int seq = s[0], N = s[1], K = s[2];
@@ -139,6 +185,39 @@ static void naive_attention(std::vector<double>& out, const float* Q, const floa
 }
 
 static void test_attention() {
+    if (int8_gemm_available()) {
+        {
+            nn::Linear linear;
+            std::vector<float> weights(16*16, 1), input(16, 1), out(16);
+            std::vector<uint16_t> zero(16*16);
+            linear.init(weights.data(), nullptr, 16, 16, nn::Linear::Role::Gemm);
+            CHECK(linear.init_int8(), "int8 init failed");
+            linear.init_bf16(zero.data(), nullptr, 16, 16, nn::Linear::Role::Gemm);
+            linear.forward(out.data(), input.data(), 1);
+            CHECK(!linear.is_int8(), "BF16 reinit retained INT8 state");
+            for (float value : out) CHECK(value == 0, "BF16 reinit used old weights");
+        }
+        const int dim = 32, seq = 7;
+        auto weights = rv(dim*dim), bias = rv(dim);
+        nn::MhaQKV layer;
+        layer.set_shape(4, dim/4);
+        for (nn::Linear* linear : {&layer.wq, &layer.wk, &layer.wv, &layer.wo}) {
+            linear->init(weights.data(), bias.data(), dim, dim, nn::Linear::Role::Gemm);
+            CHECK(linear->init_int8(), "int8 attention init failed");
+        }
+        auto source = rv(seq*dim), qcopy = source, kcopy = source, vcopy = source;
+        nn::Scratch shared, separate;
+        for (int rows : {seq, 1}) {
+            for (int sharing = 0; sharing < 4; sharing++) {
+                std::vector<float> actual(rows*dim), expected(rows*dim);
+                const float* q = sharing & 1 ? source.data() : qcopy.data();
+                const float* v = sharing & 2 ? source.data() : vcopy.data();
+                layer.forward(actual.data(), q, source.data(), v, rows, seq, shared);
+                layer.forward(expected.data(), qcopy.data(), kcopy.data(), vcopy.data(), rows, seq, separate);
+                CHECK(same_bits(actual, expected), "shared quantization changed attention");
+            }
+        }
+    }
     const int cfgs[][5] = {{1, 50, 8, 2, 64}, {50, 50, 8, 2, 64}, {50, 113, 15, 5, 64},
                            {17, 33, 4, 4, 72}, {9, 20, 2, 1, 256}, {256, 256, 12, 12, 64},
                            {12, 512, 4, 2, 64}};
@@ -174,6 +253,19 @@ static void test_attention() {
         expect_close("gqa_attention_masked causal K_pre", pre, ref, one, 2e-6);
         CHECK(TCPU_HAL_APPLE || same_bits(pre, masked),
               "masked with K_pre != masked (%d,%d,%d,%d,%d)", sq, sk, nq, nkv, hd);
+        for (float block : {NINF, std::numeric_limits<float>::lowest()}) {
+            std::fill(causal.begin(), causal.end(), block);
+            gqa_attention_masked(masked.data(), Q.data(), K.data(), V.data(), sq, sk, nq, nkv, hd, scale, causal.data());
+            for (int t=0; t<sq; t++)
+                for (int h=0; h<nq; h++)
+                    for (int d=0; d<hd; d++) {
+                        double mean = 0;
+                        for (int j=0; j<sk; j++) mean += V[((size_t)j*nkv+h/(nq/nkv))*hd+d]/(double)sk;
+                        const float value = masked[((size_t)t*nq+h)*hd+d];
+                        CHECK(std::isfinite(value) && std::fabs(value-mean) < 2e-6,
+                              "fully masked attention differs from uniform fallback");
+                    }
+        }
     }
 }
 
@@ -183,6 +275,7 @@ static void test_eltwise() {
     auto run = [&](void (*f)(float*, int), double (*r)(double), double tol, const char* name) {
         std::vector<float> y(x);
         f(y.data(), n);
+        for (float v : y) CHECK(std::isfinite(v), "%s: nonfinite output", name);
         double worst = 0.0;
         for (int i = 0; i < n; i++) {
             const double e = std::fabs(y[i] - r(x[i]))/std::max(std::fabs(r(x[i])), 1.0);
@@ -208,6 +301,8 @@ static void test_norms() {
         std::vector<float> y((size_t)seq*H), z((size_t)seq*H);
         rmsnorm(y.data(), x.data(), w.data(), seq, H, 1e-6f);
         layernorm(z.data(), x.data(), w.data(), b.data(), seq, H, 1e-5f);
+        for (float v : y) CHECK(std::isfinite(v), "rmsnorm: nonfinite output");
+        for (float v : z) CHECK(std::isfinite(v), "layernorm: nonfinite output");
         double wr = 0.0, wl = 0.0;
         for (int t = 0; t < seq; t++) {
             double ss = 0.0, mu = 0.0, var = 0.0;
@@ -235,6 +330,8 @@ static void test_conv() {
         conv2d(y.data(), x.data(), W.data(), b.data(), H, Wd, Cin, Cout, k, st, pd);
         pack_weights16(W.data(), Wp.data(), Cout, K);
         conv2d_packed(yp.data(), x.data(), Wp.data(), b.data(), H, Wd, Cin, Cout, k, st, pd);
+        for (float v : y) CHECK(std::isfinite(v), "conv2d: nonfinite output");
+        for (float v : yp) CHECK(std::isfinite(v), "conv2d_packed: nonfinite output");
         double worst = 0.0;
         for (int oy = 0; oy < Ho; oy++)
             for (int ox = 0; ox < Wo; ox++)
@@ -260,6 +357,7 @@ static void test_conv() {
     auto x = rv((size_t)T*Cin), W = rv((size_t)Cin*k*Cout, -.1f, .1f), b = rv(Cout);
     std::vector<float> y((size_t)To*Cout);
     conv_transpose1d(y.data(), x.data(), W.data(), b.data(), T, Cin, Cout, k, st, pd);
+    for (float v : y) CHECK(std::isfinite(v), "conv_transpose1d: nonfinite output");
     double worst = 0.0;
     for (int o = 0; o < To; o++)
         for (int co = 0; co < Cout; co++) {
@@ -281,6 +379,7 @@ static void test_conv() {
     std::vector<float> g1((size_t)P*C), g2((size_t)P*C);
     groupnorm(g1.data(), gx.data(), gs.data(), gb.data(), P, C, G, 1e-5f, false);
     groupnorm(g2.data(), gx.data(), gs.data(), gb.data(), P, C, G, 1e-5f, false);
+    for (float v : g1) CHECK(std::isfinite(v), "groupnorm: nonfinite output");
     CHECK(same_bits(g1, g2), "groupnorm is not deterministic");
     double gw = 0.0;
     const int gc = C/G;
@@ -299,6 +398,9 @@ static void test_conv() {
 }
 
 int main() {
+    CHECK(std::isinf(scaled_error({NAN}, {0}, {1})), "comparison accepts NaN");
+    CHECK(std::isinf(scaled_error({INFINITY}, {0}, {1})), "comparison accepts infinity");
+    CHECK(std::isinf(scaled_error({0}, {}, {1})), "comparison accepts shape mismatch");
     test_linear();
     test_attention();
     test_eltwise();

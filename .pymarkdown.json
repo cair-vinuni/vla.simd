@@ -1,0 +1,20 @@
+{
+  "plugins": {
+    "md013": {
+      "line_length": 100,
+      "code_blocks": false,
+      "tables": false
+    },
+    "md033": {
+      "allowed_elements": "div,img,h1,p,b,a,details,summary"
+    },
+    "md041": {
+      "enabled": false
+    }
+  },
+  "extensions": {
+    "markdown-tables": {
+      "enabled": true
+    }
+  }
+}

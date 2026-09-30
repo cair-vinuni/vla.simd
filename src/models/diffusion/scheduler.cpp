@@ -21,8 +21,12 @@ static double alpha_bar_cosine(double t) {
 
 bool DPNoiseScheduler::init(const DPConfig& c) {
     cfg = c;
+    timesteps.clear();
+    alphas_cumprod.clear();
     const int N = cfg.num_train_timesteps;
-    if (N <= 0 || cfg.num_inference_steps <= 0) return false;
+    if (N <= 0 || cfg.num_inference_steps <= 0 || cfg.num_inference_steps > N ||
+        cfg.horizon <= 0 || cfg.action_dim <= 0) return false;
+    if (cfg.clip_sample && (!std::isfinite(cfg.clip_sample_range) || cfg.clip_sample_range <= 0)) return false;
     if (cfg.prediction_type != "epsilon") return false;   // the only one lerobot trains
 
     std::vector<double> betas((size_t)N);
@@ -34,13 +38,15 @@ bool DPNoiseScheduler::init(const DPConfig& c) {
             betas[i] = std::min(1.0 - alpha_bar_cosine(t2)/alpha_bar_cosine(t1), 0.999);
         }
     } else if (cfg.beta_schedule == "linear") {
+        if (!(cfg.beta_start > 0 && cfg.beta_start < 1 && cfg.beta_end > 0 && cfg.beta_end < 1)) return false;
         for (int i=0; i<N; i++)
             betas[i] = (double)cfg.beta_start +
-                       ((double)cfg.beta_end - (double)cfg.beta_start)*(double)i/(double)(N-1);
+                       ((double)cfg.beta_end - (double)cfg.beta_start)*(double)i/(double)std::max(N-1, 1);
     } else if (cfg.beta_schedule == "scaled_linear") {
+        if (!(cfg.beta_start > 0 && cfg.beta_start < 1 && cfg.beta_end > 0 && cfg.beta_end < 1)) return false;
         const double a = std::sqrt((double)cfg.beta_start), b = std::sqrt((double)cfg.beta_end);
         for (int i=0; i<N; i++) {
-            const double v = a + (b - a)*(double)i/(double)(N-1);
+            const double v = a + (b - a)*(double)i/(double)std::max(N-1, 1);
             betas[i] = v*v;
         }
     } else {

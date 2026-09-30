@@ -9,6 +9,7 @@
 #include "hal/common/threads.h"
 #include "nn/encoder.h"
 #include "io/files.h"
+#include "models/arena.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@ using std::size_t;
 namespace tcpu {
 
 bool ImpactModel::load(const std::string& dir) {
+    have_text = false;
     const io::Mount mount(dir);
     if (!mount.ok()) return false;
     io::InFile cfgf(dir + "/config.txt");
@@ -29,7 +31,7 @@ bool ImpactModel::load(const std::string& dir) {
     while (std::getline(cfgf, line)) {
         std::istringstream ss(line);
         std::string key;
-        ss >> key;
+        if (!(ss >> key)) continue;
         if      (key == "img_h"     ) ss >> img_h;
         else if (key == "img_w"     ) ss >> img_w;
         else if (key == "n_cams"    ) ss >> n_cams;
@@ -41,11 +43,18 @@ bool ImpactModel::load(const std::string& dir) {
             ss >> name;
             cam_names.push_back(name);
         }
+        else continue;
+        if (ss.fail() || !(ss >> std::ws).eof()) return false;
     }
+    if (!shape_fits({img_h, img_w, n_cams, 3}) ||
+        !std::isfinite(norm_eps) || norm_eps <= 0) return false;
 
     backbone.tag = tf.tag = "impact";
     backbone.prof = tf.prof = hal::env::int_env("IMPACT_PROFILE", 0);
     if (!backbone.load(dir, "vision")) return false;
+    int feature_h = 0, feature_w = 0;
+    backbone.feat_size(img_h, img_w, &feature_h, &feature_w);
+    if (!shape_fits({feature_h, feature_w, backbone.out_channels(), n_cams})) return false;
 
     // IMPACT_INT8 -> quantize the transformer GEMMs to W8A8. A bitmask, so a layer
     // group can be A/B'd against fp32 on its own: 1 encoder attention projections,
@@ -93,6 +102,7 @@ bool ImpactModel::load(const std::string& dir) {
     const int sd = tf.cfg.state_dim;
     const int ad = tf.cfg.action_dim;
     std::vector<float> raw((size_t)2*sd + 2*ad + (size_t)n_cams*6);
+    if (!file_size_is(st, raw.size()*sizeof(float))) return false;
     st.read((char*)raw.data(), raw.size()*sizeof(float));
     if (!st) return false;
 
@@ -111,6 +121,13 @@ bool ImpactModel::load(const std::string& dir) {
         for (int i=0; i<3; i++) img_mean[(size_t)c*3+i] = *p++;
         for (int i=0; i<3; i++) img_std [(size_t)c*3+i] = *p++;
     }
+
+    for (const auto* values : {&state_mean, &state_std, &action_mean, &action_std, &img_mean, &img_std})
+        for (float value : *values)
+            if (!std::isfinite(value)) return false;
+    for (const auto* values : {&state_std, &action_std, &img_std})
+        for (float value : *values)
+            if (value < 0) return false;
 
     bscratch.resize(n_cams);
     norm.resize(n_cams);

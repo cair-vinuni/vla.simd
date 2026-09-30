@@ -59,6 +59,7 @@ private:
     }
     static bool hex4(const std::string& s, size_t& i, unsigned& cp) {
         if (i + 4 > s.size()) return false;
+        if (s.find_first_not_of("0123456789abcdefABCDEF", i) < i + 4) return false;
         cp = (unsigned)std::strtoul(s.substr(i, 4).c_str(), nullptr, 16);
         i += 4;
         return true;
@@ -67,6 +68,7 @@ private:
         if (s[i] != '"') return false;
         i++;
         while (i < s.size() && s[i] != '"') {
+            if ((unsigned char)s[i] < 0x20) return false;
             if (s[i] != '\\') { o += s[i++]; continue; }
             if (++i >= s.size()) return false;
             const char e = s[i++];
@@ -86,6 +88,7 @@ private:
                             i = j;
                         }
                     }
+                    if (cp >= 0xD800 && cp < 0xE000) return false;
                     utf8(o, cp);
                     break;
                 }
@@ -98,6 +101,7 @@ private:
     }
     static bool value(const std::string& s, size_t& i, Json& v, int depth) {
         if (depth > 64) return false;
+        v = Json{};
         ws(s, i);
         if (i >= s.size()) return false;
         const char c = s[i];
@@ -143,11 +147,30 @@ private:
         if (s.compare(i, 3, "NaN") == 0)   { v.kind = Number; v.num = std::strtod("nan", nullptr); i += 3; return true; }
         if (s.compare(i, 8, "Infinity") == 0)  { v.kind = Number; v.num = HUGE_VAL;  i += 8; return true; }
         if (s.compare(i, 9, "-Infinity") == 0) { v.kind = Number; v.num = -HUGE_VAL; i += 9; return true; }
+        const size_t start = i;
+        if (s[i] == '-') i++;
+        if (i >= s.size()) return false;
+        if (s[i] == '0') i++;
+        else {
+            if (s[i] < '1' || s[i] > '9') return false;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+        }
+        if (i < s.size() && s[i] == '.') {
+            const size_t digits = ++i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+            if (i == digits) return false;
+        }
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+            i++;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+            const size_t digits = i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+            if (i == digits) return false;
+        }
         char* end = nullptr;
-        v.num = std::strtod(s.c_str() + i, &end);
-        if (end == s.c_str() + i) return false;
+        v.num = std::strtod(s.c_str() + start, &end);
+        if (end != s.c_str() + i) return false;
         v.kind = Number;
-        i = (size_t)(end - s.c_str());
         return true;
     }
 };

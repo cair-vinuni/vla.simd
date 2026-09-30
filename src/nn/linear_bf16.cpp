@@ -21,6 +21,8 @@ namespace tcpu {
 namespace nn {
 
 void Linear::init_bf16(const uint16_t* Wb16, const float* bias_, int N_, int K_, Role role_) {
+    Wq = nullptr;
+    packed_i8.clear();
 #if TCPU_HAL_NEON
     // bf16 packed panels: identical values to the raw bf16 kernel, half the
     // bytes streamed vs fp32 (the Pi GEMMs are bandwidth-bound). TCPU_BF16_DEQ=1

@@ -70,6 +70,9 @@ public:
     const std::vector<GgufTensor>& tensors() const { return table; }
 
 private:
+    bool parse(const std::string& path);
+    void release();
+
     std::string file, err;
     void* map = nullptr;
     size_t map_len = 0;

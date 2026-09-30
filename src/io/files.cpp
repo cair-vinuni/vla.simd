@@ -7,11 +7,11 @@
 #include "io/files.h"
 #include "io/gguf.h"
 #include "io/gguf_models.h"
+#include <algorithm>
 #include <cstdio>
 #include <dirent.h>
 #include <fstream>
 #include <map>
-#include <mutex>
 #include <sys/stat.h>
 
 namespace tcpu {
@@ -53,15 +53,24 @@ private:
 };
 
 
-std::mutex g_lock;
-std::map<std::string, Mounted> g_mounts;
+thread_local std::map<std::string, Mounted> g_mounts;
 
 bool ends_with(const std::string& s, const char* suf) {
     const size_t n = std::char_traits<char>::length(suf);
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
 }
 
+// Windows takes either separator, and callers mix them ("<dir>\tok" + "/vocab.txt"):
+// mount keys and lookups use '/' there so both spellings reach the same mount.
+std::string generic_path(std::string p) {
+#if defined(_WIN32)
+    std::replace(p.begin(), p.end(), '\\', '/');
+#endif
+    return p;
+}
+
 std::string strip_slash(std::string p) {
+    p = generic_path(std::move(p));
     while (p.size() > 1 && p.back() == '/') p.pop_back();
     return p;
 }
@@ -99,7 +108,6 @@ std::string find_gguf(const std::string& path_in) {
 }
 
 Mount::Mount(const std::string& path) : key(strip_slash(path)) {
-    std::lock_guard<std::mutex> lk(g_lock);
     auto it = g_mounts.find(key);
     if (it != g_mounts.end()) {
         it->second.refs++;
@@ -130,15 +138,14 @@ Mount::Mount(const std::string& path) : key(strip_slash(path)) {
 
 Mount::~Mount() {
     if (!mounted) return;
-    std::lock_guard<std::mutex> lk(g_lock);
     auto it = g_mounts.find(key);
     if (it != g_mounts.end() && --it->second.refs == 0) g_mounts.erase(it);
 }
 
-InFile::InFile(const std::string& path, std::ios::openmode mode) : std::istream(nullptr) {
+InFile::InFile(const std::string& path_in, std::ios::openmode mode) : std::istream(nullptr) {
+    const std::string path = generic_path(path_in);
     std::string disk = path;
     {
-        std::lock_guard<std::mutex> lk(g_lock);
         for (auto& [prefix, m] : g_mounts) {
             if (path.size() <= prefix.size() + 1 || path.compare(0, prefix.size(), prefix) != 0 ||
                 path[prefix.size()] != '/')

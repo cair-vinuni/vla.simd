@@ -49,6 +49,8 @@ struct Linear {
 
     // out [seq, N] = x [seq, K] * W^T + bias
     void forward(float* out, const float* x, int seq) const;
+    bool is_int8() const { return Wq != nullptr; }
+    void forward_quantized(float* out, const int8_t* x, const float* scales, int seq) const;
 
     // forward + gelu_tanh on the output. x86 packed path fuses the gelu into
     // the GEMM store epilogue (bit-identical values, one less pass over out);

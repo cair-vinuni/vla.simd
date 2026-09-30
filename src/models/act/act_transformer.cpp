@@ -27,13 +27,14 @@ namespace tcpu {
 enum : int { I8_ATTN = 1, I8_W1 = 2, I8_W2 = 4, I8_IMGPROJ = 8, I8_DEC = 16 };
 
 bool ActTransformer::load(const std::string& dir, int img_ch, int int8_mask, bool int8_state) {
+    cam_pos_fh = cam_pos_fw = -1;
     io::InFile meta(dir + "/" + tag + ".meta");
     if (!meta) return false;
     std::string line;
     while (std::getline(meta, line)) {
         std::istringstream ss(line);
         std::string key;
-        ss >> key;
+        if (!(ss >> key)) continue;
         if      (key == "dim"       ) ss >> cfg.dim;
         else if (key == "heads"     ) ss >> cfg.heads;
         else if (key == "head_dim"  ) ss >> cfg.head_dim;
@@ -46,9 +47,19 @@ bool ActTransformer::load(const std::string& dir, int img_ch, int int8_mask, boo
         else if (key == "n_1d"      ) ss >> cfg.n_1d;
         else if (key == "n_text"    ) ss >> cfg.n_text;
         else if (key == "ln_eps"    ) ss >> cfg.ln_eps;
+        else continue;
+        if (ss.fail() || !(ss >> std::ws).eof()) return false;
     }
 
+    if (!shape_fits({cfg.dim, cfg.dim}) || cfg.dim % 4 ||
+        !shape_fits({cfg.heads, cfg.head_dim}) || cfg.heads*cfg.head_dim != cfg.dim ||
+        !shape_fits({cfg.ff, cfg.dim}) || !shape_fits({cfg.chunk, cfg.dim}) ||
+        !shape_fits({cfg.state_dim, cfg.dim}) || !shape_fits({cfg.action_dim, cfg.dim}) ||
+        !shape_fits({img_ch, cfg.dim}) || cfg.n_enc < 1 || cfg.n_dec < 1 ||
+        cfg.n_1d != 2 || cfg.n_text < 0 ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
     if (!read_arena(dir + "/" + tag + ".bin", data)) return false;
+    if ((size_t)cfg.n_enc + cfg.n_dec > data.size() / cfg.dim) return false;
 
     // Shapes come from act.meta, the buffer size from act.bin. Linear::init packs
     // its weights immediately, so a short bin has to be caught before the init -
@@ -103,7 +114,7 @@ bool ActTransformer::load(const std::string& dir, int img_ch, int int8_mask, boo
     dec_ns  = take(d);
     dec_nb  = take(d);
     take_linear(head, cfg.action_dim, d, nn::Linear::Role::Generic);
-    if (!take.done() || cfg.n_1d != 2 || cfg.heads*cfg.head_dim != d) return false;
+    if (!take.done()) return false;
 
     // ACT_INT8=1 routes the transformer's GEMMs through the W8A8 kernel
     // (ops/quant_ops.h): every d x d projection and both MLPs, in the encoder,

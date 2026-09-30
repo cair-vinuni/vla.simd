@@ -21,18 +21,26 @@ bool DiffusionHead::load(const std::string& dir) {
     if (!meta) return false;
     std::string key;
     double val;
-    while (meta >> key >> val) {
-        if      (key == "emb"       ) cfg.emb = (int)val;
-        else if (key == "action_dim") cfg.action_dim = (int)val;
-        else if (key == "horizon"   ) cfg.horizon = (int)val;
-        else if (key == "time_dim"  ) cfg.time_dim = (int)val;
-        else if (key == "num_blocks") cfg.num_blocks = (int)val;
-        else if (key == "hidden"    ) cfg.hidden = (int)val;
-        else if (key == "steps"     ) cfg.steps = (int)val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "emb"       ) cfg.emb = metadata_int(val);
+        else if (key == "action_dim") cfg.action_dim = metadata_int(val);
+        else if (key == "horizon"   ) cfg.horizon = metadata_int(val);
+        else if (key == "time_dim"  ) cfg.time_dim = metadata_int(val);
+        else if (key == "num_blocks") cfg.num_blocks = metadata_int(val);
+        else if (key == "hidden"    ) cfg.hidden = metadata_int(val);
+        else if (key == "steps"     ) cfg.steps = metadata_int(val);
         else if (key == "max_action") cfg.max_action = (float)val;
     }
 
+    if (!shape_fits({cfg.action_dim, cfg.horizon}) ||
+        !shape_fits({2, cfg.time_dim, cfg.time_dim}) || cfg.time_dim % 2 ||
+        !shape_fits({4, cfg.hidden, cfg.hidden}) || cfg.emb < 1 || cfg.num_blocks < 0 ||
+        (long long)cfg.time_dim + cfg.emb + cfg.flat() > INT_MAX ||
+        !shape_fits({cfg.steps, cfg.time_dim}) || !std::isfinite(cfg.max_action) ||
+        cfg.max_action <= 0) return false;
     if (!read_arena(dir + "/head.bin", data)) return false;
+    if ((size_t)cfg.num_blocks > data.size() / cfg.hidden) return false;
 
     const int TD = cfg.time_dim;
     const int H  = cfg.hidden;
@@ -97,6 +105,10 @@ bool DiffusionHead::load(const std::string& dir) {
     alphas     = take(cfg.steps);
     alpha_hats = take(cfg.steps);
     if (!take.done()) return false;
+    for (int t=0; t<cfg.steps; t++)
+        if (!(betas[t] > 0 && betas[t] < 1 && alphas[t] > 0 && alphas[t] < 1 &&
+              alpha_hats[t] > 0 && alpha_hats[t] < 1) ||
+            (t && alpha_hats[t] > alpha_hats[t-1])) return false;
 
     // the sampling loop only uses integer times 0..steps-1: precompute their conditioning
     cond_table.resize((size_t)cfg.steps*cfg.time_dim);

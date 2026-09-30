@@ -13,7 +13,10 @@
 // (narrow, load-limited) want different kernels, and their kernels are not
 // numerically interchangeable (accumulator-chain counts differ). Selection is
 // compile-time and matches where each tuning was measured.
-#if defined(__AVX2__)
+#if defined(TCPU_FORCE_SCALAR)
+  #define TCPU_HAL_SCALAR 1
+  #define TCPU_HAL_NAME "scalar"
+#elif defined(__AVX2__)
   #define TCPU_HAL_X86 1
   #define TCPU_HAL_NAME "x86-avx2"
 #elif defined(__ARM_NEON) && defined(__aarch64__) && defined(__APPLE__)

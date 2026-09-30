@@ -21,7 +21,9 @@ using std::size_t;
 namespace tcpu {
 
 static inline int conv_out(int in, int k, int stride, int pad) {
-    return (in+2*pad-k)/stride + 1;
+    const long long numerator = (long long)in + 2LL*pad - k;
+    if (in <= 0 || stride <= 0 || numerator < 0 || numerator/stride >= INT_MAX) return 0;
+    return (int)(numerator/stride + 1);
 }
 
 namespace {
@@ -56,7 +58,7 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
     while (std::getline(meta, line)) {
         std::istringstream ss(line);
         std::string key;
-        ss >> key;
+        if (!(ss >> key)) continue;
         if      (key == "in_ch"      ) ss >> cfg.in_ch;
         else if (key == "stem_out"   ) ss >> cfg.stem_out;
         else if (key == "stem_k"     ) ss >> cfg.stem_k;
@@ -76,8 +78,18 @@ bool ResNetBackbone::load(const std::string& dir, const std::string& name) {
             ss >> idx;
             film_after.push_back(idx);
         }
+        else continue;
+        if (ss.fail() || !(ss >> std::ws).eof()) return false;
     }
 
+    if (cfg.in_ch != 3 || !shape_fits({cfg.stem_out, cfg.stem_k, cfg.stem_k, cfg.in_ch}) ||
+        cfg.stem_stride < 1 || cfg.stem_pad < 0 || cfg.stem_pad > INT_MAX / 2 ||
+        cfg.pool_k < 1 || cfg.pool_stride < 1 || cfg.pool_pad < 0 || cfg.pool_pad > INT_MAX / 2 ||
+        cfg.gn_group_size < 0) return false;
+    for (const auto& b : bm)
+        if (!shape_fits({b.cout, cfg.block_k, cfg.block_k, b.cin}) ||
+            !shape_fits({b.cout, cfg.block_k, cfg.block_k, b.cout}) || b.stride < 1 ||
+            (b.has_down != 0 && b.has_down != 1)) return false;
     if (!read_arena(dir + "/" + name + ".bin", data)) return false;
 
     // The walk is driven by .meta shapes over a buffer sized by the actual .bin,

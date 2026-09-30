@@ -44,7 +44,10 @@ add_library(vla_flags INTERFACE)
 target_compile_features(vla_flags INTERFACE cxx_std_17)
 target_include_directories(vla_flags INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+option(VLA_SCALAR "Build the portable scalar backend" OFF)
+if(VLA_SCALAR)
+  target_compile_definitions(vla_flags INTERFACE TCPU_FORCE_SCALAR=1)
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   message(WARNING "vla_simd: no ISA flags for ${CMAKE_CXX_COMPILER_ID}; "
                   "the HAL will fall back to the scalar backend")
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
@@ -55,11 +58,16 @@ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
   set(VLA_APPLE_MCPU "native" CACHE STRING "-mcpu for Apple arm64 (CI overrides with apple-m1)")
   target_compile_options(vla_flags INTERFACE -mcpu=${VLA_APPLE_MCPU})
   message(STATUS "vla_simd arm64: -mcpu=${VLA_APPLE_MCPU} (apple)")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
   # Off by default: 8% slower than the baseline on a Cortex-A76 (see above).
   # The knob is here so another part can A/B it.
   option(VLA_ARM_NATIVE "Build aarch64 with -mcpu=native (build host only)" OFF)
   set(VLA_ARM_FLAGS "" CACHE STRING "override the aarch64 -march/-mcpu flags entirely")
+  # Rows of the mr x 16 fp32 GEMM register tile, chosen per core by the register
+  # tile selection in docs/benchmark (4: Cortex-A76).
+  set(VLA_NEON_MR "4" CACHE STRING "NEON fp32 GEMM register tile rows (1-6)")
+  target_compile_definitions(vla_flags INTERFACE TCPU_NEON_MR=${VLA_NEON_MR})
+  message(STATUS "vla_simd NEON register tile: ${VLA_NEON_MR}x16")
   if(VLA_ARM_FLAGS)
     separate_arguments(VLA_ARM_FLAG_LIST NATIVE_COMMAND "${VLA_ARM_FLAGS}")
     target_compile_options(vla_flags INTERFACE ${VLA_ARM_FLAG_LIST})
@@ -117,7 +125,28 @@ else()
                   "and every OMP_NUM_THREADS recipe in the docs is inert")
 endif()
 
-if(APPLE)
+# MinGW (llvm-mingw): ctypes resolves a DLL's dependencies from the DLL's own
+# directory, not PATH, so the toolchain runtimes are copied next to the libraries.
+set(VLA_RUNTIME_DLLS "")
+if(MINGW)
+  get_filename_component(VLA_MINGW_ROOT "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(VLA_MINGW_ROOT "${VLA_MINGW_ROOT}" DIRECTORY)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(VLA_MINGW_TRIPLE aarch64-w64-mingw32)
+  else()
+    set(VLA_MINGW_TRIPLE x86_64-w64-mingw32)
+  endif()
+  foreach(dll libomp.dll libc++.dll libunwind.dll)
+    find_file(VLA_DLL_${dll} ${dll} HINTS "${VLA_MINGW_ROOT}/${VLA_MINGW_TRIPLE}/bin" "${VLA_MINGW_ROOT}/bin"
+              NO_DEFAULT_PATH)
+    if(VLA_DLL_${dll})
+      list(APPEND VLA_RUNTIME_DLLS "${VLA_DLL_${dll}}")
+    endif()
+  endforeach()
+  message(STATUS "vla_simd runtime DLLs: ${VLA_RUNTIME_DLLS}")
+endif()
+
+if(APPLE AND NOT VLA_SCALAR)
   # Accelerate sgemm (AMX) is the default Apple GEMM backend; TCPU_ACCEL=0 to
   # A/B it. NEW_LAPACK because the legacy CBLAS entry points are deprecated
   # since macOS 13.3.
@@ -240,6 +269,10 @@ function(vla_add_shared name capi_src)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(${name} PRIVATE -fno-semantic-interposition)
   endif()
+  if(VLA_RUNTIME_DLLS)
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VLA_RUNTIME_DLLS} $<TARGET_FILE_DIR:${name}>)
+  endif()
 endfunction()
 
 vla_add_shared(vla_simd_octo    src/models/octo/octo_capi.cpp       tcpu_octo)
@@ -249,9 +282,10 @@ vla_add_shared(vla_simd_turbovla src/models/turbovla/turbovla_capi.cpp tcpu_turb
 vla_add_shared(vla_simd_impact  src/models/impact/impact_capi.cpp    tcpu_impact)
 vla_add_shared(vla_simd_diffusion src/models/diffusion/diffusion_capi.cpp tcpu_diffusion)
 
-if(NOT SKBUILD)
+if(NOT SKBUILD AND NOT WIN32)
   # vla-simd-gguf info|extract: inspect a vla.cpp GGUF, or write it out as the
-  # converted directory it loads as
+  # converted directory it loads as. POSIX only: extraction relies on openat and
+  # O_NOFOLLOW to refuse symlinked destinations.
   add_executable(vla-simd-gguf src/io/gguf_tool.cpp)
   target_link_libraries(vla-simd-gguf PRIVATE tcpu_io)
 endif()
@@ -265,6 +299,14 @@ if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   add_executable(test_gguf tests/test_gguf.cpp)
   target_link_libraries(test_gguf PRIVATE tcpu_io)
   add_test(NAME gguf COMMAND test_gguf)
+  add_executable(test_math tests/test_math.cpp)
+  target_link_libraries(test_math PRIVATE tcpu_diffusion tcpu_smolvla tcpu_octo tcpu_turbovla tcpu_preprocess tcpu_tokenizer)
+  add_test(NAME math COMMAND test_math)
+  set_tests_properties(math PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
+  set_tests_properties(ops gguf math PROPERTIES TIMEOUT 120)
+  # packed GEMM GFLOP/s on the policies' layer shapes, for register-tile selection
+  add_executable(bench_tile tools/bench_tile.cpp)
+  target_link_libraries(bench_tile PRIVATE tcpu_ops)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -276,7 +318,7 @@ set(VLA_FIRST_PARTY
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
 if(TARGET test_ops)
-  list(APPEND VLA_FIRST_PARTY test_ops test_gguf)
+  list(APPEND VLA_FIRST_PARTY test_ops test_gguf test_math bench_tile)
 endif()
 if(TARGET vla-simd-gguf)
   list(APPEND VLA_FIRST_PARTY vla-simd-gguf)
@@ -309,7 +351,11 @@ endif()
 if(SKBUILD)
   install(TARGETS vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla
                   vla_simd_impact vla_simd_diffusion
-          LIBRARY DESTINATION vla_simd)
+          LIBRARY DESTINATION vla_simd
+          RUNTIME DESTINATION vla_simd)
+  if(VLA_RUNTIME_DLLS)
+    install(FILES ${VLA_RUNTIME_DLLS} DESTINATION vla_simd)
+  endif()
   return()
 endif()
 
@@ -326,6 +372,9 @@ install(TARGETS vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla
         ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES include/vla_simd.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(VLA_RUNTIME_DLLS)
+  install(FILES ${VLA_RUNTIME_DLLS} DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 install(EXPORT vla_simdTargets NAMESPACE vla::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vla_simd)
 

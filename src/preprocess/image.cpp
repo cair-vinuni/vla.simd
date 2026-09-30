@@ -12,7 +12,8 @@
 namespace tcpu {
 
 void resize_with_pad(const uint8_t* src, int h, int w, int S, float* dst) {
-    if (h <= 0 || w <= 0 || S <= 0) {                            // all-pad, never 0/0
+    if (S <= 0) return;
+    if (h <= 0 || w <= 0) {
         for (size_t i = 0; i < (size_t)3*S*S; i++) dst[i] = -1.0f;
         return;
     }

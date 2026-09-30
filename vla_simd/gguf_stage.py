@@ -25,8 +25,10 @@ config.txt on disk, where the server reads the camera order and instruction.
 """
 
 import hashlib
+import tempfile
 import json
 import os
+import shutil
 import struct
 
 import numpy as np
@@ -59,22 +61,38 @@ def read_metadata(path):
     scalar = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?",
               10: "<Q", 11: "<q", 12: "<d"}
     with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+
+        def exact(n):
+            if n < 0 or n > size - f.tell():
+                raise ValueError(f"{path}: truncated GGUF metadata")
+            data = f.read(n)
+            if len(data) != n:
+                raise ValueError(f"{path}: truncated GGUF metadata")
+            return data
+
         def read(fmt):
-            n = struct.calcsize(fmt)
-            return struct.unpack(fmt, f.read(n))[0]
+            return struct.unpack(fmt, exact(struct.calcsize(fmt)))[0]
 
         def string():
-            return f.read(read("<Q")).decode("utf-8", "replace")
+            return exact(read("<Q")).decode("utf-8")
 
         def value(t):
             if t == 8:
                 return string()
             if t == 9:
                 et, n = read("<I"), read("<Q")
-                if et in (0, 1):                 # u8/i8 blob, e.g. a sentencepiece model
+                if et not in scalar and et != 8:
+                    raise ValueError(f"{path}: invalid array type {et}")
+                width = 8 if et == 8 else struct.calcsize(scalar[et])
+                if n > (size - f.tell()) // width:
+                    raise ValueError(f"{path}: truncated metadata array")
+                if et in (0, 1):
                     f.seek(n, 1)
                     return None
                 return [value(et) for _ in range(n)]
+            if t not in scalar:
+                raise ValueError(f"{path}: invalid metadata type {t}")
             return read(scalar[t])
 
         if f.read(4) != b"GGUF":
@@ -86,8 +104,29 @@ def read_metadata(path):
         meta = {}
         for _ in range(read("<Q")):
             key = string()
+            if key in meta:
+                raise ValueError(f"{path}: duplicate metadata {key}")
             meta[key] = value(read("<I"))
     return meta
+
+
+def _link(src, dst):
+    """Symlink dst to src. Windows needs a privilege (or Developer Mode) for
+    that; without it a directory is copied and a file is hard-linked, or copied
+    when it is on another volume."""
+    try:
+        os.symlink(src, dst, target_is_directory=os.path.isdir(src))
+        return
+    except OSError:
+        if os.name != "nt":
+            raise
+    if os.path.isdir(src):
+        shutil.copytree(src, dst)
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 def _hub_file(repo, name):
@@ -146,29 +185,51 @@ def stage(path, model, cache_root=None):
         os.environ.get("VLA_SIMD_CACHE", "~/.cache/vla_simd"), "gguf"))
     # the GGUF's own name: in the Hub cache the real file is a hash-named blob
     stem = os.path.splitext(os.path.basename(gguf))[0]
-    out = os.path.join(cache_root, f"{stem}-{hashlib.sha1(real.encode()).hexdigest()[:10]}")
-    os.makedirs(out, exist_ok=True)
-    link = os.path.join(out, os.path.basename(gguf))
-    if os.path.islink(link) and os.readlink(link) != real:
-        os.unlink(link)
-    if not os.path.lexists(link):
-        os.symlink(real, link)
+    stamp = []
+    for source in (gguf, *(os.path.join(os.path.dirname(gguf), n) for n in SIDECARS)):
+        paths = [source]
+        if os.path.isdir(source):
+            paths += sorted(os.path.join(d, n) for d, _, names in os.walk(source) for n in names)
+        for item in paths:
+            if os.path.exists(item):
+                st = os.stat(item)
+                # The inode catches an atomic replacement of the same size that
+                # lands within one filesystem timestamp tick.
+                stamp.append((os.path.realpath(item), st.st_dev, st.st_ino, st.st_size,
+                              st.st_mtime_ns, st.st_ctime_ns))
+    digest = hashlib.sha256(repr(stamp).encode()).hexdigest()[:20]
+    out = os.path.join(cache_root, f"{stem}-{digest}")
+    os.makedirs(cache_root, exist_ok=True)
+    if os.path.isdir(out):
+        return out
+    with tempfile.TemporaryDirectory(prefix=".stage-", dir=cache_root) as work:
+        _link(real, os.path.join(work, os.path.basename(gguf)))
+        _populate(gguf, work, meta, own, arch)
+        try:
+            os.rename(work, out)
+        except OSError:
+            if not os.path.isdir(out):
+                raise
+    return out
 
+
+def _populate(gguf, out, meta, own, arch):
     # sidecars shipped beside the GGUF win: link them in instead of generating
     src_dir = os.path.dirname(gguf)
     for name in SIDECARS:
         src, dst = os.path.join(src_dir, name), os.path.join(out, name)
         if os.path.exists(src) and not os.path.lexists(dst):
-            os.symlink(os.path.realpath(src), dst)
+            _link(os.path.realpath(src), dst)
 
     def missing(name):
         return not os.path.exists(os.path.join(out, name))
 
     config = []
     if own:
-        # everything is inside; the server itself reads config.txt from disk
+        # everything is inside; the server itself reads config.txt from disk.
+        # newline="": the stored bytes as they are, with no CR added on Windows
         if missing("config.txt"):
-            with open(os.path.join(out, "config.txt"), "w", encoding="utf-8") as f:
+            with open(os.path.join(out, "config.txt"), "w", encoding="utf-8", newline="") as f:
                 f.write(meta.get("vla_simd.file.config.txt", ""))
         return out
     if arch == "smolvla":
@@ -178,7 +239,7 @@ def stage(path, model, cache_root=None):
         config += [f"chunk {meta['smolvla.chunk_size']}", f"num_steps {meta['smolvla.num_steps']}"]
     elif arch == "turbovla":
         if missing("vocab.txt"):
-            os.symlink(_hub_file(BERT_TOKENIZER, "vocab.txt"), os.path.join(out, "vocab.txt"))
+            _link(_hub_file(BERT_TOKENIZER, "vocab.txt"), os.path.join(out, "vocab.txt"))
         if missing("stats.bin"):
             _turbovla_stats(os.path.join(out, "stats.bin"), *TURBOVLA_STATS, meta)
         config += [f"cam{i} {c}" for i, c in enumerate(TURBOVLA_CAMS)]
@@ -188,6 +249,6 @@ def stage(path, model, cache_root=None):
         raise SystemExit(f"{gguf}: vla.cpp architecture '{arch}' is not supported "
                          "(smolvla, turbovla and octo are)")
     if missing("config.txt") and config:
-        with open(os.path.join(out, "config.txt"), "w") as f:
+        with open(os.path.join(out, "config.txt"), "w", encoding="utf-8", newline="") as f:
             f.write("\n".join(config) + "\n")
     return out

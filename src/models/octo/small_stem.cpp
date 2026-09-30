@@ -23,7 +23,7 @@ bool SmallStem::load(const std::string& dir, const std::string& name) {
     while (std::getline(meta, line)) {
         std::istringstream ss(line);
         std::string key;
-        ss >> key;
+        if (!(ss >> key)) continue;
         if      (key == "in_ch"    ) ss >> cfg.in_ch;
         else if (key == "n_layers" ) ss >> cfg.n_layers;
         else if (key == "k"        ) ss >> cfg.k;
@@ -35,6 +35,8 @@ bool SmallStem::load(const std::string& dir, const std::string& name) {
         else if (key == "embed_dim") ss >> cfg.embed_dim;
         else if (key == "gn_groups") ss >> cfg.gn_groups;
         else if (key == "gn_eps"   ) ss >> cfg.gn_eps;
+        else continue;
+        if (ss.fail() || !(ss >> std::ws).eof()) return false;
     }
 
     if (!read_arena(dir + "/" + name + ".bin", data)) return false;
@@ -43,9 +45,13 @@ bool SmallStem::load(const std::string& dir, const std::string& name) {
     // stride/gn_groups are divisors below, so zero is a fault, not a default.
     if (cfg.n_layers < 1 || cfg.n_layers > SmallStemConfig::MAX_LAYERS ||
         cfg.in_ch != 6 || cfg.k < 1 || cfg.embed_dim < 1 ||
-        cfg.stride < 1 || cfg.pad < 0 || cfg.gn_groups < 1) return false;
+        cfg.stride < 1 || cfg.pad < 0 || cfg.pad > (INT_MAX-256)/2 || cfg.gn_groups < 1 ||
+        !std::isfinite(cfg.gn_eps) || cfg.gn_eps <= 0) return false;
+    int input = cfg.in_ch;
     for (int i=0; i<cfg.n_layers; i++)
-        if (cfg.features[i] < 1 || cfg.features[i] % cfg.gn_groups != 0) return false;
+        if (!shape_fits({cfg.features[i], cfg.k, cfg.k, input}) ||
+            cfg.features[i] % cfg.gn_groups != 0) return false;
+        else input = cfg.features[i];
 
     // The walk below is driven by .meta shapes over a buffer sized by the actual
     // .bin. A stale meta beside a shorter bin used to hand out pointers past the

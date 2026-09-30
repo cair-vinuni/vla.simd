@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace tcpu {
@@ -132,7 +133,11 @@ double TensorReader::num(const std::string& key) {
 
 uint32_t TensorReader::u32(const std::string& key) {
     const double v = num(key);
-    if (ok() && (v < 0 || v != (double)(uint32_t)v)) err = g.path() + ": metadata " + key + " is not a count";
+    if (!ok()) return 0;
+    if (!std::isfinite(v) || v < 0 || v > std::numeric_limits<uint32_t>::max() || std::floor(v) != v) {
+        err = g.path() + ": metadata " + key + " is not a count";
+        return 0;
+    }
     return (uint32_t)v;
 }
 

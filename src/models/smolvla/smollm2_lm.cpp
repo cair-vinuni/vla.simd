@@ -18,18 +18,25 @@ namespace tcpu {
 bool SmollmVlm::load(const std::string& dir) {
     io::InFile meta(dir + "/vlm.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/vlm.meta\n", dir.c_str()); return false; }
-    std::string key; float val;
-    while (meta >> key >> val) {
-        if      (key == "hidden"   ) cfg.hidden = (int)val;
-        else if (key == "n_q"      ) cfg.n_q = (int)val;
-        else if (key == "n_kv"     ) cfg.n_kv = (int)val;
-        else if (key == "head_dim" ) cfg.head_dim = (int)val;
-        else if (key == "ffn"      ) cfg.ffn = (int)val;
+    std::string key; double val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "hidden"   ) cfg.hidden = metadata_int(val);
+        else if (key == "n_q"      ) cfg.n_q = metadata_int(val);
+        else if (key == "n_kv"     ) cfg.n_kv = metadata_int(val);
+        else if (key == "head_dim" ) cfg.head_dim = metadata_int(val);
+        else if (key == "ffn"      ) cfg.ffn = metadata_int(val);
         else if (key == "eps"      ) cfg.rms_eps = val;
         else if (key == "rope_base") cfg.rope_base = val;
-        else if (key == "n_layers" ) cfg.n_layers = (int)val;
+        else if (key == "n_layers" ) cfg.n_layers = metadata_int(val);
     }
 
+    if (!shape_fits({cfg.n_q, cfg.head_dim}) || !shape_fits({cfg.n_kv, cfg.head_dim}) ||
+        cfg.n_q % cfg.n_kv || cfg.head_dim % 2 || cfg.q_full() != cfg.hidden ||
+        !shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+        !shape_fits({cfg.n_layers, cfg.ffn, cfg.hidden}) ||
+        !std::isfinite(cfg.rms_eps) || cfg.rms_eps <= 0 ||
+        !std::isfinite(cfg.rope_base) || cfg.rope_base <= 0) return false;
     const int H = cfg.hidden, QF = cfg.q_full(), KV = cfg.kv_full(), F = cfg.ffn, NL = cfg.n_layers;
     const size_t fcount = (size_t)2*H*NL + (size_t)H;   // per-layer ln_in+ln_post, then out_norm
     const size_t per_layer_w = (size_t)QF*H + (size_t)KV*H*2 + (size_t)H*QF
@@ -38,6 +45,7 @@ bool SmollmVlm::load(const std::string& dir) {
 
     io::InFile bin(dir + "/vlm.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/vlm.bin\n", dir.c_str()); return false; }
+    if (!file_size_is(bin, fcount*sizeof(float) + wcount*sizeof(uint16_t))) return false;
     fnorms.resize(fcount);
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));
     wbf.resize(wcount);

@@ -5,13 +5,17 @@
 
 #include "io/files.h"
 #include "io/gguf.h"
+#include "io/gguf_models.h"
 #include "io/json.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <future>
+#include <limits>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -74,16 +78,19 @@ struct Writer {
 };
 
 static std::string tmpdir() {
-    const char* t = std::getenv("TMPDIR");
-    std::string tmpl = std::string(t && *t ? t : "/tmp") + "/test_gguf_XXXXXX";
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    return mkdtemp(buf.data()) ? std::string(buf.data()) : std::string();
+    // TMPDIR on POSIX, GetTempPath on Windows, /tmp otherwise
+    std::string tmpl = (std::filesystem::temp_directory_path() / "test_gguf_XXXXXX").string();
+    return mkdtemp(tmpl.data()) ? tmpl : std::string();
 }
 
 static void write(const std::string& path, const std::string& bytes) {
+    // Replace rather than truncate: Windows refuses to truncate a file that an
+    // open Gguf still maps, and a silently stale fixture would test nothing.
+    std::remove(path.c_str());
     std::ofstream f(path, std::ios::binary);
     f.write(bytes.data(), (std::streamsize)bytes.size());
+    f.close();
+    CHECK(f.good(), "cannot write fixture %s", path.c_str());
 }
 
 static void test_reader(const std::string& dir) {
@@ -147,14 +154,64 @@ static void test_reader(const std::string& dir) {
     write(dir + "/bad.gguf", bad);
     io::Gguf b;
     CHECK(!b.open(dir + "/bad.gguf"), "bad version accepted");
+    CHECK(g.open(path), "reopen: %s", g.error().c_str());
+    Writer empty;
+    write(dir + "/bad.gguf", empty.bytes());
+    CHECK(g.open(dir + "/bad.gguf") && g.tensors().empty() && g.keys().empty(), "reopen retains state");
+    CHECK(!g.open(dir + "/missing.gguf"), "missing file accepted");
+    CHECK(g.open(path) && g.error().empty(), "reopen retains error");
+    Writer overflow;
+    overflow.tensor("overflow", {uint64_t(1) << 32, uint64_t(1) << 32}, io::GGML_F32, f, sizeof f);
+    write(dir + "/bad.gguf", overflow.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "overflowing shape accepted");
+    Writer duplicate;
+    duplicate.u32("same", 1);
+    duplicate.u32("same", 2);
+    write(dir + "/bad.gguf", duplicate.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "duplicate metadata accepted");
+    Writer misaligned;
+    misaligned.tensor("offset", {1}, io::GGML_F32, f, sizeof(float));
+    const uint64_t offset = 1;
+    std::memcpy(misaligned.info.data() + misaligned.info.size() - sizeof offset, &offset, sizeof offset);
+    write(dir + "/bad.gguf", misaligned.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "misaligned tensor offset accepted");
+    Writer array;
+    array.key("array", io::GGUF_ARRAY);
+    Writer::put<uint32_t>(array.kv, io::GGUF_F64);
+    Writer::put<uint64_t>(array.kv, 1000000);
+    write(dir + "/bad.gguf", array.bytes());
+    CHECK(!b.open(dir + "/bad.gguf"), "truncated metadata array accepted");
+    for (double count : {-1.0, 0.5, 4294967296.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+        Writer invalid;
+        invalid.f64("count", count);
+        write(dir + "/bad.gguf", invalid.bytes());
+        CHECK(b.open(dir + "/bad.gguf"), "count fixture rejected before conversion");
+        std::string error;
+        io::TensorReader reader{b, error};
+        CHECK(reader.u32("count") == 0 && !reader.ok(), "invalid integer metadata accepted");
+    }
+    for (double alignment : {-32.0, 0.5, std::numeric_limits<double>::infinity()}) {
+        Writer a;
+        a.f64("general.alignment", alignment);
+        write(dir + "/bad.gguf", a.bytes());
+        CHECK(!b.open(dir + "/bad.gguf"), "invalid alignment accepted");
+    }
+    for (uint32_t nan_bits : {0x7F800001u, 0x7FFFFFFFu, 0xFF800001u, 0xFFFFFFFFu}) {
+        std::memcpy(&x, &nan_bits, sizeof x);
+        const uint16_t h = io::f32_to_bf16(x);
+        CHECK((h & 0x7F80) == 0x7F80 && (h & 0x7F) != 0, "bf16 lost NaN");
+    }
     unlink((dir + "/cut.gguf").c_str());
     unlink((dir + "/bad.gguf").c_str());
 }
 
 static void test_mount(const std::string& dir) {
     // model.gguf from test_reader: a directory with one .gguf mounts as a GGUF
-    CHECK(io::find_gguf(dir) == dir + "/model.gguf", "dir with one gguf");
-    CHECK(io::find_gguf(dir + "/model.gguf") == dir + "/model.gguf", "gguf file");
+    // compared as paths: on Windows the result spells separators as '/'
+    const std::filesystem::path model = dir + "/model.gguf";
+    CHECK(std::filesystem::path(io::find_gguf(dir)) == model, "dir with one gguf");
+    CHECK(std::filesystem::path(io::find_gguf(dir + "/model.gguf")) == model, "gguf file");
     {
         // ...and an architecture no adapter knows is a load failure, not a plain dir
         io::Mount m(dir);
@@ -171,6 +228,58 @@ static void test_mount(const std::string& dir) {
     io::InFile missing(dir + "/nope.meta");
     CHECK(!missing, "missing file tests false");
     unlink((dir + "/vit.meta").c_str());
+    Writer w;
+    w.s("general.architecture", "vla-simd");
+    w.u32("vla_simd.format", 1);
+    std::vector<float> weights(1 << 18, 1.5f);
+    w.tensor("weights.bin", {weights.size()}, io::GGML_F32, weights.data(), weights.size()*sizeof(float));
+    const std::string path = dir + "/own.gguf";
+    write(path, w.bytes());
+    {
+        io::Mount first(path);
+        io::InFile one(path + "/weights.bin", std::ios::binary);
+        CHECK(first.ok() && one, "first load");
+        auto second = std::async(std::launch::async, [&] {
+            io::Mount mount(path);
+            io::InFile two(path + "/weights.bin", std::ios::binary);
+            float value = 0;
+            two.read((char*)&value, sizeof value);
+            return mount.ok() && two && value == 1.5f;
+        });
+        CHECK(second.get(), "concurrent load lost consumed weights");
+    }
+    std::vector<std::string> unsafe{"../escape.txt", "/absolute.txt", "tok/../../escape"};
+#if defined(_WIN32)
+    // separators and roots that only Windows paths have
+    unsafe.insert(unsafe.end(), {"C:drive.txt", "..\\escape.txt", "\\\\server\\share\\x"});
+#endif
+    for (const std::string& rel : unsafe) {
+        Writer bad;
+        bad.s("general.architecture", "vla-simd");
+        bad.u32("vla_simd.format", 1);
+        bad.s(std::string("vla_simd.file.") + rel, "bad");
+        write(path, bad.bytes());
+        io::Gguf g;
+        io::Files files;
+        std::string error;
+        CHECK(g.open(path) && !io::adapt_gguf(g, io::Sidecar{dir}, files, error), "unsafe embedded path accepted");
+    }
+    for (const auto& names : std::vector<std::vector<std::string>>{
+            {"weights.bin:1"}, {"weights.bin:0", "weights.bin:2"},
+            {"weights.bin", "weights.bin:0"}, {"weights.bin:0", "weights.bin"}}) {
+        Writer bad;
+        bad.s("general.architecture", "vla-simd");
+        bad.u32("vla_simd.format", 1);
+        for (const auto& name : names)
+            bad.tensor(name, {1}, io::GGML_F32, weights.data(), sizeof(float));
+        write(path, bad.bytes());
+        io::Gguf g;
+        io::Files files;
+        std::string error;
+        CHECK(g.open(path) && !io::adapt_gguf(g, io::Sidecar{dir}, files, error),
+              "misordered or colliding tensor parts accepted");
+    }
+    unlink(path.c_str());
 }
 
 static void test_json() {
@@ -184,6 +293,13 @@ static void test_json() {
           "python non-finite");
     CHECK(!io::Json::parse("{\"a\": }", j), "reject malformed");
     CHECK(!io::Json::parse("[1] x", j), "reject trailing");
+    CHECK(io::Json::parse("[1]", j) && j.arr.size() == 1, "reparse retains array");
+    CHECK(io::Json::parse(R"({"a": "old", "a": "new"})", j) && j.at("a")->str == "new",
+          "duplicate JSON key does not replace value");
+    for (const char* s : {R"("\u12zz")", R"("\uD800")", R"("\uDC00")", "\"a\nb\"",
+                          "[01]", "[+1]", "[.5]", "[1.]", "[0x1]", "[1e]"})
+        CHECK(!io::Json::parse(s, j), "invalid JSON accepted: %s", s);
+    CHECK(io::Json::parse(R"("\uD83D\uDE00")", j) && j.str == "\xF0\x9F\x98\x80", "surrogate pair");
 }
 
 int main() {

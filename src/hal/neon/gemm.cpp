@@ -19,6 +19,10 @@
 #include <cstddef>
 using std::size_t;
 
+#ifndef TCPU_NEON_MR
+#define TCPU_NEON_MR 4
+#endif
+
 namespace tcpu {
 using hal::env::gemm_force_static;
 
@@ -245,7 +249,10 @@ void dense_linear_packed(float* out, const float* x, const float* Wp, const floa
     // MR=4 measured fastest on the A72: live regs = 4*ROWS acc + ROWS xr + 4 weight
     // = 5*ROWS+4 = 24, well under the 32 NEON regs so nothing spills. MR=5 (29) and
     // MR=6 (34, spills) both benchmarked slower despite better weight-load amortisation.
-    constexpr int MR = 4;
+    // The tile is fixed at build time (-DVLA_NEON_MR); docs/benchmark has the per-core
+    // selection.
+    constexpr int MR = TCPU_NEON_MR;
+    static_assert(MR >= 1 && MR <= 6, "mm_pack6x16_neon dispatches 1 to 6 rows");
     const int nblocks = N/16;
     const int mtiles  = (seq+MR-1)/MR;
 #if defined(_OPENMP)

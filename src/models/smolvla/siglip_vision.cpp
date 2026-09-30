@@ -21,31 +21,39 @@ namespace tcpu {
 bool SiglipVision::load(const std::string& dir) {
     io::InFile meta(dir + "/vit.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/vit.meta\n", dir.c_str()); return false; }
-    std::string k; float v;
-    while (meta >> k >> v) {
-        if      (k == "hidden"      ) cfg.hidden = (int)v;
-        else if (k == "n_heads"     ) cfg.n_heads = (int)v;
-        else if (k == "head_dim"    ) cfg.head_dim = (int)v;
-        else if (k == "inter"       ) cfg.inter = (int)v;
-        else if (k == "n_layers"    ) cfg.n_layers = (int)v;
-        else if (k == "patch"       ) cfg.patch = (int)v;
-        else if (k == "img"         ) cfg.img = (int)v;
-        else if (k == "n_patches"   ) cfg.n_patches = (int)v;
+    std::string k; double v;
+    while (meta >> k) {
+        if (!(meta >> v) || !std::isfinite(v)) return false;
+        if      (k == "hidden"      ) cfg.hidden = metadata_int(v);
+        else if (k == "n_heads"     ) cfg.n_heads = metadata_int(v);
+        else if (k == "head_dim"    ) cfg.head_dim = metadata_int(v);
+        else if (k == "inter"       ) cfg.inter = metadata_int(v);
+        else if (k == "n_layers"    ) cfg.n_layers = metadata_int(v);
+        else if (k == "patch"       ) cfg.patch = metadata_int(v);
+        else if (k == "img"         ) cfg.img = metadata_int(v);
+        else if (k == "n_patches"   ) cfg.n_patches = metadata_int(v);
         else if (k == "ln_eps"      ) cfg.ln_eps = v;
-        else if (k == "scale_factor") cfg.scale_factor = (int)v;
-        else if (k == "mm_out"      ) cfg.mm_out = (int)v;
-        else if (k == "n_img_tok"   ) cfg.n_img_tok = (int)v;
+        else if (k == "scale_factor") cfg.scale_factor = metadata_int(v);
+        else if (k == "mm_out"      ) cfg.mm_out = metadata_int(v);
+        else if (k == "n_img_tok"   ) cfg.n_img_tok = metadata_int(v);
     }
 
     // The patch extractor and the pixel shuffle derive their grids from these, so
     // a meta that does not close writes past both buffers.
     {
+        if (cfg.n_patches < 1 || !shape_fits({cfg.img, cfg.img, 3}) ||
+            !shape_fits({cfg.n_heads, cfg.head_dim}) ||
+            !shape_fits({cfg.hidden, cfg.scale_factor, cfg.scale_factor}) ||
+            !shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+            !shape_fits({cfg.n_layers, cfg.inter, cfg.hidden}) ||
+            !shape_fits({cfg.mm_out, cfg.shuffled_dim()}) ||
+            !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
         const int side = (int)std::lround(std::sqrt((double)cfg.n_patches));
         const bool bad = cfg.hidden < 1 || cfg.n_heads < 1 || cfg.head_dim < 1 ||
                          cfg.inter < 1 || cfg.n_layers < 1 || cfg.patch < 1 ||
                          cfg.img < 1 || cfg.mm_out < 1 || cfg.scale_factor < 1 ||
                          cfg.n_heads*cfg.head_dim != cfg.hidden ||
-                         side*side != cfg.n_patches ||
+                         (long long)side*side != cfg.n_patches ||
                          cfg.img % cfg.patch != 0 ||
                          (cfg.img/cfg.patch)*(cfg.img/cfg.patch) != cfg.n_patches ||
                          side % cfg.scale_factor != 0 ||
@@ -71,6 +79,7 @@ bool SiglipVision::load(const std::string& dir) {
 
     io::InFile bin(dir + "/vit.bin", std::ios::binary);
     if (!bin) { std::fprintf(stderr, "smolvla: cannot open %s/vit.bin\n", dir.c_str()); return false; }
+    if (!file_size_is(bin, fcount*sizeof(float) + wcount*sizeof(uint16_t))) return false;
     fnorms.resize(fcount);
     bin.read(reinterpret_cast<char*>(fnorms.data()), fcount*sizeof(float));
     wbf.resize(wcount);

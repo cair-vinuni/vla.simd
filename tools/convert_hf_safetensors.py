@@ -110,7 +110,14 @@ class Safetensors:
 
     def __init__(self, path):
         self.f = open(path, "rb")
+        size = os.fstat(self.f.fileno()).st_size
+        if size < 8:
+            self.f.close()
+            raise ValueError(f"{path}: truncated safetensors header")
         n = struct.unpack("<Q", self.f.read(8))[0]
+        if n > size - 8:
+            self.f.close()
+            raise ValueError(f"{path}: truncated safetensors header")
         self.header = json.loads(self.f.read(n))
         self.base = 8 + n
         self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
@@ -132,8 +139,17 @@ class Safetensors:
         """Raw tensor as its stored dtype (BF16 -> uint16), shape preserved."""
         h = self.header[k]
         a, b = h["data_offsets"]
+        if h["dtype"] not in DTYPES or not all(isinstance(d, int) and d >= 0 for d in h["shape"]):
+            raise ValueError(f"{k}: invalid tensor type or shape")
+        count = 1
+        for d in h["shape"]:
+            count *= d
+        size = np.dtype(DTYPES[h["dtype"]]).itemsize
+        if (not isinstance(a, int) or not isinstance(b, int) or a < 0 or b < a or
+                b > len(self.mm) - self.base or b - a != count * size):
+            raise ValueError(f"{k}: invalid tensor offsets")
         arr = np.frombuffer(self.mm, dtype=DTYPES[h["dtype"]],
-                            count=(b - a) // np.dtype(DTYPES[h["dtype"]]).itemsize,
+                            count=count,
                             offset=self.base + a)
         return arr.reshape(h["shape"])
 
@@ -157,7 +173,8 @@ def f32_to_bf16(x):
     """Round-to-nearest-even fp32 -> bf16, matching torch's .to(bfloat16)."""
     u = np.ascontiguousarray(x, np.float32).view(np.uint32)
     lsb = (u >> 16) & 1
-    return ((u + 0x7FFF + lsb) >> 16).astype(np.uint16)
+    rounded = ((u + 0x7FFF + lsb) >> 16).astype(np.uint16)
+    return np.where((u & 0x7FFFFFFF) > 0x7F800000, (u >> 16) | 0x40, rounded).astype(np.uint16)
 
 
 # ---------------------------------------------------------------------------

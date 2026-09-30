@@ -25,18 +25,20 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
 
     io::InFile meta(dir + "/text.meta");
     std::string key; double val;
-    while (meta >> key >> val) {
-        if      (key == "proj_dim"      ) cfg.proj_dim  = (int)val;
-        else if (key == "n_text"        ) cfg.n_text    = (int)val;
-        else if (key == "film_total"    ) cfg.film_total= (int)val;
-        else if (key == "encoder_floats") cfg.encoder_floats = (long)val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "proj_dim"      ) cfg.proj_dim  = metadata_int(val);
+        else if (key == "n_text"        ) cfg.n_text    = metadata_int(val);
+        else if (key == "film_total"    ) cfg.film_total= metadata_int(val);
+        else if (key == "encoder_floats") cfg.encoder_floats = metadata_int(val);
     }
     if (cfg.encoder_floats > 0 && (size_t)cfg.encoder_floats != enc_end) {
         std::fprintf(stderr, "impact: text.bin encoder ends at %zu floats, meta says %ld\n",
                      enc_end, cfg.encoder_floats);
         return false;
     }
-    if (cfg.proj_dim < 1 || cfg.n_text < 1 || cfg.film_total < 0) {
+    if (!shape_fits({cfg.proj_dim, cfg.n_text}) || !shape_fits({cfg.proj_dim, t5.cfg.d_model}) ||
+        cfg.film_total < 0 || (cfg.film_total && !shape_fits({2, cfg.film_total, t5.cfg.d_model}))) {
         std::fprintf(stderr, "impact: text.meta is missing proj_dim / n_text / film_total\n");
         return false;
     }
@@ -83,6 +85,8 @@ bool ImpactText::load(const std::string& dir, int vocab_full, int unk_id) {
                      "out-of-vocabulary words would have nowhere to go\n", unk_id);
         return false;
     }
+    for (int id : vocab_map)
+        if (id < -1 || id >= t5.cfg.vocab) return false;
     unk_compact = vocab_map[(size_t)unk_id];
     return true;
 }

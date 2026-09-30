@@ -57,20 +57,22 @@ bool SmolvlaModel::load(const std::string& dir) {
 
     io::InFile meta(dir + "/heads.meta");
     if (!meta) { std::fprintf(stderr, "smolvla: cannot open %s/heads.meta\n", dir.c_str()); return false; }
-    std::string k; float v;
-    while (meta >> k >> v) {
-        if (k == "vocab") vocab = (int)v;
-        else if (k == "hidden") hidden = (int)v;
-        else if (k == "max_state_dim") max_state_dim = (int)v;
-        else if (k == "real_state_dim") real_state_dim = (int)v;
-        else if (k == "real_action_dim") real_action_dim = (int)v;
-        else if (k == "n_views") n_views = (int)v;
+    std::string k; double v;
+    while (meta >> k) {
+        if (!(meta >> v) || !std::isfinite(v)) return false;
+        if (k == "vocab") vocab = metadata_int(v);
+        else if (k == "hidden") hidden = metadata_int(v);
+        else if (k == "max_state_dim") max_state_dim = metadata_int(v);
+        else if (k == "real_state_dim") real_state_dim = metadata_int(v);
+        else if (k == "real_action_dim") real_action_dim = metadata_int(v);
+        else if (k == "n_views") n_views = metadata_int(v);
         else if (k == "norm_eps") norm_eps = v;
     }
     // A renamed key or a non-numeric value ends the loop early and leaves these
     // at 0; every read below then asks for 0 bytes, succeeds, and returns a live
     // handle whose first predict indexes an empty embedding table.
-    if (vocab <= 0 || hidden <= 0 || max_state_dim <= 0 || n_views <= 0 ||
+    if (!shape_fits({vocab, hidden}) || !shape_fits({max_state_dim, hidden}) || n_views <= 0 ||
+        !std::isfinite(norm_eps) || norm_eps <= 0 ||
         real_state_dim <= 0 || real_state_dim > max_state_dim ||
         real_action_dim <= 0 || real_action_dim > aex.cfg.max_action_dim ||
         hidden != vlm.cfg.hidden || hidden != vit.cfg.mm_out ||
@@ -84,11 +86,13 @@ bool SmolvlaModel::load(const std::string& dir) {
 
     { io::InFile f(dir + "/emb.bin", std::ios::binary);
       if (!f) { std::fprintf(stderr, "smolvla: cannot open %s/emb.bin\n", dir.c_str()); return false; }
+      if (!file_size_is(f, (size_t)vocab*hidden*sizeof(uint16_t))) return false;
       emb.resize((size_t)vocab * hidden);
       f.read(reinterpret_cast<char*>(emb.data()), emb.size() * sizeof(uint16_t));
       if (!f) return false; }
     { io::InFile f(dir + "/heads.bin", std::ios::binary);
       if (!f) { std::fprintf(stderr, "smolvla: cannot open %s/heads.bin\n", dir.c_str()); return false; }
+      if (!file_size_is(f, ((size_t)hidden*max_state_dim + hidden)*sizeof(float))) return false;
       state_w.resize((size_t)hidden * max_state_dim); state_b.resize(hidden);
       f.read(reinterpret_cast<char*>(state_w.data()), state_w.size() * sizeof(float));
       f.read(reinterpret_cast<char*>(state_b.data()), state_b.size() * sizeof(float));
@@ -102,6 +106,10 @@ bool SmolvlaModel::load(const std::string& dir) {
         !read_floats(dir + "/stats_action_mean.bin", action_mean, real_action_dim) ||
         !read_floats(dir + "/stats_action_std.bin",  action_std,  real_action_dim))
         return false;
+
+    for (const auto* values : {&state_std, &action_std})
+        for (float value : *values)
+            if (value < 0) return false;
 
     apply_int8();
     return true;

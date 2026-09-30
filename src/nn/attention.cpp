@@ -8,6 +8,7 @@
 #include "encoder.h"
 #include "../hal/common/layout.h"
 #include "../ops/lm_ops.h"
+#include "../ops/quant_ops.h"
 #include <cmath>
 #include <cstddef>
 using std::size_t;
@@ -36,15 +37,27 @@ void MhaQKV::forward(float* out, const float* xq, const float* xk, const float* 
     if (!fuse_kt && s.k.size()  < (size_t)seq_kv*D) s.k.resize ((size_t)seq_kv*D);
 
     if (prof) prof->tic();
-    wq.forward(s.q.data(), xq, seq_q);
+    const bool shared_qk = wq.is_int8() && wk.is_int8() &&
+                          xq == xk && seq_q == seq_kv && wq.K == wk.K;
+    const bool shared_kv = wk.is_int8() && wv.is_int8() && xk == xv && wk.K == wv.K;
+    if (shared_qk || shared_kv) {
+        s.quantized.resize((size_t)seq_kv*i8_kpad(wk.K));
+        s.scales.resize(seq_kv);
+        quantize_act_i8(xk, s.quantized.data(), s.scales.data(), seq_kv, wk.K);
+    }
+    if (shared_qk) wq.forward_quantized(s.q.data(), s.quantized.data(), s.scales.data(), seq_q);
+    else wq.forward(s.q.data(), xq, seq_q);
     const float* ktp = nullptr;
     if (fuse_kt) {
         wk.forward_kt(s.kt.data(), xk, seq_kv, skp);
         ktp = s.kt.data();
+    } else if (shared_qk || shared_kv) {
+        wk.forward_quantized(s.k.data(), s.quantized.data(), s.scales.data(), seq_kv);
     } else {
         wk.forward(s.k.data(), xk, seq_kv);
     }
-    wv.forward(s.v.data(), xv, seq_kv);
+    if (shared_kv) wv.forward_quantized(s.v.data(), s.quantized.data(), s.scales.data(), seq_kv);
+    else wv.forward(s.v.data(), xv, seq_kv);
     if (prof) prof->toc(prof->qkv);
 
     // Unmasked is the common case: take the dense op rather than build, stream

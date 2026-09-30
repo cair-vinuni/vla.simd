@@ -21,19 +21,27 @@ namespace tcpu {
 bool TurboFusion::load(const std::string& dir) {
     io::InFile meta(dir + "/fusion.meta");
     if (!meta) { std::fprintf(stderr, "turbovla: cannot open %s/fusion.meta\n", dir.c_str()); return false; }
-    std::string key; float val;
-    while (meta >> key >> val) {
-        if      (key == "hidden"      ) cfg.hidden       = (int)val;
-        else if (key == "embed"       ) cfg.embed        = (int)val;
-        else if (key == "n_layers"    ) cfg.n_layers     = (int)val;
-        else if (key == "fusion_heads") cfg.fusion_heads = (int)val;
-        else if (key == "text_heads"  ) cfg.text_heads   = (int)val;
-        else if (key == "text_ff"     ) cfg.text_ff      = (int)val;
-        else if (key == "vis_dim"     ) cfg.vis_dim      = (int)val;
-        else if (key == "vis_mlp"     ) cfg.vis_mlp      = (int)val;
-        else if (key == "n_views"     ) cfg.n_views      = (int)val;
+    std::string key; double val;
+    while (meta >> key) {
+        if (!(meta >> val) || !std::isfinite(val)) return false;
+        if      (key == "hidden"      ) cfg.hidden       = metadata_int(val);
+        else if (key == "embed"       ) cfg.embed        = metadata_int(val);
+        else if (key == "n_layers"    ) cfg.n_layers     = metadata_int(val);
+        else if (key == "fusion_heads") cfg.fusion_heads = metadata_int(val);
+        else if (key == "text_heads"  ) cfg.text_heads   = metadata_int(val);
+        else if (key == "text_ff"     ) cfg.text_ff      = metadata_int(val);
+        else if (key == "vis_dim"     ) cfg.vis_dim      = metadata_int(val);
+        else if (key == "vis_mlp"     ) cfg.vis_mlp      = metadata_int(val);
+        else if (key == "n_views"     ) cfg.n_views      = metadata_int(val);
         else if (key == "ln_eps"      ) cfg.ln_eps       = val;
     }
+
+    if (!shape_fits({cfg.n_layers, cfg.hidden, cfg.embed}) ||
+        !shape_fits({cfg.n_layers, cfg.hidden, cfg.hidden}) ||
+        !shape_fits({cfg.n_layers, cfg.text_ff, cfg.hidden}) ||
+        !shape_fits({cfg.vis_dim, cfg.vis_mlp}) || !shape_fits({cfg.hidden, cfg.vis_mlp}) ||
+        !shape_fits({cfg.hidden, cfg.vis_dim}) || !shape_fits({cfg.n_views, cfg.hidden}) ||
+        !std::isfinite(cfg.ln_eps) || cfg.ln_eps <= 0) return false;
 
     const bool bad = cfg.hidden < 1 || cfg.embed < 1 || cfg.n_layers < 1 ||
                      cfg.fusion_heads < 1 || cfg.text_heads < 1 || cfg.text_ff < 1 ||

@@ -19,6 +19,8 @@
 #endif
 #include <cassert>
 #include <cmath>
+#include <limits>
+#include <algorithm>
 #include <cstring>
 #include <cstddef>
 using std::size_t;
@@ -71,7 +73,7 @@ void pack_weights_i8(const float* W, int8_t* Wq, float* wscale, int N, int K) {
         }
         // An all-zero row would divide by zero; its quantized row is all zeros
         // anyway, so any nonzero scale works and 1 keeps the epilogue finite.
-        const float s = amax > 0.0f ? amax/127.0f : 1.0f;
+        const float s = amax > 0.0f ? std::max(amax/127.0f, std::numeric_limits<float>::min()) : 1.0f;
         wscale[n] = s;
 
         const int b = n/16, j = n%16;
@@ -101,7 +103,7 @@ static inline void quantize_row_neon(const float* xt, int8_t* q, float* scale, i
         if (a > amax) amax = a;
     }
 
-    const float s = amax > 0.0f ? amax/127.0f : 1.0f;
+    const float s = amax > 0.0f ? std::max(amax/127.0f, std::numeric_limits<float>::min()) : 1.0f;
     *scale = s;
     const float32x4_t inv = vdupq_n_f32(1.0f/s);
 
@@ -145,7 +147,7 @@ static inline void quantize_row_avx2(const float* xt, int8_t* q, float* scale, i
         if (a > amax) amax = a;
     }
 
-    const float s = amax > 0.0f ? amax/127.0f : 1.0f;
+    const float s = amax > 0.0f ? std::max(amax/127.0f, std::numeric_limits<float>::min()) : 1.0f;
     *scale = s;
     const __m256 inv  = _mm256_set1_ps(1.0f/s);
     const __m256i ord = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
@@ -231,7 +233,7 @@ void quantize_act_i8(const float* x, int8_t* xq, float* ascale, int seq, int K) 
             const float a = std::fabs(xt[k]);
             if (a > amax) amax = a;
         }
-        const float s = amax > 0.0f ? amax/127.0f : 1.0f;
+        const float s = amax > 0.0f ? std::max(amax/127.0f, std::numeric_limits<float>::min()) : 1.0f;
         ascale[t] = s;
 
         int8_t* q = xq+(size_t)t*Kp;

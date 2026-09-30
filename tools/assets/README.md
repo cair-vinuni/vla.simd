@@ -1,11 +1,18 @@
 # DINOv3 ViT-B/16 architecture config
 
-`facebook/dinov3-vitb16-pretrain-lvd1689m` is a gated repo, but TurboVLA does not
-need its weights: the vision tower is fine-tuned and ships inside the TurboVLA
-checkpoint. Only the architecture config and the image normalization are needed,
-and those are public. Both files here are verbatim copies from the ungated
-[`onnx-community/dinov3-vitb16-pretrain-lvd1689m-ONNX`](https://huggingface.co/onnx-community/dinov3-vitb16-pretrain-lvd1689m-ONNX) mirror.
+TurboVLA's checkpoint contains its fine-tuned DINOv3 vision weights. Conversion
+needs the architecture configuration and image normalization settings from the
+gated `facebook/dinov3-vitb16-pretrain-lvd1689m` model, but does not download its
+weights. The two JSON files here are unchanged copies from the public
+[ONNX Community mirror][mirror], revision `d704d636f7b114347fd2a9d6fecac5e1ef464db3`.
 
-`image_size` in the config is the mirror's 224; TurboVLA runs the tower at 256,
-which changes nothing in the model: DINOv3's RoPE table is computed from the
-actual pixel grid on every forward pass, not from the config.
+The configuration records an `image_size` of 224; TurboVLA uses 256×256 input.
+That changes the patch grid, while the learned weights retain the same shapes.
+DINOv3 computes its RoPE positions from the input grid on each forward pass.
+The converter uses the bundled image mean and standard deviation.
+
+Use the [TurboVLA environment](../../README.md#converter-environments) when
+converting. The Transformers cap preserves the hidden-state normalization that
+the trained policy expects.
+
+[mirror]: https://huggingface.co/onnx-community/dinov3-vitb16-pretrain-lvd1689m-ONNX/tree/d704d636f7b114347fd2a9d6fecac5e1ef464db3
