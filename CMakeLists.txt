@@ -304,6 +304,9 @@ if(PROJECT_IS_TOP_LEVEL AND NOT SKBUILD)
   add_test(NAME math COMMAND test_math)
   set_tests_properties(math PROPERTIES ENVIRONMENT OMP_NUM_THREADS=4)
   set_tests_properties(ops gguf math PROPERTIES TIMEOUT 120)
+  # packed GEMM GFLOP/s on the policies' layer shapes, for register-tile selection
+  add_executable(bench_tile tools/bench_tile.cpp)
+  target_link_libraries(bench_tile PRIVATE tcpu_ops)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -315,7 +318,7 @@ set(VLA_FIRST_PARTY
   vla_simd_octo vla_simd_act vla_simd_smolvla vla_simd_turbovla vla_simd_impact
   vla_simd_diffusion)
 if(TARGET test_ops)
-  list(APPEND VLA_FIRST_PARTY test_ops test_gguf test_math)
+  list(APPEND VLA_FIRST_PARTY test_ops test_gguf test_math bench_tile)
 endif()
 if(TARGET vla-simd-gguf)
   list(APPEND VLA_FIRST_PARTY vla-simd-gguf)
