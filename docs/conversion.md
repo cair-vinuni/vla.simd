@@ -27,6 +27,6 @@ uv pip install --python .octo --group octo
 
 TurboVLA also requires the upstream code checkout described in
 `tools/convert_turbovla.py`. Newer Transformers versions change that model's
-outputs or remove APIs it uses. The [dependency audit](benchmark/intel-core-ultra9-285k.md#dependency-decisions)
+outputs or remove APIs it uses. The [dependency audit](benchmark/intel-core-ultra-9-285k.md#dependency-decisions)
 records the tested versions and retained caps. Keep Octo in its own environment;
 its NumPy 1.x requirement conflicts with modern LeRobot.

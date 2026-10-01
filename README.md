@@ -107,7 +107,7 @@ and `--actions_per_chunk=4` for Octo.
 | [Conversion](docs/conversion.md) | Per-model converter environments and dependency caps |
 | [Development](docs/development.md) | Build, sanitizer and scalar tests, Python test environments, CI checks, Markdown lint |
 | [Device benchmarks](docs/benchmark/README.md) | Latency, memory and tuned settings on seven CPUs, one report per device |
-| [Validation audit](docs/benchmark/intel-core-ultra9-285k.md) | Loader and numerical fixes, reference parity, packing, dependency decisions (Core Ultra 9 285K) |
+| [Validation audit](docs/benchmark/intel-core-ultra-9-285k.md) | Loader and numerical fixes, reference parity, packing, dependency decisions (Core Ultra 9 285K) |
 
 ## Citation
 

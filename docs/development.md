@@ -41,7 +41,7 @@ OMP_NUM_THREADS=4 VLA_TEST_BUILD=build HF_HUB_OFFLINE=1 \
 The reference tests use random weights and matched noise, so they need no model
 downloads. Trained ACT, IMPACT, SmolVLA, and TurboVLA comparisons, measured
 packing and inference results, and remaining validation gaps are in the
-[benchmark report](benchmark/intel-core-ultra9-285k.md).
+[benchmark report](benchmark/intel-core-ultra-9-285k.md).
 
 ## Continuous integration
 
