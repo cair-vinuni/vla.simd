@@ -286,10 +286,10 @@ Staging uses filesystem fingerprints rather than content hashes, and assumes the
 checkpoint and sidecars are stable while loading. Its cache directory should be
 owned by the serving user.
 
-The server serializes session changes, observation adaptation, and inference on
-one session lock. A new observation waits while prediction is running. This
-keeps resets and history consistent, but its effect on camera throughput needs a
-robot-client measurement before further concurrency changes.
+The server serializes session changes and observation adaptation on one session
+lock, and predictions on a separate one. A new observation is accepted while a
+prediction is running; a session reset mid-prediction discards that prediction's
+result. The effect on observation age still needs a robot-client measurement.
 
 ## Next improvements by expected value
 
