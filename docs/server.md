@@ -19,6 +19,16 @@ configuration, backend, and runtime settings.
 | `TCPU_ZEN=0`, `TCPU_ZEN=1` | force the Intel or the AMD Zen attention layout on x86; the default follows the CPU vendor |
 | `TCPU_BF16_MLP=1`, `TCPU_BF16_DEQ=0` | bf16 MLP weights on the Pi; keep bf16 checkpoint weights resident on x86 |
 
+## Concurrency
+
+Inference runs one request at a time, outside the session lock, so the robot
+client's `SendObservations` returns as soon as the observation is validated and
+queued even while a prediction is in progress. The observation queue holds one
+entry and keeps the freshest, so the model always works on the newest
+observation the client has sent. `Ready` or new policy instructions arriving
+mid-prediction discard that prediction's result instead of handing it to the new
+session.
+
 ## Windows on Arm
 
 On Windows on Arm (Snapdragon X), build with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw),

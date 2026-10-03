@@ -927,6 +927,10 @@ def build_servicer_class(spec):
             self.engine = engine
             self.cfg = cfg
             self._session_lock = threading.RLock()
+            # Predictions run outside the session lock, one at a time under this
+            # one, so a SendObservations that lands mid-inference is accepted at
+            # once instead of waiting out the whole predict.
+            self._predict_lock = threading.Lock()
             self._generation = 0
             self.observation_queue = Queue(maxsize=1)
             self.shutdown_event = threading.Event()
@@ -1037,35 +1041,46 @@ def build_servicer_class(spec):
             except Empty:
                 return services_pb2.Empty()
 
+            # Snapshot the session under its lock, then predict without it. The
+            # robot client sends observations synchronously from its control
+            # loop, so holding the session lock for the whole predict stalled the
+            # loop for one inference per chunk. A Ready or SendPolicyInstructions
+            # that lands mid-inference bumps the generation; the result is then
+            # dropped rather than handed to the new session.
             with self._session_lock:
                 if generation != self._generation:
                     return services_pb2.Empty()
-                try:
-                    with self._predicted_lock:
-                        self._predicted_timesteps.add(obs.get_timestep())
-
+                adapter = self.adapter
+                with self._predicted_lock:
+                    self._predicted_timesteps.add(obs.get_timestep())
+            try:
+                with self._predict_lock:
                     t0 = time.perf_counter()
-                    chunk = self._predict(obs, adapted, stamp)
+                    chunk = self._predict(adapter, obs, adapted, stamp)
                     inference_ms = (time.perf_counter() - t0) * 1000
+                    with self._session_lock:
+                        if generation != self._generation:
+                            return services_pb2.Empty()
+                        self.last_processed_obs = obs
 
-                    with self._query_lock:
-                        n = self.n_queries
-                    if n % 10 == 1:
-                        logger.info(
-                            "chunk #%s | %d actions | %.0f ms | action[0]=%s",
-                            obs.get_timestep(), len(chunk), inference_ms,
-                            np.round(np.asarray(chunk[0].get_action()), 3).tolist(),
-                        )
-                    buf = io.BytesIO()
-                    ActionPickler(buf).dump(chunk)
-                    return services_pb2.Actions(data=buf.getvalue())
-                except Exception as e:
-                    with self._predicted_lock:
-                        self._predicted_timesteps.discard(obs.get_timestep())
-                    # An empty reply is what a timed-out queue returns, so a broken
-                    # engine would be indistinguishable from a quiet client.
-                    logger.exception("inference failed for observation #%s", obs.get_timestep())
-                    context.abort(_grpc_status().INTERNAL, f"inference failed: {e}")
+                with self._query_lock:
+                    n = self.n_queries
+                if n % 10 == 1:
+                    logger.info(
+                        "chunk #%s | %d actions | %.0f ms | action[0]=%s",
+                        obs.get_timestep(), len(chunk), inference_ms,
+                        np.round(np.asarray(chunk[0].get_action()), 3).tolist(),
+                    )
+                buf = io.BytesIO()
+                ActionPickler(buf).dump(chunk)
+                return services_pb2.Actions(data=buf.getvalue())
+            except Exception as e:
+                with self._predicted_lock:
+                    self._predicted_timesteps.discard(obs.get_timestep())
+                # An empty reply is what a timed-out queue returns, so a broken
+                # engine would be indistinguishable from a quiet client.
+                logger.exception("inference failed for observation #%s", obs.get_timestep())
+                context.abort(_grpc_status().INTERNAL, f"inference failed: {e}")
 
         # -- internals -------------------------------------------------------
         def _sanity_ok(self, obs, previous):
@@ -1093,12 +1108,17 @@ def build_servicer_class(spec):
                 return False
             return True
 
-        def _predict(self, timed_obs: "TimedObservation", adapted, stamp=None):
-            if self.adapter is None:
+        def _predict(self, adapter, timed_obs: "TimedObservation", adapted, stamp=None):
+            """One chunk from `adapter`, the session's adapter as of the pop.
+
+            Runs without the session lock; the caller records last_processed_obs
+            once it has checked the session is still the same one.
+            """
+            if adapter is None:
                 raise RuntimeError("no policy instructions received yet")
 
             if adapted is None:
-                adapted = self.adapter(timed_obs.get_observation())
+                adapted = adapter(timed_obs.get_observation())
 
             # Reserve AND advance under one lock. Incrementing only after
             # _predict returned let two concurrent workers take the same index,
@@ -1108,7 +1128,6 @@ def build_servicer_class(spec):
                 self.n_queries += 1
             kw = {"rtc": (timed_obs.get_timestep(), self.actions_per_chunk, *stamp)} if stamp else {}
             actions = self.engine.predict(adapted, self.cfg.seed + index, **kw)[: self.actions_per_chunk]
-            self.last_processed_obs = timed_obs
 
             t0 = timed_obs.get_timestamp()
             i0 = timed_obs.get_timestep()
